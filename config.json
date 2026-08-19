@@ -1,0 +1,36 @@
+{
+  "device_name": "Nigehban-01",
+  "user_name": "Ali",
+  "checkin_interval_s": 120,
+  "checkin_window_s": 45,
+  "interval_cycle_s": [
+    120,
+    900,
+    1800,
+    3600
+  ],
+  "disconnect_grace_s": 10,
+  "low_battery_pct": 20,
+  "home_lat": 24.8607,
+  "home_lon": 67.0011,
+  "home_radius_m": 150,
+  "use_ip_location": true,
+  "contacts": [
+    {
+      "name": "Ammi",
+      "phone": "+92300XXXXXXX"
+    },
+    {
+      "name": "Bhai",
+      "phone": "+92321XXXXXXX"
+    }
+  ],
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "callmebot_phone": "",
+  "callmebot_apikey": "",
+  "dashscope_api_key": "",
+  "dashscope_base": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  "qwen_model": "qwen-plus",
+  "language": "urdu+english"
+}

@@ -1,0 +1,10 @@
+# Band link + Guardian logic (nigehban_hub.py)
+bleak>=0.22.0
+requests>=2.31.0
+
+# Local server (server/nigehban_server.py)
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Optional: only needed by nigehban_bridge.py
+websockets>=12.0

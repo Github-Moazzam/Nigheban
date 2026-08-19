@@ -1,0 +1,83 @@
+{
+  "expo": {
+    "name": "Nigehban",
+    "slug": "nigehban-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nigehban.app",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Nigehban connects to your safety wristband over Bluetooth.",
+        "NSLocationWhenInUseUsageDescription": "Your location is attached to an alert so your family knows where to come."
+      }
+    },
+    "android": {
+      "package": "com.nigehban.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#0B1310"
+      },
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.INTERNET"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0B1310"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": [
+            "peripheral",
+            "central"
+          ],
+          "bluetoothAlwaysPermission": "Nigehban connects to your safety wristband over Bluetooth."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Your location is attached to an alert so your family knows where to come."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ac29701a-e36d-4e87-97a3-86d7b4fa035f"
+      }
+    },
+    "owner": "moaxxx",
+    "scheme": "nigehban"
+  }
+}

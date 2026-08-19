@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------- runtime data
+# The database holds real accounts, password hashes and live auth tokens.
+# events.jsonl holds location history. Neither belongs in a public repo.
+server/*.db
+server/*.db-wal
+server/*.db-shm
+*.sqlite
+*.sqlite3
+events.jsonl
+
+# ------------------------------------------------------------------- secrets
+.env
+.env.*
+!.env.example
+google-services.json
+GoogleService-Info.plist
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# -------------------------------------------------------------- dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/releases
+
+# ------------------------------------------------------------------ JS build
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+*.jsbundle
+*.hbc
+
+# Regenerated from app.json by `expo prebuild` -- committing it means your
+# plugin and permission changes silently stop applying.
+android/
+ios/
+
+# -------------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ------------------------------------------------------------------- Arduino
+nigehban_band_esp32/build/
+nigehban_band_esp32/*.bin
+nigehban_band_esp32/*.elf
+nigehban_band_esp32/*.map
+
+# ------------------------------------------------------------- editors and OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+
+# ---------------------------------------------------------------------- misc
+*.log
+npm-debug.log*
+yarn-error.log*
+files.zip
