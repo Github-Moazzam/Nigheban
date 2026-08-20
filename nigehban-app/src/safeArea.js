@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Platform, TurboModuleRegistry } from 'react-native';
 
 /**
  * Android 16 makes edge-to-edge mandatory, so the app draws underneath the
@@ -7,19 +7,23 @@ import { Platform } from 'react-native';
  *
  * react-native-safe-area-context measures that bar properly, but an APK built
  * before it was added does not contain the native module -- and that APK still
- * loads this JavaScript from Metro. So the module is resolved once at import
- * time and we fall back to a constant that clears both gesture and three-button
- * navigation. The reference never changes between renders, so the hook below
- * keeps a stable call order.
+ * loads this JavaScript from Metro. require() is no help there: it resolves out
+ * of node_modules whether or not the binary was built with the module, so the
+ * JS loads and the crash lands later, when Fabric looks up the
+ * 'RNCSafeAreaProvider' view manager. Asking the native registry directly is
+ * the check that matches the binary. It runs once at import time and falls back
+ * to a constant that clears both gesture and three-button navigation. The
+ * reference never changes between renders, so the hook below keeps a stable
+ * call order.
  */
 let useInsets = null;
 let Provider = null;
-try {
+// Returns null when the module is absent from the binary, so this is the one
+// probe that tells us whether the native view managers exist.
+if (TurboModuleRegistry.get('RNCSafeAreaContext')) {
   const mod = require('react-native-safe-area-context');
   useInsets = mod.useSafeAreaInsets;
   Provider = mod.SafeAreaProvider;
-} catch {
-  /* older build: constants below are used instead */
 }
 
 export const hasSafeAreaModule = !!useInsets;
