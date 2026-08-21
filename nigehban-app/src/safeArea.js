@@ -20,7 +20,7 @@ let useInsets = null;
 let Provider = null;
 // Returns null when the module is absent from the binary, so this is the one
 // probe that tells us whether the native view managers exist.
-if (TurboModuleRegistry.get('RNCSafeAreaContext')) {
+if (TurboModuleRegistry?.get?.('RNCSafeAreaContext')) {
   const mod = require('react-native-safe-area-context');
   useInsets = mod.useSafeAreaInsets;
   Provider = mod.SafeAreaProvider;

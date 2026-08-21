@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, Platform, StyleSheet, Text, TextInput, View,
 } from 'react-native';
+import WatchStatusTile from '../components/WatchStatusTile';
 import { call } from '../api';
 import { C, MONO } from '../theme';
 import { Button, Card, Label, Pill } from '../ui';
@@ -39,7 +40,15 @@ export default function Family({ session, refreshKey }) {
         call(session, '/family'),
         call(session, '/invites'),
       ]);
-      setMembers(m);
+      const membersWithWatch = await Promise.all(m.map(async (member) => {
+        try {
+          const w = await call(session, `/watch/${member.id}`);
+          return { ...member, watchState: w };
+        } catch {
+          return { ...member, watchState: null };
+        }
+      }));
+      setMembers(membersWithWatch);
       setInvites(i);
       setErr(null);
     } catch (e) {
@@ -274,7 +283,7 @@ export default function Family({ session, refreshKey }) {
           </Text>
       }
       renderItem={({ item }) => (
-        <Card style={{ marginTop: 10 }}>
+        <Card style={{ marginTop: 10, gap: 10 }}>
           <View style={s.row}>
             <View style={{ flex: 1 }}>
               <Text style={s.name}>{item.name}</Text>
@@ -286,13 +295,12 @@ export default function Family({ session, refreshKey }) {
                   tone={item.online ? C.green : C.faint}
                   bg={item.online ? C.greenBg : 'transparent'} />
           </View>
-          <View style={s.btnRow}>
-            <View style={{ flex: 1 }}>
-              <Button title="ASK FOR A CHECK-IN" tone={C.green} onPress={() => checkin(item)} />
-            </View>
-            <View style={{ flex: 0 }}>
-              <Button title="REMOVE" tone={C.faint} onPress={() => remove(item)} />
-            </View>
+          {item.watchState ? (
+            <WatchStatusTile watchState={item.watchState} isVirtual={!item.watchState.band_link} />
+          ) : null}
+          <View style={{ gap: 8, marginTop: 4 }}>
+            <Button title="ASK FOR A CHECK-IN" tone={C.green} filled onPress={() => checkin(item)} />
+            <Button title="REMOVE MEMBER" tone={C.dim} onPress={() => remove(item)} />
           </View>
         </Card>
       )}
