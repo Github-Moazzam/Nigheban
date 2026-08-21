@@ -843,6 +843,7 @@ approval, object storage and a third-party messaging API.
 ```
 Nigheban/
 ├── EXECUTION_PLAN.md           this file — phases, contracts, schema, skeletons
+├── HARDWARE_CIRCUIT.md         wiring, pin maps and bring-up code for both boards
 ├── README.md                   what the project is and how to run it
 ├── server/nigehban_server.py   accounts, family, alerts, live push  [+ sweeper]
 ├── nigehban-app/

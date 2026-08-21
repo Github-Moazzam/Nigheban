@@ -40,8 +40,8 @@ configurable base URL, so moving between them is one setting.
 
 > **The motor never connects straight to a GPIO pin.** A coin ERM pulls 60–100 mA
 > at start and an nRF52840 pin supplies a couple. Transistor, flyback diode, and
-> a 100 µF bulk cap — the wiring diagram and the reason for each part are in
-> [EXECUTION_PLAN.md](EXECUTION_PLAN.md).
+> a 100 µF bulk cap — pin-by-pin wiring, the reason for each part, and the
+> bring-up sketches are in [HARDWARE_CIRCUIT.md](HARDWARE_CIRCUIT.md).
 
 ---
 
@@ -143,6 +143,7 @@ All of that works without Bluetooth, using the simulated band.
 
 ```
 EXECUTION_PLAN.md           phases, contracts, schema, circuit, v2 designs
+HARDWARE_CIRCUIT.md         wiring: ESP32 bench rig, then the real nRF52840 band
 server/nigehban_server.py   accounts, family links, alerts, live push
 nigehban-app/
   App.js                    shell, alert takeover, band -> server wiring
