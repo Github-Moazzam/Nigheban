@@ -16,10 +16,26 @@
       - University and cafe Wi-Fi almost always has client isolation on, which
         silently breaks phone-to-laptop on the same SSID. This does not care.
 
-    The free-tier URL changes on every restart. That is survivable because the
-    app stores the address rather than baking it in -- paste the new one on the
-    Auth screen and carry on.
+    Free-tier URLs rotate on every restart, which means re-pasting the address
+    into every phone each morning. Reserve a domain at dashboard.ngrok.com (the
+    free plan includes one) and pass it as -Domain, or set it once and forget:
+
+        setx NIGEHBAN_NGROK_DOMAIN overcoat-quizzical-chatty.ngrok-free.dev
+
+    Either way the app stores the address rather than baking it in, so a rotated
+    URL is recoverable -- paste the new one on the Auth screen and carry on.
 #>
+
+param(
+    # A reserved ngrok domain, so the address in the phones never changes.
+    # Usually left unset here and put in .env at the repo root instead:
+    #
+    #     NIGEHBAN_NGROK_DOMAIN=overcoat-quizzical-chatty.ngrok-free.dev
+    #
+    # With no domain at all the tunnel gets a random address, and every phone
+    # has to be re-pasted after each restart.
+    [string] $Domain
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -34,23 +50,62 @@ Write-Host ''
 Write-Host '  NIGEHBAN DEV TUNNEL' -ForegroundColor Green
 Write-Host '  -------------------' -ForegroundColor DarkGray
 
+# ---- .env ----------------------------------------------------------------
+# A plain KEY=VALUE file at the repo root, already gitignored, so a reserved
+# domain lives with the project instead of in your Windows user environment --
+# and every teammate keeps their own without touching the repo.
+#
+# Deliberately not `Invoke-Expression`: a .env is data, and running it as
+# PowerShell would make an innocuous-looking config file arbitrary code.
+#
+# Precedence, most specific first:  -Domain  >  the shell  >  .env
+$EnvFile = Join-Path $Root '.env'
+if (Test-Path $EnvFile) {
+    foreach ($line in (Get-Content $EnvFile)) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        $eq = $t.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $k = $t.Substring(0, $eq).Trim()
+        $v = $t.Substring($eq + 1).Trim().Trim('"').Trim("'")
+        # An already-exported variable wins, so a one-off override still works.
+        if (-not [Environment]::GetEnvironmentVariable($k)) {
+            Set-Item -Path "env:$k" -Value $v
+        }
+    }
+    Write-Step 'loaded .env'
+}
+
+if (-not $Domain) { $Domain = $env:NIGEHBAN_NGROK_DOMAIN }
+
 # ---- prerequisites -------------------------------------------------------
 if (-not (Test-Path $ServerPy)) {
     Write-Bad "Cannot find $ServerPy"
     exit 1
 }
 
-$py = (Get-Command python -ErrorAction SilentlyContinue)
-if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue) }
-if (-not $py) {
-    Write-Bad 'python is not on PATH. Install Python 3.10+ and try again.'
-    exit 1
+# The venv first, deliberately. A global python that happens to be on PATH is
+# the one without fastapi in it, and the check below would then tell you to
+# install something you have already installed -- into an interpreter that is
+# never going to run the server.
+$py = Join-Path $Root '.venv\Scripts\python.exe'
+if (-not (Test-Path $py)) {
+    $cmd = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $cmd) { $cmd = (Get-Command py -ErrorAction SilentlyContinue) }
+    if (-not $cmd) {
+        Write-Bad 'No python found. Create the venv and install the deps:'
+        Write-Host '      python -m venv .venv' -ForegroundColor Yellow
+        Write-Host '      .\.venv\Scripts\python.exe -m pip install -r requirements.txt' -ForegroundColor Yellow
+        exit 1
+    }
+    $py = $cmd.Source
 }
+Write-Step "python: $py"
 
-& $py.Source -c "import fastapi, uvicorn" 2>$null
+& $py -c "import fastapi, uvicorn" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Bad 'FastAPI is not installed. Run this first:'
-    Write-Host "      $($py.Source) -m pip install -r requirements.txt" -ForegroundColor Yellow
+    Write-Bad 'FastAPI is not installed for that interpreter. Run this first:'
+    Write-Host "      $py -m pip install -r requirements.txt" -ForegroundColor Yellow
     exit 1
 }
 
@@ -68,7 +123,7 @@ if ($serverUp) {
     Write-Step "server already listening on $Port -- leaving it alone"
 } else {
     Write-Step "starting the server on $Port"
-    Start-Process -FilePath $py.Source -ArgumentList $ServerPy -WorkingDirectory $Root
+    Start-Process -FilePath $py -ArgumentList $ServerPy -WorkingDirectory $Root
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
         if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) { break }
@@ -93,11 +148,30 @@ function Get-TunnelUrl {
 }
 
 $url = Get-TunnelUrl
+
+# A tunnel that is already up on the wrong address is worse than none: it looks
+# like success, and every phone is pointed somewhere else. Free ngrok runs one
+# agent at a time, so the fix is to close it rather than open a second.
+if ($url -and $Domain -and $url -notmatch [regex]::Escape($Domain)) {
+    Write-Bad "a tunnel is already open on $url -- that is not $Domain"
+    Write-Host '      free ngrok allows one agent at a time. Close it, then re-run:' -ForegroundColor Yellow
+    Write-Host '      Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process' -ForegroundColor Yellow
+    exit 1
+}
+
 if ($url) {
     Write-Step 'a tunnel is already open -- reusing it'
 } else {
-    Write-Step 'opening the tunnel'
-    Start-Process -FilePath $ngrok.Source -ArgumentList 'http', "$Port", '--log=stdout'
+    $ngrokArgs = @('http', "$Port", '--log=stdout')
+    if ($Domain) {
+        # --url is the current flag. Older CLIs spell it --domain; if the tunnel
+        # never appears, the failure message below names the alternative.
+        $ngrokArgs += "--url=$Domain"
+        Write-Step "opening the tunnel on $Domain"
+    } else {
+        Write-Step 'opening the tunnel (random address -- see -Domain)'
+    }
+    Start-Process -FilePath $ngrok.Source -ArgumentList $ngrokArgs
     $deadline = (Get-Date).AddSeconds(25)
     while ((Get-Date) -lt $deadline -and -not $url) {
         Start-Sleep -Milliseconds 600
@@ -109,6 +183,10 @@ if (-not $url) {
     Write-Bad 'ngrok did not report a tunnel.'
     Write-Host '      Most often this is a missing authtoken:' -ForegroundColor Yellow
     Write-Host '      ngrok config add-authtoken <token from dashboard.ngrok.com>' -ForegroundColor Yellow
+    if ($Domain) {
+        Write-Host '      The other cause is an older ngrok that spells it --domain:' -ForegroundColor Yellow
+        Write-Host "      ngrok http $Port --domain=$Domain" -ForegroundColor Yellow
+    }
     exit 1
 }
 
@@ -136,7 +214,12 @@ if ($healthy) {
 Write-Host '  ==================================================================' -ForegroundColor Green
 Write-Host ''
 Write-Step 'ngrok inspector (every request, replayable): http://127.0.0.1:4040'
-Write-Step 'this URL changes when ngrok restarts -- re-run this script and re-paste'
+if ($Domain) {
+    Write-Step 'this address is reserved -- it survives restarts, so paste it once'
+} else {
+    Write-Step 'this URL changes when ngrok restarts -- re-run this script and re-paste'
+    Write-Step 'to stop that: reserve a domain at dashboard.ngrok.com, then -Domain <it>'
+}
 Write-Host ''
 
 try { Set-Clipboard -Value $url; Write-Step 'copied to your clipboard' } catch { }

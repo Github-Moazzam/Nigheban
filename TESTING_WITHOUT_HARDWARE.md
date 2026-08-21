@@ -197,7 +197,7 @@ Then keep going — every one of these works today:
 None of it is hardware-blocked.
 
 **B1 (consent) and B2 (the sweeper) are done** — 22 Aug 2026. Run
-`python tests/test_consent_and_sweeper.py` against a running server to see both,
+`.venv\Scripts\python.exe tests/test_consent_and_sweeper.py` against a running server to see both,
 including a check-in escalating on its own deadline with no phone attached.
 
 1. **N1 — the EAS dev build.** Now the longest pole on the board, and the one
