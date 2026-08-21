@@ -226,7 +226,10 @@ Mesh SOS and anti-theft lockdown, designed and ready to build.
 | `hb` | every 10 s | heartbeat only, never an alert | — |
 
 *Reserved for v2, emit but ignore server-side for now:* `armed` / `disarmed`
-(4 taps) and `beacon_mode`.
+and `beacon_mode`. **No gesture is bound to either.** Anti-snatch is deferred,
+and the 4-tap binding this section originally reserved for `armed` cannot be
+used: 2+ taps is SOS, so a 4-tap `armed` would let an over-tapped SOS arm
+anti-snatch instead of calling for help. v2 needs a different affordance.
 
 ### Phone → band (NUS RX `6E400002-…`)
 
@@ -293,22 +296,34 @@ CREATE TABLE presence (                 -- Good Samaritan
 CREATE INDEX idx_presence_geo ON presence(geohash6, updated_at);
 ```
 
-### 6.2 New endpoints — agree these on Day 1, implement later
+### 6.2 New endpoints — ☑ built 22 Aug 2026 except the last two
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/device` | register install id + push token |
-| `POST` | `/heartbeat` | `{mode, band_link, phone_batt, lat, lon}` every 60 s while armed |
-| `POST` | `/invite` | replaces the auto-link in `POST /family` |
-| `POST` | `/invite/{id}/accept` | creates the mutual link |
-| `POST` | `/checkin/{member_id}` | creates a `checkins` row with `due_at` |
-| `POST` | `/checkin/{id}/ack` | band or app answers |
-| `POST` | `/watch/high_alert` | arm/disarm; server owns `next_buzz_at` |
-| `GET` | `/watch/{member_id}` | family-facing health: band link, service, last beat |
-| `POST` | `/presence` | coarse location for Good Samaritan |
-| `POST` | `/samaritan/{alert_id}/respond` | "I'm going" — releases a coarse pin, logs the responder |
+| Method | Path | Purpose | |
+|---|---|---|---|
+| `POST` | `/device` | register install id + push token | ☑ |
+| `POST` | `/heartbeat` | `{mode, band_link, phone_batt, lat, lon}` every 60 s while armed | ☑ |
+| `POST` | `/pair` | issue a one-time, ten-minute pairing code | ☑ new |
+| `POST` | `/invite` | redeem a pairing code, or ask by user code | ☑ |
+| `GET` | `/invites` | what is waiting on me, and what I am waiting on | ☑ new |
+| `POST` | `/invite/{id}/accept` | creates the mutual link | ☑ |
+| `POST` | `/invite/{id}/decline` | permanent, and silent | ☑ new |
+| `POST` | `/checkin/{member_id}` | creates a `checkins` row with `due_at` | ☑ |
+| `POST` | `/checkin/{id}/ack` | band or app answers | ☑ |
+| `POST` | `/watch/high_alert` | arm/disarm; server owns `next_buzz_at` | ☑ |
+| `GET` | `/watch/{member_id}` | family-facing health: band link, service, last beat | ☑ |
+| `POST` | `/presence` | coarse location for Good Samaritan | ☐ |
+| `POST` | `/samaritan/{alert_id}/respond` | "I'm going" — releases a coarse pin, logs the responder | ☐ |
+
+`POST /family` is **gone** — it returns 410 rather than failing open for an old
+build. Two paths replace it and both need two people to act; the reasoning is in
+§13 of [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ### 6.3 The sweeper — the piece that makes it work with the app killed
+
+☑ **Built 22 Aug 2026** as `sweeper()` / `sweep_once()` in
+`server/nigehban_server.py`. The sketch below is what was implemented, plus a
+latch column on each branch (`escalated`, `lost_notified`) so a condition that
+stays true pages the family once rather than every five seconds.
 
 One asyncio task, 5-second tick, ported from `Guardian` in `nigehban_hub.py`:
 

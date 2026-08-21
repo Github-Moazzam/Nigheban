@@ -5,12 +5,14 @@ import {
   StyleSheet, Text, Vibration, View,
 } from 'react-native';
 import { call, clearSession, loadSession, useLive } from './src/api';
-import { useBand } from './src/band';
+import { useBandLink } from './src/bandLink';
 import Alerts from './src/screens/Alerts';
+import Band from './src/screens/Band';
 import Auth from './src/screens/Auth';
 import Family from './src/screens/Family';
 import Home from './src/screens/Home';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
+import { useHeartbeat } from './src/watch';
 import { C, MONO, sevColor } from './src/theme';
 import { Button, Pill } from './src/ui';
 
@@ -18,6 +20,7 @@ const mono = Platform.select(MONO);
 
 const TABS = [
   ['home', 'HOME'],
+  ['band', 'BAND'],
   ['family', 'FAMILY'],
   ['alerts', 'ALERTS'],
 ];
@@ -59,6 +62,7 @@ function Main() {
   const [incoming, setIncoming] = useState(null);   // full-screen takeover
   const [checkinFrom, setCheckinFrom] = useState(null);
   const [activeSos, setActiveSos] = useState(null); // my own live SOS
+  const [highAlert, setHighAlert] = useState(false);
   const [toast, setToast] = useState(null);
 
   const insets = useEdgeInsets();
@@ -118,11 +122,48 @@ function Main() {
       if (activeRef.current) resolve(activeRef.current.id);
       else raise({ kind: 'checkin_ack', source: 'band' });
     } else if (ev.e === 'fall') {
-      raise({ kind: 'fall', source: 'band' });
+      raise({ kind: 'fall', source: 'band', note: ev.peak ? `peak ${ev.peak}g` : '' });
+    } else if (ev.e === 'snatch') {
+      // The band left the wrist while armed. Same urgency as an SOS, but the
+      // wearer did not choose it, so the alert has to record which it was.
+      if (!activeRef.current) raise({ kind: 'snatch', source: 'band' });
+    } else if (ev.e === 'low_battery') {
+      raise({ kind: 'low_battery', source: 'band', note: `${ev.pct ?? '?'}%` });
+    } else if (ev.e === 'high_alert_on' || ev.e === 'high_alert_off') {
+      // High Alert is a server-owned mode, and now actually is one. The server
+      // holds `next_buzz_at` and re-buzzes on its own tick, so the mode
+      // survives this app being killed -- which is the exact scenario it
+      // exists for. The band's hold-3s is only the switch.
+      const on = ev.e === 'high_alert_on';
+      setHighAlert(on);
+      (async () => {
+        try {
+          await call(session, '/watch/high_alert', { method: 'POST', body: { on } });
+          setToast(on
+            ? 'High Alert on — the server will check on you every few minutes, '
+              + 'even if this app is closed'
+            : 'High Alert off');
+        } catch (e) {
+          // Say what actually happened. A band that buzzed twice while the
+          // server never heard is worse than a plain failure, because the
+          // wearer now believes they are being watched.
+          setHighAlert(!on);
+          setToast(`could not reach the server — High Alert is NOT ${on ? 'on' : 'off'}`);
+        }
+      })();
     }
-  }, [raise, resolve]);
+  }, [raise, resolve, session]);
 
-  const band = useBand(onBandEvent);
+  const band = useBandLink(onBandEvent);
+
+  // The server's watchdog listens for silence, so the phone has to speak while
+  // anything is armed. Foreground only for now -- N2's foreground service is
+  // what keeps this going once Android backgrounds the app.
+  useHeartbeat(session, {
+    mode: activeSos ? 'sos' : highAlert ? 'high_alert' : 'idle',
+    bandLink: band.status === 'connected' || band.status === 'virtual',
+    batt: band.battery,
+  });
 
   // ---- live socket --------------------------------------------------------
   const serverOnline = useLive(session, {
@@ -145,10 +186,26 @@ function Main() {
     checkin_req: (m) => {
       setCheckinFrom(m.from);
       Vibration.vibrate([0, 200, 100, 200]);
-      band.send({ c: 'checkin_req', window: 45 });   // buzz the band too
+      band.send({ c: 'checkin_req', window: m.window ?? 45 });   // buzz the band too
       notify(`${m.from.name} is checking on you`, 'Tap "I am fine" to answer.');
     },
-    family_added: (m) => { setToast(`${m.user.name} added you to their family`); bump(); },
+    // The sweeper's own knock, on the server's schedule rather than anyone's
+    // thumb. It looks the same to the wearer, which is the point: the mode
+    // keeps working whether or not a family member is awake.
+    buzz_now: (m) => {
+      setCheckinFrom({ name: null, system: true, reason: m.reason });
+      Vibration.vibrate([0, 400, 200, 400]);
+      band.send({ c: 'checkin_req', window: m.window ?? 90 });
+      notify('Nigehban is checking on you', 'Tap "I am fine" to answer.');
+    },
+    checkin_ack: (m) => setToast(`${m.by.name} answered — they are fine`),
+    invite: (m) => {
+      setToast(`${m.invite.from.name} is asking to be your family — open FAMILY to answer`);
+      notify(`${m.invite.from.name} wants to be your family`,
+             'Nothing is shared until you accept.');
+      bump();
+    },
+    family_added: (m) => { setToast(`${m.user.name} is now in your family`); bump(); },
   });
 
   const signOut = async () => {
@@ -195,8 +252,10 @@ function Main() {
       <View style={st.flex}>
         {tab === 'home' && (
           <Home session={session} band={band} activeSos={activeSos}
-                onRaise={raise} onResolve={resolve} serverOnline={serverOnline} />
+                onRaise={raise} onResolve={resolve} serverOnline={serverOnline}
+                onOpenBand={() => setTab('band')} />
         )}
+        {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
         {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}
         {tab === 'alerts' && <Alerts session={session} refreshKey={refreshKey} />}
       </View>
@@ -222,7 +281,8 @@ function Main() {
         {incoming ? (
           <View style={[st.takeover, { backgroundColor: C.alarmBg }]}>
             <Text style={[st.takeKind, { color: sevColor(incoming.severity) }]}>
-              {incoming.kind === 'fall' ? 'FALL DETECTED' : 'SOS'}
+              {incoming.kind === 'fall' ? 'FALL DETECTED'
+                : incoming.kind === 'snatch' ? 'BAND TORN OFF' : 'SOS'}
             </Text>
             <Text style={st.takeName}>{incoming.user.name}</Text>
             <Text style={st.takeMeta}>
@@ -251,10 +311,14 @@ function Main() {
         <View style={st.sheetWrap}>
           <View style={st.sheet}>
             <Text style={st.sheetTitle}>
-              {checkinFrom?.name} is checking on you
+              {checkinFrom?.system
+                ? 'Nigehban is checking on you'
+                : `${checkinFrom?.name} is checking on you`}
             </Text>
             <Text style={st.sheetBody}>
-              Answer and they will see straight away that you are fine.
+              {checkinFrom?.system
+                ? 'High Alert is on. Answer, or your family is told you did not.'
+                : 'Answer and they will see straight away that you are fine.'}
             </Text>
             <Button title="I AM FINE" filled big tone={C.green}
                     onPress={async () => {
@@ -262,7 +326,7 @@ function Main() {
                       setCheckinFrom(null);
                       await raise({ kind: 'checkin_ack', source: 'app' });
                     }} />
-            <Button title="not now" tone={C.dim}
+            <Button title={checkinFrom?.system ? 'later' : 'not now'} tone={C.dim}
                     onPress={() => { Vibration.cancel(); setCheckinFrom(null); }} />
           </View>
         </View>

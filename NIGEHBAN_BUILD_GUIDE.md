@@ -14,7 +14,7 @@
 |---|---|---|
 | Change a rule and see the result | ~2 seconds | 40–90 seconds per build/install |
 | See why BLE dropped | full log in terminal | logcat filtering, on a device you're holding |
-| Test "band is snatched" | type `drop` | actually walk away from your desk |
+| Test "band is snatched" | type `h5` then `drop` | `h5`, then actually walk away from your desk |
 | Test 5 failure paths in a row | 30 seconds | 10 minutes |
 
 You have **5 days**. Burning day 1 fighting Gradle and Android BLE permissions is how hackathon teams end up with hardware that blinks and no logic. The laptop hub lets you get **all the decision logic correct and demo-able by tonight**, and then the Android app becomes a porting job against a spec that already works, not a design job.
@@ -30,22 +30,29 @@ You have **5 days**. Burning day 1 fighting Gradle and Android BLE permissions i
   ┌──────────────────┐   BLE/NUS    ┌──────────────────────────────┐
   │ gesture engine   │ ───JSON────▶ │ check-in dead-man's switch   │
   │  click / x2 / x3 │              │ SOS handler                  │
-  │  hold 3s / 5s    │ ◀──JSON───── │ snatch detect (+10s debounce)│
+  │  hold 3s         │ ◀──JSON───── │ snatch detect (+10s debounce)│
   │  buzz + LED      │   commands   │ fall confirm-then-escalate   │
   └──────────────────┘              │ location + Qwen risk brief   │
                                     │ dispatch → Telegram/WhatsApp │
                                     └──────────────────────────────┘
 ```
 
-Your requested mapping is already wired in:
+The mapping follows `EXECUTION_PLAN.md` §5, and the firmware, the hub and the
+app all implement exactly this:
 
 | You press | Event sent | Hub does |
 |---|---|---|
-| Button A ×1 | `checkin_ack` | Cancels the pending check-in alert — "I'm fine", nothing goes to family |
-| Button B ×1 | `sos` | Immediate SOS with location (this becomes **A ×2/×3** on the real band) |
-| Button A ×3 | `sos` | Same path, `src: triple_tap` — proves the final gesture already works |
-| Button A hold 3s | `interval_cycle` | Cycles check-in interval 2 min → 15 → 30 → 60 |
-| Button A hold 5s | `armed` / `disarmed` | Arms anti-snatch mode |
+| Button A ×1 | `checkin_ack` | Cancels the pending check-in — "I'm fine", nothing goes to family |
+| Button A ×2 | `sos` | Immediate SOS with location, `src: double_tap` — the real band's gesture |
+| Button A ×3, ×4, ×5 | `sos` | The same. Over-tapping in a panic must never be a no-op |
+| Button A hold 3s | `high_alert_on` / `high_alert_off` | Toggles High Alert — tightest check-in interval while on |
+| Button B ×1 | `sos` | Prototyping convenience, `src: button_b`; the shipped band has one key |
+
+**Nothing is bound to a 5 s hold.** Anti-snatch is a v2 feature, so the wearer
+has two gestures to remember rather than three, and holding past 3 s crosses
+nothing further. The hub still accepts `armed` / `disarmed` and the `h5` key
+still sends them, so the snatch path stays testable without a gesture behind
+it.
 
 ---
 
@@ -113,7 +120,7 @@ Run these tonight. If all six pass, your logic layer is done and everything afte
 2. **Check-in ignored** — wait for the buzz, do nothing for 45 s → dispatch fires, severity 3.
 3. **SOS** — press B → immediate severity-5 dispatch with a maps link, band alarms.
 4. **Interval change** — hold A 3 s → buzz, hub logs the new interval.
-5. **Snatch** — hold A 5 s to arm, then power off the ESP32 → hub waits the 10 s grace, *then* declares a snatch. Now repeat but power it back on at 5 s → **no alert**. That second half is the important test.
+5. **Snatch** — type `h5` to arm (there is no band gesture for it yet), then power off the ESP32 → hub waits the 10 s grace, *then* declares a snatch. Now repeat but power it back on at 5 s → **no alert**. That second half is the important test.
 6. **Low battery** — type `bat 15` → severity-1 "he's fine, phone is dying" message.
 
 ---
@@ -141,11 +148,11 @@ Run these tonight. If all six pass, your logic layer is done and everything afte
 | `checkin_ack` | User pressed "I'm OK" | Cancel escalation, reset timer |
 | `checkin_prompted` | Band buzzed the user | Log only |
 | `checkin_missed` | Band's local nag expired | Log only — **phone owns escalation** |
-| `sos` | Triple-tap or SOS press | Escalate immediately, severity 5 |
+| `sos` | Double-tap (or more), or the SOS key | Escalate immediately, severity 5 |
 | `fall` | IMU fall pattern | Ask first, escalate on silence |
-| `armed` / `disarmed` | Anti-snatch mode toggled | Enable/disable snatch detection |
-| `interval_cycle` | Hold-3s | Advance check-in interval, buzz back N times |
-| `tap` | Double tap | Spare — map later |
+| `armed` / `disarmed` | Anti-snatch mode toggled | Enable/disable snatch detection — v2; no gesture emits these today |
+| `high_alert_on` / `high_alert_off` | Hold-3s | Toggle High Alert; tightens the check-in interval while on |
+| `interval_cycle` | *(legacy)* | No longer emitted; handled so an older flashed band still works |
 
 ### Phone → band commands
 

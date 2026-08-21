@@ -40,7 +40,7 @@ export async function probe(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2500);
   try {
-    const r = await fetch(url + '/health', { signal: ctrl.signal });
+    const r = await fetch(url + '/health', { signal: ctrl.signal, headers: TUNNEL_HEADERS });
     if (!r.ok) return false;
     const j = await r.json();
     return !!(j && j.ok);
@@ -101,14 +101,51 @@ export async function discoverServers(onProgress) {
   return found;
 }
 
-/** Accepts "192.168.1.5", "192.168.1.5:8000" or a full URL and normalises it. */
+/**
+ * Normalises anything a person might paste into the address box.
+ *
+ * Three shapes have to work, and the old rule (always http, always :8000)
+ * silently broke two of them:
+ *
+ *   192.168.1.5            -> http://192.168.1.5:8000   the laptop on this Wi-Fi
+ *   a1b2c3.ngrok-free.app  -> https://a1b2c3.ngrok-free.app   the tunnel
+ *   nigehban.example.com   -> https://nigehban.example.com    the cloud
+ *
+ * The rule: a bare IPv4 (or localhost) is the laptop, so it gets http and the
+ * dev port. Anything with a name is a public host, so it gets https and
+ * whatever port that scheme implies. Appending :8000 to a tunnel address is
+ * what makes it fail, and it fails as a timeout rather than an error, which
+ * costs an hour of blaming the firewall.
+ */
 export function normaliseUrl(raw) {
   let u = (raw || '').trim().replace(/\/+$/, '');
   if (!u) return '';
-  if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
-  if (!/:\d+$/.test(u.replace(/^https?:\/\//i, ''))) u += ':8000';
+
+  const hasScheme = /^https?:\/\//i.test(u);
+  const body = u.replace(/^https?:\/\//i, '');
+  const host = body.split('/')[0].split(':')[0];
+  const isLocal = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host === 'localhost';
+
+  if (!hasScheme) u = (isLocal ? 'http://' : 'https://') + u;
+
+  // Only a local address gets the dev port filled in for it.
+  const portless = !/:\d+(\/|$)/.test(body);
+  if (isLocal && portless && /^http:\/\//i.test(u)) u += ':' + SERVER_PORT;
+
   return u;
 }
+
+/** ws:// for a plain server, wss:// for a tunnel or the cloud. */
+export function wsUrl(httpUrl) {
+  return httpUrl.replace(/^http/i, 'ws');
+}
+
+/**
+ * ngrok serves an HTML interstitial to anything that looks like a browser,
+ * which arrives as a 200 full of HTML and turns into a confusing JSON parse
+ * error. This header opts out of it, and it is harmless everywhere else.
+ */
+export const TUNNEL_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
 
 export async function saveSession(s) {
   await AsyncStorage.setItem(KEY, JSON.stringify(s));
@@ -136,6 +173,7 @@ export async function call(session, path, { method = 'GET', body } = {}) {
       signal: ctrl.signal,
       headers: {
         'Content-Type': 'application/json',
+        ...TUNNEL_HEADERS,
         ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -149,10 +187,10 @@ export async function call(session, path, { method = 'GET', body } = {}) {
     return data;
   } catch (e) {
     if (e.name === 'AbortError') {
-      throw new Error('the server did not answer — same Wi-Fi? is it running?');
+      throw new Error('the server did not answer — is it running, and is the address current?');
     }
     if (e.message === 'Network request failed') {
-      throw new Error('cannot reach the server — check the address and Wi-Fi');
+      throw new Error('cannot reach the server — check the address; a tunnel URL changes each restart');
     }
     throw e;
   } finally {
@@ -176,9 +214,9 @@ export function useLive(session, handlers) {
 
     const connect = () => {
       if (!alive.current) return;
-      const wsUrl = session.url.replace(/^http/i, 'ws') + `/ws?token=${session.token}`;
+      const target = wsUrl(session.url) + `/ws?token=${session.token}`;
       let s;
-      try { s = new WebSocket(wsUrl); } catch { retry.current = setTimeout(connect, 2500); return; }
+      try { s = new WebSocket(target); } catch { retry.current = setTimeout(connect, 2500); return; }
       ws.current = s;
 
       s.onopen = () => setOnline(true);

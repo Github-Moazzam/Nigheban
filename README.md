@@ -61,6 +61,26 @@ lets firmware and app work be done in parallel.
 
 ---
 
+## No band yet? Nothing is blocked
+
+The wristband is not required to build or test any of this. The phone can run
+the band's firmware itself — the same gesture engine, the same event JSON on
+the wire — and one command puts the server behind a public HTTPS tunnel so
+testers on mobile data anywhere can reach it.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\dev-tunnel.ps1
+```
+```bash
+./scripts/dev-tunnel.sh          # macOS / Linux / WSL / Git Bash
+```
+
+Then open the **BAND** tab in the app. Read
+[TESTING_WITHOUT_HARDWARE.md](TESTING_WITHOUT_HARDWARE.md) first — it is short,
+and it covers the two-phone test that proves the whole product loop.
+
+---
+
 ## Running it
 
 ### 1. The server
@@ -126,9 +146,9 @@ it is in and switches on its own.
 
 ## Try it in five minutes
 
-1. Phone A: create an account, note the code (e.g. `NGB-4F2A`)
+1. Phone A: create an account
 2. Phone B: create an account
-3. Phone B → **FAMILY** → enter Phone A's code → **ADD**
+3. Phone A → **FAMILY** → **MAKE A PAIRING CODE**; Phone B enters it
 4. Phone A → hold **SOS**
 5. Phone B goes red, vibrates, shows the name and a live map pin
 6. Phone B taps **I'M ON IT** → Phone A sees who is responding
@@ -148,26 +168,40 @@ nigehban-app/
   App.js                    shell, alert takeover, band -> server wiring
   src/api.js                REST client, reconnecting socket
   src/band.js               BLE, with a simulated fallback for Expo Go
-  src/screens/              Auth · Home · Family · Alerts
+  src/virtualBand.js        the phone AS the band — the .ino ported to JS
+  src/bandLink.js           one seam, two radios: real BLE or virtual
+  src/watch.js              heartbeat: the silence the server watches for
+  src/screens/              Auth · Home · Band · Family · Alerts
+tests/                      consent + sweeper, end to end, no phone needed
 nigehban_band_esp32/        stand-in firmware (Arduino)
+scripts/dev-tunnel.*        server + public HTTPS tunnel, self-verifying
 nigehban_hub.py             laptop-side Guardian — check-in timer, disconnect
                             grace, escalation ladder, Qwen risk engine
 ```
 
 `nigehban_hub.py` is the original laptop brain. It still drives the band on its
 own and is the best rig for testing firmware without a phone. Its check-in and
-escalation logic is being moved into the server, where a deadline survives the
-phone being killed.
+escalation logic **now lives in the server** as well, where a deadline survives
+the phone being killed — the server's copy is the authoritative one.
 
 ---
 
 ## Design rule
 
 **The phone is an actuator, never a timekeeper.** Every deadline — check-in
-windows, High Alert intervals, escalation timers — lives on the server. The
-phone buzzes the band and reports back; if it goes quiet, the server notices and
-tells the family. This is what makes the product work when Android kills the app,
-when the battery dies, or when the phone is taken.
+windows, High Alert intervals, escalation timers — lives on the server, in a
+five-second sweeper task. The phone buzzes the band and reports back; if it goes
+quiet, the server notices and tells the family. This is what makes the product
+work when Android kills the app, when the battery dies, or when the phone is
+taken, and it is the one part you cannot demonstrate with client code:
+
+```bash
+python server/nigehban_server.py      # in one terminal
+python tests/test_consent_and_sweeper.py
+```
+
+A check-in created there escalates on its own deadline with nothing connected
+to anything.
 
 ---
 
@@ -210,7 +244,15 @@ password hashes, live auth tokens and location history.
 real phone numbers or a Telegram/CallMeBot/DashScope key, take it out of version
 control first.
 
-**Pairing needs a consent step.** As committed, `POST /family` links two accounts
-the moment someone types a code — no acceptance required. For a product whose
-users are avoiding stalkers this is a real hole, and closing it is the first
-server task in the plan.
+**Pairing takes two people.** Adding someone needs both of you to act: you make
+a pairing code that lives ten minutes and works once, or you ask by their
+permanent code and they accept. Nothing is shared in either direction until
+that has happened, declining is permanent and silent, and an invite to a code
+that does not exist looks exactly like one to a code that does — so the code
+space cannot be walked to find out who has an account. Session tokens are
+stored hashed. The reasoning is in §13 of
+[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md), and
+[tests/](tests/) is the proof.
+
+**Still open:** tokens do not expire, and CORS is `*`. Both are fine for a
+tunnelled dev box holding test accounts and must change before deployment.

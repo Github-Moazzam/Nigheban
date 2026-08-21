@@ -6,5 +6,5 @@ requests>=2.31.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 
-# Optional: only needed by nigehban_bridge.py
+# Needed by nigehban_bridge.py and tests/test_sockets.py
 websockets>=12.0
