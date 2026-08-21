@@ -13,11 +13,19 @@ Run:
     python nigehban_hub.py --sim      # no hardware: type events on the keyboard
     python nigehban_hub.py --list     # list nearby BLE devices
 
+NOTE (22 Aug 2026): the Guardian logic below now also lives in
+`server/nigehban_server.py` as the sweeper, and THAT copy is the authoritative
+one -- it holds the deadlines that have to survive a phone being killed. This
+file is kept because it is still the best rig for driving firmware with no
+phone in the loop: one script, a keyboard, and a real BLE link.
+
 Keyboard (works in both modes):
     1        button A single click   -> "I'm OK" check-in ack
     2        button B click          -> SOS
-    3        triple tap              -> SOS
-    h3 / h5  hold 3s / hold 5s       -> cycle interval / arm-disarm
+    3        button A double tap     -> SOS
+    h3       hold 3s                 -> toggle High Alert
+    h5       (no band gesture)       -> arm/disarm anti-snatch, for testing
+                                        the snatch path; v2 will give it one
     fall     fall detected
     bat 15   set battery to 15%
     drop     simulate BLE loss
@@ -268,9 +276,11 @@ class Guardian:
         self.notify = Notifier(cfg)
 
         self.armed = False
+        self.high_alert = False              # hold 3 s, exec plan section 5
         self.link_up = False
         self.interval_idx = 0
         self.interval_s = cfg.checkin_interval_s
+        self._interval_before_ha = self.interval_s
         self.awaiting_ack = False
         self.ack_deadline = 0.0
         self.next_checkin = time.time() + self.interval_s
@@ -335,7 +345,25 @@ class Guardian:
         elif e == "checkin_missed":
             pass    # the hub owns escalation; band only nags locally
 
+        elif e in ("high_alert_on", "high_alert_off"):
+            # Hold 3 s, per EXECUTION_PLAN.md section 5. High Alert shortens the
+            # check-in interval to its tightest setting; turning it off restores
+            # whatever was in effect before, so it cannot silently leave the
+            # wearer on a 2-minute nag for the rest of the day.
+            if e == "high_alert_on":
+                self._interval_before_ha = self.interval_s
+                self.interval_s = min(self.cfg.interval_cycle_s)
+            else:
+                self.interval_s = self._interval_before_ha
+            self.high_alert = (e == "high_alert_on")
+            self.next_checkin = time.time() + self.interval_s
+            log("hub", f"High Alert {'ON' if self.high_alert else 'off'} - "
+                       f"checking in every {self.interval_s // 60} min")
+            await self.writer({"t": "cmd", "c": "buzz", "n": 2 if self.high_alert else 1})
+
         elif e == "interval_cycle":
+            # Legacy: the current firmware no longer emits this (hold 3 s became
+            # High Alert). Kept so an older flashed band still behaves.
             cyc = self.cfg.interval_cycle_s
             self.interval_idx = (self.interval_idx + 1) % len(cyc)
             self.interval_s = cyc[self.interval_idx]
@@ -524,9 +552,11 @@ async def keyboard(guardian, writer):
         elif cmd == "2":
             await guardian.on_event({"e": "sos", "src": "button_b", "bat": guardian.last_battery})
         elif cmd == "3":
-            await guardian.on_event({"e": "sos", "src": "triple_tap", "bat": guardian.last_battery})
+            await guardian.on_event({"e": "sos", "src": "double_tap", "bat": guardian.last_battery})
         elif cmd == "h3":
-            await guardian.on_event({"e": "interval_cycle", "bat": guardian.last_battery})
+            await guardian.on_event({
+                "e": "high_alert_off" if guardian.high_alert else "high_alert_on",
+                "bat": guardian.last_battery})
         elif cmd == "h5":
             await guardian.on_event({"e": "armed" if not guardian.armed else "disarmed",
                                      "bat": guardian.last_battery})

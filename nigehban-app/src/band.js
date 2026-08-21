@@ -67,6 +67,7 @@ export function useBand(onEvent) {
   const [status, setStatus] = useState(BleManager ? 'idle' : 'simulated');
   const [battery, setBattery] = useState(null);
   const [armed, setArmed] = useState(false);
+  const [highAlert, setHighAlert] = useState(false);
   const [lastSeen, setLastSeen] = useState(null);
 
   const mgr = useRef(null);
@@ -85,6 +86,8 @@ export function useBand(onEvent) {
     if (typeof msg.bat === 'number') setBattery(msg.bat);
     if (msg.e === 'armed') setArmed(true);
     if (msg.e === 'disarmed') setArmed(false);
+    if (msg.e === 'high_alert_on') setHighAlert(true);
+    if (msg.e === 'high_alert_off') setHighAlert(false);
     if (msg.e === 'hb') return;              // heartbeat is status, not an event
     cb.current?.(msg);
   }, []);
@@ -155,5 +158,5 @@ export function useBand(onEvent) {
   }, []);
 
   return { status, connect, disconnect, send, simulate, simulated,
-           battery, armed, lastSeen, bleError };
+           battery, armed, highAlert, lastSeen, bleError };
 }

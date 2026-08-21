@@ -11,10 +11,12 @@ const mono = Platform.select(MONO);
 const BAND_LABEL = {
   idle: 'not connected', scanning: 'looking for the band…', connecting: 'connecting…',
   connected: 'connected', disconnected: 'lost the band', simulated: 'simulated',
+  virtual: 'this phone is the band',
   'no-permission': 'bluetooth permission denied',
 };
 
-export default function Home({ session, band, activeSos, onRaise, onResolve, serverOnline }) {
+export default function Home({ session, band, activeSos, onRaise, onResolve,
+                              serverOnline, onOpenBand }) {
   const [fix, setFix] = useState(null);
   const [locNote, setLocNote] = useState('asking for location…');
   const [busy, setBusy] = useState(false);
@@ -52,6 +54,7 @@ export default function Home({ session, band, activeSos, onRaise, onResolve, ser
 
   const bandTone =
     band.status === 'connected' ? C.green
+    : band.status === 'virtual' ? C.amber
     : band.simulated ? C.amber
     : band.status.startsWith('error') || band.status === 'disconnected' ? C.alarm
     : C.dim;
@@ -102,32 +105,14 @@ export default function Home({ session, band, activeSos, onRaise, onResolve, ser
           <Text style={s.meta}>last heard from {fmtAgo(band.lastSeen / 1000)}</Text>
         ) : null}
 
-        {band.simulated ? (
+        {band.status === 'virtual' ? (
           <>
             <Text style={s.simNote}>
-              Running in Expo Go, which cannot load Bluetooth. These buttons stand in
-              for the keypad so the rest of the app is testable. Install the
-              development build to use the real band.
+              No wristband here, so this phone is running the band firmware itself —
+              the same gestures, the same events on the wire. The band console is
+              where you press the key.
             </Text>
-            <View style={s.simRow}>
-              <View style={s.simCell}>
-                <Button title="KEY 4 — SOS" tone={C.alarm}
-                        onPress={() => band.simulate('sos', { src: 'button_b' })} />
-              </View>
-              <View style={s.simCell}>
-                <Button title="KEY 1 — I'M OK" tone={C.green}
-                        onPress={() => band.simulate('checkin_ack')} />
-              </View>
-            </View>
-            <View style={s.simRow}>
-              <View style={s.simCell}>
-                <Button title="FALL" tone={C.amber} onPress={() => band.simulate('fall')} />
-              </View>
-              <View style={s.simCell}>
-                <Button title={band.armed ? 'DISARM' : 'ARM'} tone={C.dim}
-                        onPress={() => band.simulate(band.armed ? 'disarmed' : 'armed')} />
-              </View>
-            </View>
+            <Button title="OPEN BAND CONSOLE" filled onPress={onOpenBand} />
           </>
         ) : band.status === 'connected' ? (
           <View style={s.simRow}>

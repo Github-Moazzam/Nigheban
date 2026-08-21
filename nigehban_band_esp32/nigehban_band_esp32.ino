@@ -39,7 +39,7 @@
 #define DEBOUNCE_MS     35
 #define CLICK_GAP_MS    420     // max gap between clicks in a multi-click
 #define HOLD_1_MS       3000    // "hold 3s"  -> arm / change check-in interval
-#define HOLD_2_MS       5000    // "hold 5s"  -> arm anti-snatch mode
+#define HOLD_2_MS       5000    // "hold 5s"  -> unbound; v2 anti-snatch
 
 #define HEARTBEAT_MS    10000
 
@@ -55,7 +55,8 @@ bool  gConnected     = false;
 bool  gWasConnected  = false;
 
 uint8_t  gBattery      = 100;
-bool     gArmed        = false;   // anti-snatch mode
+bool     gArmed        = false;   // anti-snatch, v2 -- no gesture sets it yet
+bool     gHighAlert    = false;   // High Alert (exec plan section 5, hold 3 s)
 bool     gAwaitingAck  = false;   // a check-in request is outstanding
 uint32_t gAckDeadline  = 0;
 uint32_t gLastHeartbeat= 0;
@@ -116,6 +117,7 @@ void sendEvent(const char *type, const String &extra = "") {
   j += ",\"ms\":" + String(millis());
   j += ",\"bat\":" + String(gBattery);
   j += ",\"armed\":" + String(gArmed ? 1 : 0);
+  j += ",\"ha\":" + String(gHighAlert ? 1 : 0);
   if (extra.length()) j += "," + extra;
   j += "}";
   send(j);
@@ -160,7 +162,10 @@ void buttonTick(Button &b) {
     }
   }
 
-  // hold thresholds fire while still held down (with a cue) — like real devices
+  // The hold threshold fires while still held down (with a cue), like real
+  // devices. Only hold3 is bound today; the hold5 hook is commented out rather
+  // than deleted so v2 anti-snatch is a two-line restore -- an unbound
+  // threshold must stay silent, or the band buzzes to announce it did nothing.
   if (b.stable == LOW) {
     uint32_t held = now - b.pressStart;
     if (!b.holdFired1 && held >= HOLD_1_MS) {
@@ -168,11 +173,11 @@ void buttonTick(Button &b) {
       feedback(1, 250, 120);
       onGesture(b.id, "hold3", 0);
     }
-    if (!b.holdFired2 && held >= HOLD_2_MS) {
-      b.holdFired2 = true;
-      feedback(2, 250, 120);
-      onGesture(b.id, "hold5", 0);
-    }
+    // if (!b.holdFired2 && held >= HOLD_2_MS) {
+    //   b.holdFired2 = true;
+    //   feedback(2, 250, 120);
+    //   onGesture(b.id, "hold5", 0);
+    // }
   }
 
   // finalise a multi-click burst once the user stops clicking
@@ -184,9 +189,25 @@ void buttonTick(Button &b) {
 }
 
 // -------------------------------------------------------- GESTURE MAP ---
-// This is the ONLY place hardware meets meaning. On the final single-button
-// band, everything below moves onto button 1 (and triple-tap becomes a real
-// IMU tap gesture). The phone side never has to change.
+// This is the ONLY place hardware meets meaning, and it must stay identical to
+// DEFAULT_GESTURES in nigehban-app/src/virtualBand.js. Two copies of one
+// decision is the cost of the phone being able to stand in for the band; a
+// third copy would not be.
+//
+// Follows EXECUTION_PLAN.md section 5, the frozen contract:
+//
+//     1 tap        checkin_ack        "I'm fine" / stands down a live SOS
+//     2+ taps      sos                double-tap is the specified gesture
+//     hold 3 s     high_alert_on/off  toggles High Alert
+//
+// Nothing is bound to hold 5 s. Anti-snatch is deferred to v2, so the wearer
+// has two things to remember rather than three, and holding past 3 s no longer
+// crosses a second threshold on the way. HOLD_2_MS and the armed/disarmed
+// events stay defined -- v2 restores this block and the matching row in
+// DEFAULT_GESTURES, and nothing else has to change.
+//
+// On the final single-button band everything above already lives on button 1,
+// so nothing here moves when button B goes away.
 void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
   String meta = "\"btn\":" + String(btn) + ",\"g\":\"" + gesture + "\",\"n\":" + String(n);
 
@@ -198,32 +219,31 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
       sendEvent("checkin_ack", meta);
       return;
     }
-    if (n >= 3) {                       // triple tap = SOS
-      feedback(4, 120, 80);
-      sendEvent("sos", meta + ",\"src\":\"triple_tap\"");
-      return;
-    }
-    feedback(1, 60, 60);
-    sendEvent("tap", meta);             // double tap: reserved / spare
+    // Two taps is SOS -- and so are three, four, five. A frightened person
+    // does not tap a precise number of times, and being strict here fails
+    // silently at the exact moment the product has to work. Section 5 reserves
+    // 4 taps for `armed` in v2; that needs its own affordance, because folding
+    // it in would let an over-tapped SOS arm anti-snatch instead of calling
+    // for help.
+    feedback(4, 120, 80);
+    sendEvent("sos", meta + ",\"src\":\"double_tap\"");
     return;
   }
 
-  // --- Button B: dedicated SOS while prototyping (press twice on the real band)
+  // --- Button B: dedicated SOS while prototyping (one key on the real band)
   if (btn == 2 && strcmp(gesture, "click") == 0) {
     feedback(4, 120, 80);
     sendEvent("sos", meta + ",\"src\":\"button_b\"");
     return;
   }
 
-  // --- Holds ---
+  // --- Hold ---
+  // Fires on the way past, with its own buzz count, so the wearer can feel
+  // that it landed without looking at anything.
   if (strcmp(gesture, "hold3") == 0) {
-    sendEvent("interval_cycle", meta);  // phone cycles 15 / 30 / 60 min
-    return;
-  }
-  if (strcmp(gesture, "hold5") == 0) {
-    gArmed = !gArmed;
-    feedback(gArmed ? 3 : 1, 180, 120);
-    sendEvent(gArmed ? "armed" : "disarmed", meta);
+    gHighAlert = !gHighAlert;
+    feedback(gHighAlert ? 2 : 1, 180, 120);
+    sendEvent(gHighAlert ? "high_alert_on" : "high_alert_off", meta);
     return;
   }
 }

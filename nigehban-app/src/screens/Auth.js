@@ -106,13 +106,14 @@ export default function Auth({ initialUrl, onDone }) {
             <Label>Server address</Label>
             <TextInput
               style={s.input} value={url} onChangeText={setUrl}
-              placeholder="192.168.1.5:8000" placeholderTextColor={C.faint}
+              placeholder="abc123.ngrok-free.app" placeholderTextColor={C.faint}
               autoCapitalize="none" autoCorrect={false} keyboardType="url"
             />
             <Text style={resolved ? s.hintOk : s.hint}>
               {resolved
                 ? `found automatically from the ${resolved}`
-                : 'The laptop prints this when the server starts.'}
+                : 'Paste the address the laptop printed. A tunnel URL works from '
+                  + 'anywhere — mobile data included — and needs no Wi-Fi in common.'}
             </Text>
             {scanning ? (
               <View style={s.scanRow}>
@@ -123,7 +124,8 @@ export default function Auth({ initialUrl, onDone }) {
               </View>
             ) : (
               <View style={{ marginTop: 8 }}>
-                <Button title="FIND IT FOR ME" tone={C.dim} onPress={findServer} />
+                <Button title="FIND MY LAPTOP ON THIS WI-FI" tone={C.dim}
+                        sub="only works on the same network" onPress={findServer} />
               </View>
             )}
           </View>
@@ -174,8 +176,9 @@ export default function Auth({ initialUrl, onDone }) {
         </Card>
 
         <Text style={s.footer}>
-          Your account, your family list and every alert stay on the laptop
-          running the server. Nothing is sent anywhere else.
+          Your account, your family list and every alert live on the server you
+          point this at. During testing that is a laptop, reachable through a
+          tunnel; nothing is stored anywhere else.
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>
