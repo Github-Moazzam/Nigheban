@@ -1034,6 +1034,11 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
             nxt = None
         c.commit()
     print(f"  high alert {'ON' if b.on else 'off'} for {u['name']}")
+    await HUB.fanout(family_of(u["id"]), {
+        "t": "watch_updated",
+        "user_id": u["id"],
+        "mode": "high_alert" if b.on else "idle"
+    })
     return {"ok": True, "mode": "high_alert" if b.on else "idle", "next_buzz_at": nxt}
 
 

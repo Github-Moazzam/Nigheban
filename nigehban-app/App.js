@@ -63,6 +63,7 @@ function Main() {
   const [checkinFrom, setCheckinFrom] = useState(null);
   const [activeSos, setActiveSos] = useState(null); // my own live SOS
   const [highAlert, setHighAlert] = useState(false);
+  const [nextBuzzAt, setNextBuzzAt] = useState(null);
   const [toast, setToast] = useState(null);
 
   const insets = useEdgeInsets();
@@ -184,7 +185,12 @@ function Main() {
     },
     ack: (m) => setToast(`${m.by.name} has seen your alert and is responding`),
     checkin_req: (m) => {
-      setCheckinFrom(m.from);
+      setCheckinFrom({
+        ...m.from,
+        checkin_id: m.checkin_id,
+        window: m.window || 90,
+        _startAt: Date.now() / 1000,
+      });
       Vibration.vibrate([0, 200, 100, 200]);
       band.send({ c: 'checkin_req', window: m.window ?? 45 });   // buzz the band too
       notify(`${m.from.name} is checking on you`, 'Tap "I am fine" to answer.');
@@ -193,12 +199,20 @@ function Main() {
     // thumb. It looks the same to the wearer, which is the point: the mode
     // keeps working whether or not a family member is awake.
     buzz_now: (m) => {
-      setCheckinFrom({ name: null, system: true, reason: m.reason });
+      setCheckinFrom({
+        name: null,
+        system: true,
+        reason: m.reason,
+        checkin_id: m.checkin_id,
+        window: m.window || 90,
+        _startAt: Date.now() / 1000,
+      });
       Vibration.vibrate([0, 400, 200, 400]);
       band.send({ c: 'checkin_req', window: m.window ?? 90 });
       notify('Nigehban is checking on you', 'Tap "I am fine" to answer.');
     },
     checkin_ack: (m) => setToast(`${m.by.name} answered — they are fine`),
+    watch_updated: (m) => bump(),
     invite: (m) => {
       setToast(`${m.invite.from.name} is asking to be your family — open FAMILY to answer`);
       notify(`${m.invite.from.name} wants to be your family`,
@@ -214,6 +228,31 @@ function Main() {
     setActiveSos(null);
     setIncoming(null);
   };
+
+  const toggleHighAlert = useCallback(async (on) => {
+    if (!session) return;
+    try {
+      const r = await call(session, '/watch/high_alert', { method: 'POST', body: { on } });
+      setHighAlert(on);
+      setNextBuzzAt(r.next_buzz_at || null);
+      setToast(on ? 'High Alert armed server-side' : 'High Alert disarmed');
+      bump();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }, [session, bump]);
+
+  const ackCheckin = useCallback(async (id) => {
+    if (!session) return;
+    try {
+      await call(session, `/checkin/${id || 0}/ack`, { method: 'POST' });
+      setCheckinFrom(null);
+      setToast('Check-in answered — you are fine');
+      bump();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }, [session, bump]);
 
   if (booting) {
     return (
@@ -253,7 +292,12 @@ function Main() {
         {tab === 'home' && (
           <Home session={session} band={band} activeSos={activeSos}
                 onRaise={raise} onResolve={resolve} serverOnline={serverOnline}
-                onOpenBand={() => setTab('band')} />
+                onOpenBand={() => setTab('band')}
+                pendingCheckin={checkinFrom}
+                onAckCheckin={ackCheckin}
+                highAlertArmed={highAlert}
+                nextBuzzAt={nextBuzzAt}
+                onToggleHighAlert={toggleHighAlert} />
         )}
         {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
         {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}

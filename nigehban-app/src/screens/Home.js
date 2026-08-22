@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
+import CheckinBanner from '../components/CheckinBanner';
+import HighAlertPanel from '../components/HighAlertPanel';
 import { C, MONO, fmtAgo } from '../theme';
 import { Button, Card, Label, Pill, Stat } from '../ui';
 
@@ -16,7 +18,8 @@ const BAND_LABEL = {
 };
 
 export default function Home({ session, band, activeSos, onRaise, onResolve,
-                              serverOnline, onOpenBand }) {
+                              serverOnline, onOpenBand, pendingCheckin,
+                              onAckCheckin, highAlertArmed, nextBuzzAt, onToggleHighAlert }) {
   const [fix, setFix] = useState(null);
   const [locNote, setLocNote] = useState('asking for location…');
   const [busy, setBusy] = useState(false);
@@ -65,6 +68,11 @@ export default function Home({ session, band, activeSos, onRaise, onResolve,
       refreshControl={<RefreshControl refreshing={refreshing} tintColor={C.green}
         onRefresh={async () => { setRefreshing(true); setTimeout(() => setRefreshing(false), 600); }} />}
     >
+      {/* ---- active check-in countdown banner ---- */}
+      {pendingCheckin ? (
+        <CheckinBanner checkin={pendingCheckin} onAck={onAckCheckin} />
+      ) : null}
+
       {/* ---- the one thing that matters ---- */}
       {activeSos ? (
         <Card tone={C.alarm} style={{ backgroundColor: C.alarmBg }}>
@@ -86,6 +94,13 @@ export default function Home({ session, band, activeSos, onRaise, onResolve,
           <Text style={s.sosHint}>press and hold</Text>
         </Pressable>
       )}
+
+      {/* ---- high alert mode panel ---- */}
+      <HighAlertPanel
+        isArmed={highAlertArmed}
+        nextBuzzAt={nextBuzzAt}
+        onToggle={onToggleHighAlert}
+      />
 
       {/* ---- band ---- */}
       <Card>

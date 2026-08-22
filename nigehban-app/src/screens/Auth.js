@@ -81,6 +81,9 @@ export default function Auth({ initialUrl, onDone }) {
         : { username, password, name };
       const r = await call({ url: clean }, mode === 'login' ? '/login' : '/register',
                            { method: 'POST', body });
+      if (!r || !r.token) {
+        throw new Error('Invalid server response. Make sure port is 8000 (http://localhost:8000), not 8081!');
+      }
       const session = { url: clean, token: r.token, user_id: r.user_id, name: r.name };
       await saveSession(session);
       await saveServerUrl(clean);

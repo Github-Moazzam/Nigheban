@@ -153,7 +153,9 @@ it is in and switches on its own.
 5. Phone B goes red, vibrates, shows the name and a live map pin
 6. Phone B taps **I'M ON IT** → Phone A sees who is responding
 7. Phone A taps **I'M SAFE** → Phone B's alarm clears
-8. Phone B → **ASK FOR A CHECK-IN** → Phone A answers → Phone B sees it
+8. Phone B → **ASK FOR A CHECK-IN** → Phone A sees live 90s countdown banner → answers → Phone B sees it
+9. Phone A → **ARM HIGH ALERT** → Phone B's **FAMILY** tab updates in sub-second real-time with `ARMED` watch health status tile
+10. Unanswered check-in (90 s) → **Server Sweeper** automatically escalates to a Severity 3 alert to Phone B
 
 All of that works without Bluetooth, using the simulated band.
 
@@ -163,7 +165,8 @@ All of that works without Bluetooth, using the simulated band.
 
 ```
 EXECUTION_PLAN.md           phases, contracts, schema, circuit, v2 designs
-server/nigehban_server.py   accounts, family links, alerts, live push
+DEVELOPMENT_PLAN.md         milestones and workstream status
+server/nigehban_server.py   accounts, family links, alerts, live push, sweeper
 nigehban-app/
   App.js                    shell, alert takeover, band -> server wiring
   src/api.js                REST client, reconnecting socket
@@ -171,6 +174,7 @@ nigehban-app/
   src/virtualBand.js        the phone AS the band — the .ino ported to JS
   src/bandLink.js           one seam, two radios: real BLE or virtual
   src/watch.js              heartbeat: the silence the server watches for
+  src/components/           CheckinBanner · HighAlertPanel · WatchStatusTile
   src/screens/              Auth · Home · Band · Family · Alerts
 tests/                      consent + sweeper, end to end, no phone needed
 nigehban_band_esp32/        stand-in firmware (Arduino)
