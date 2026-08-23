@@ -13,6 +13,7 @@ import Family from './src/screens/Family';
 import Home from './src/screens/Home';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { useHeartbeat } from './src/watch';
+import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
 import { C, MONO, sevColor } from './src/theme';
 import { Button, Pill } from './src/ui';
 
@@ -70,7 +71,12 @@ function Main() {
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
-    (async () => { setSession(await loadSession()); setBooting(false); })();
+    (async () => {
+      const s = await loadSession();
+      setSession(s);
+      if (s) startBackgroundWatch();
+      setBooting(false);
+    })();
   }, []);
 
   useEffect(() => {
@@ -223,6 +229,7 @@ function Main() {
   });
 
   const signOut = async () => {
+    await stopBackgroundWatch();
     await clearSession();
     setSession(null);
     setActiveSos(null);
