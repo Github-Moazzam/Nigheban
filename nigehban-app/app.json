@@ -68,9 +68,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Your location is attached to an alert so your family knows where to come."
+          "locationWhenInUsePermission": "Your location is attached to an alert so your family knows where to come.",
+          "isAndroidBackgroundLocationEnabled": true
         }
-      ]
+      ],
+      "./plugins/withNigehbanAndroid"
     ],
     "extra": {
       "eas": {
