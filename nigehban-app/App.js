@@ -14,6 +14,7 @@ import Home from './src/screens/Home';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { useHeartbeat } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
+import { setupNotificationChannels, sendEmergencyAlarmNotification, registerPushToken } from './src/notifications';
 import { C, MONO, sevColor } from './src/theme';
 import { Button, Pill } from './src/ui';
 
@@ -72,9 +73,13 @@ function Main() {
 
   useEffect(() => {
     (async () => {
+      await setupNotificationChannels();
       const s = await loadSession();
       setSession(s);
-      if (s) startBackgroundWatch();
+      if (s) {
+        startBackgroundWatch();
+        registerPushToken(s);
+      }
       setBooting(false);
     })();
   }, []);
@@ -179,9 +184,11 @@ function Main() {
       if (a.severity >= 4) {
         setIncoming(a);
         Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
+        sendEmergencyAlarmNotification(a);
+      } else {
+        notify(`${a.user.name} — ${a.kind.toUpperCase()}`,
+               a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
       }
-      notify(`${a.user.name} — ${a.kind.toUpperCase()}`,
-             a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
       bump();
     },
     resolved: (m) => {
