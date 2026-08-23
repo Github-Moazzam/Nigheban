@@ -36,6 +36,7 @@ import re
 import secrets
 import sqlite3
 import time
+import urllib.request
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, closing
 from typing import Optional
@@ -810,6 +811,12 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
     await HUB.fanout(targets, {"t": "alert", "alert": payload})
     print(f"  [{kind}] from {name} ({uid}) -> {len(targets)} family member(s), "
           f"{sum(HUB.online(t) for t in targets)} online")
+
+    # Send Remote System Push Notification via Expo Push Service API for closed/killed apps
+    push_title = f"🚨 EMERGENCY SOS — {name}" if sev >= 5 else f"⚠️ {kind.upper()} — {name}"
+    push_body = "Tap immediately to open Nigehban for location and emergency details."
+    await send_expo_push_notifications(targets, push_title, push_body, {"alert_id": row["id"], "severity": sev})
+
     return payload, targets
 
 
@@ -914,7 +921,7 @@ def register_device(b: DeviceIn, u=Depends(me)):
 
 
 def push_tokens_for(uids):
-    """Push tokens for a set of users. N3 sends to these; nothing does yet."""
+    """Push tokens for a set of users."""
     if not uids:
         return []
     with closing(db()) as c:
@@ -922,6 +929,47 @@ def push_tokens_for(uids):
             "SELECT DISTINCT push_token FROM devices WHERE push_token IS NOT NULL"
             " AND user_id IN (%s)" % ",".join("?" * len(uids)), list(uids)).fetchall()
     return [r["push_token"] for r in rows]
+
+
+async def send_expo_push_notifications(uids, title, body, data=None):
+    """Send Hardware Remote Push Notification via Expo Push Service API.
+
+    Delivers notifications directly to Android system push framework even when
+    the app is completely closed or killed.
+    """
+    tokens = push_tokens_for(uids)
+    if not tokens:
+        return
+
+    payloads = []
+    for token in tokens:
+        if token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken["):
+            payloads.append({
+                "to": token,
+                "title": title,
+                "body": body,
+                "sound": "default",
+                "priority": "high",
+                "data": data or {},
+                "channelId": "nigehban_emergency_alarm" if (data and data.get("severity", 0) >= 4) else "nigehban_default"
+            })
+
+    if not payloads:
+        return
+
+    def _do_post():
+        try:
+            req = urllib.request.Request(
+                "https://exp.host/--/api/v2/push/send",
+                data=json.dumps(payloads).encode('utf-8'),
+                headers={"Content-Type": "application/json", "Accept": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                pass
+        except Exception as e:
+            print(f"  [expo push error] {e}")
+
+    await asyncio.to_thread(_do_post)
 
 
 # ---- check-ins: questions with a deadline -------------------------------
@@ -985,6 +1033,10 @@ async def request_checkin(member_id: str, b: Optional[CheckinIn] = None, u=Depen
     await HUB.to(member_id, {"t": "checkin_req", "checkin_id": cur.lastrowid,
                              "window": window,
                              "from": {"id": u["id"], "name": u["name"]}})
+
+    # Hardware System Push Notification for closed/backgrounded apps
+    await send_expo_push_notifications([member_id], f"{u['name']} is checking on you", "Tap 'I am fine' to answer.", {"checkin_id": cur.lastrowid, "severity": 2})
+
     # `online` is worth returning and worth being honest about: an offline
     # phone does not mean the question evaporates. The deadline is already in
     # the database, and the sweeper will act on it either way.
