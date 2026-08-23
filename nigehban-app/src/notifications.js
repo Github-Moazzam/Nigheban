@@ -61,13 +61,13 @@ export async function setupNotificationChannels() {
     if (Platform.OS === 'android') {
       // Configure high-priority Emergency SOS channel
       await Notifications.setNotificationChannelAsync(EMERGENCY_CHANNEL_ID, {
-        name: '🚨 Emergency SOS Alarms',
+        name: 'Emergency SOS Alarms',
         description: 'Critical high-priority siren alarms for family emergency SOS alerts.',
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 500, 200, 500, 200, 500],
         enableVibrate: true,
         enableLights: true,
-        lightColor: '#FF3B30',
+        lightColor: '#F2645A',   // C.red, so the LED matches the app's own danger tone
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
         bypassDnd: true, // Override Do Not Disturb mode for critical SOS
         sound: 'default', // Plays max volume system alarm sound
@@ -117,10 +117,10 @@ export async function sendEmergencyAlarmNotification(alert) {
     const isSnatch = alert.kind === 'snatch';
 
     const title = isSos
-      ? `🚨 EMERGENCY SOS — ${alert.user?.name || 'Family Member'}`
+      ? `EMERGENCY SOS — ${alert.user?.name || 'Family Member'}`
       : isSnatch
-      ? `⚠️ BAND TORN OFF — ${alert.user?.name || 'Family Member'}`
-      : `⚠️ FALL DETECTED — ${alert.user?.name || 'Family Member'}`;
+      ? `BAND TORN OFF — ${alert.user?.name || 'Family Member'}`
+      : `FALL DETECTED — ${alert.user?.name || 'Family Member'}`;
 
     const body = alert.maps
       ? 'CRITICAL ALERT! Tap immediately to view live location on map.'

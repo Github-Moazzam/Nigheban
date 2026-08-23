@@ -58,3 +58,26 @@ export function useHeartbeat(session, { mode, bandLink, batt }) {
     return () => { alive = false; clearInterval(id); };
   }, [session, mode]);
 }
+
+/**
+ * B3.3 / U4.4 — presence, so a stranger's emergency can find whoever is near.
+ *
+ * Posted at most every five minutes, only from a fix the Home screen is
+ * already watching, and only ever one row per person on the server. It is not
+ * a location history: it is the answer to "is anybody close enough to help",
+ * and it is deliberately too coarse to be anything else.
+ */
+export const PRESENCE_EVERY_MS = 300000;
+
+export function usePresence(session, fix) {
+  const last = useRef(0);
+
+  useEffect(() => {
+    if (!session?.token || !fix) return;
+    const now = Date.now();
+    if (now - last.current < PRESENCE_EVERY_MS) return;
+    last.current = now;
+    call(session, '/presence', { method: 'POST', body: { lat: fix.lat, lon: fix.lon } })
+      .catch(() => { last.current = 0; });   // try again on the next fix
+  }, [session, fix]);
+}

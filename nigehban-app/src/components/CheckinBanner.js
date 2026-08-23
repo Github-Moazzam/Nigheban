@@ -1,136 +1,78 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import { C, MONO } from '../theme';
-import { Button, Card } from '../ui';
+import { Text, View } from 'react-native';
+import { C, S, T, fmtCount } from '../theme';
+import { Button, Card, Chip, Label, ProgressBar } from '../ui';
 
 /**
- * CheckinBanner — Displays an active 90-second check-in countdown banner.
- * High contrast styling for dark mode readability.
+ * U3.1 — the open question, and how long is left to answer it.
+ *
+ * The countdown runs to `due_at`, which is the server's deadline in the
+ * server's clock, sent with the request. It is not a local ninety-second timer
+ * that happens to agree: the sweeper escalates on its own row in the database,
+ * so a phone that woke up late has to show what is actually left, not what
+ * would be left if the message had arrived on time.
+ *
+ * Shown after the ask-sheet is dismissed, so "later" never means "forgotten".
  */
 export default function CheckinBanner({ checkin, onAck, style }) {
-  if (!checkin) return null;
+  const window = checkin?.window || 90;
+  const dueAt = checkin?.due_at
+    || (checkin?._startAt ? checkin._startAt + window : null);
 
-  const [remaining, setRemaining] = useState(checkin.window || 90);
+  const [left, setLeft] = useState(() => remaining(dueAt, window));
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    // Target completion timestamp
-    const targetTime = checkin.due_at || (checkin._startAt ? checkin._startAt + (checkin.window || 90) : Date.now() / 1000 + (checkin.window || 90));
+    if (!checkin) return undefined;
+    const tick = () => setLeft(remaining(dueAt, window));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [checkin, dueAt, window]);
 
-    const update = () => {
-      const rem = Math.max(0, Math.ceil(targetTime - Date.now() / 1000));
-      setRemaining(rem);
-    };
+  if (!checkin) return null;
 
-    update();
-    const interval = setInterval(update, 1000);
-    return () => clearInterval(interval);
-  }, [checkin]);
+  const urgent = left <= 30;
+  const tone = left === 0 ? C.red : urgent ? C.amber : C.green;
 
-  const handleAck = async () => {
-    if (busy || !onAck) return;
+  const ack = async () => {
+    if (busy) return;
     setBusy(true);
-    try {
-      await onAck(checkin.checkin_id || checkin.id);
-    } finally {
-      setBusy(false);
-    }
+    try { await onAck?.(checkin); } finally { setBusy(false); }
   };
 
-  const isUrgent = remaining <= 30;
-
   return (
-    <Card style={[s.container, isUrgent ? s.urgentContainer : s.normalContainer, style]}>
-      <View style={s.topRow}>
-        <Text style={s.icon}>{isUrgent ? '⚠️' : '🔔'}</Text>
-        <View style={s.textWrap}>
-          <Text style={[s.title, isUrgent && { color: C.red }]}>
-            {isUrgent ? 'CHECK-IN EXPIRING SOON' : 'CHECK-IN REQUESTED'}
-          </Text>
-          <Text style={s.reason}>
-            {checkin.name ? `${checkin.name} is checking on you` : 'Safety Check'} · Server will escalate if unanswered
+    <Card tone={tone} style={[{ gap: S.md }, style]}>
+      <View style={s.head}>
+        <View style={{ flex: 1, gap: 4 }}>
+          <Label color={tone}>
+            {checkin.system ? 'Nigehban is checking on you' : 'Check-in requested'}
+          </Label>
+          <Text style={[T.h2, { color: C.text }]}>
+            {checkin.system
+              ? 'High Alert — answer to stay clear'
+              : `${checkin.name || 'Someone'} is asking if you are okay`}
           </Text>
         </View>
+        <Chip text={left === 0 ? 'overdue' : fmtCount(left)} tone={tone} icon="clock" />
       </View>
 
-      {/* Countdown Timer Display */}
-      <View style={s.timerBox}>
-        <Text style={s.timerLabel}>TIME REMAINING</Text>
-        <Text style={[s.timerValue, isUrgent && { color: C.red }]}>
-          {remaining}s
-        </Text>
-      </View>
+      <ProgressBar value={window ? left / window : 0} tone={tone} />
 
-      <Button
-        title={busy ? 'CONFIRMING...' : "I'M SAFE — ANSWER CHECK-IN"}
-        tone={C.green}
-        filled
-        onPress={handleAck}
-        disabled={busy}
-      />
+      <Text style={[T.meta, { color: C.dim }]}>
+        {left === 0
+          ? 'The deadline has passed. The server is telling your family now.'
+          : 'The deadline lives on the server, so answering here is what closes it — '
+            + 'not this app staying open.'}
+      </Text>
+
+      <Button title="I AM FINE" filled tone={C.green} icon="check"
+              loading={busy} onPress={ack} />
     </Card>
   );
 }
 
-const s = StyleSheet.create({
-  container: {
-    padding: 16,
-    gap: 12,
-    borderWidth: 1.5,
-  },
-  normalContainer: {
-    borderColor: '#63BE93',
-    backgroundColor: '#13281E',
-  },
-  urgentContainer: {
-    borderColor: C.red,
-    backgroundColor: '#2A1315',
-  },
-  topRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  icon: {
-    fontSize: 24,
-  },
-  textWrap: {
-    flex: 1,
-  },
-  title: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#63BE93',
-    letterSpacing: 0.5,
-  },
-  reason: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 11,
-    color: '#A0A0A0', // High contrast readable grey
-    marginTop: 3,
-  },
-  timerBox: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#181C19',
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  timerLabel: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 11,
-    color: '#CCCCCC', // High contrast label
-    letterSpacing: 0.5,
-  },
-  timerValue: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#63BE93',
-  },
-});
+function remaining(dueAt, window) {
+  if (!dueAt) return window;
+  return Math.max(0, Math.ceil(dueAt - Date.now() / 1000));
+}

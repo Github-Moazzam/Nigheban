@@ -23,8 +23,8 @@ Audited against the working tree, not against intentions.
 
 | Workstream | Built | Missing |
 |---|---|---|
-| **UI** | Auth · Home · Band · Family (pairing codes, accept/decline) · Alerts; tab shell; full-screen alert takeover; check-in sheet; dark theme + `ui.js` primitives | Check-in countdown, High Alert panel, watch-status tile, battery/going-dark states, fall countdown, Samaritan respond, OEM onboarding, server-URL settings |
-| **Backend** | `server/nigehban_server.py` — 20 endpoints + `/ws`, SQLite, 9 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens | `/presence` + `/samaritan` (geo), Qwen scoring, WhatsApp fan-out, token expiry |
+| **UI** | Auth · Home · Band · Family · Alerts · Setup; client state machine; check-in countdown, High Alert with PIN disarm, fall countdown, battery/going-dark, SOS live view, watch-status tile, Samaritan respond; one design system (Outfit + Space Grotesk, semantic tokens, `ui.js` kit, no emoji) | Changing the server address after sign-in — it is still only on the Auth screen |
+| **Backend** | `server/nigehban_server.py` — 22 endpoints + `/ws`, SQLite, 11 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens, `/presence` + `/samaritan` | Qwen scoring, WhatsApp fan-out, token expiry |
 | **Android** | `app.json` with BLE/location/notification perms; `eas.json` with 3 profiles | `plugins/` does not exist · no `@notifee/react-native` · no `expo-battery` · no foreground service · no boot receiver · no OEM deep links |
 | **Firmware** | `nigehban_band_esp32/` — full gesture map, protocol, feedback patterns; `HAS_IMU 0` | `nigehban_band_nrf52/` does not exist · no IMU · no real battery ADC · motor circuit unbuilt |
 | **Deployment** | `scripts/dev-tunnel.ps1` / `.sh` — server + HTTPS tunnel, self-verifying; CORS on the server | No Dockerfile, no compose, no Caddyfile, no Alibaba account |
@@ -113,9 +113,9 @@ the tunnel, with no band in the building. **Observed.**
 
 ### U2 · Client state machine · Owner M1 · Phase 0 · ~4 h
 
-- [ ] U2.1 — `src/state.js`: `idle · checkin_pending · high_alert · sos_live`, with the legal transitions written as data rather than `if`-chains scattered through [App.js](nigehban-app/App.js).
-- [ ] U2.2 — Every band event (exec plan §5) and every WS message maps to exactly one transition.
-- [ ] U2.3 — Drive it from the **BAND tab** (V1), which produces real gestures rather than `simulate()`'s canned conclusions.
+- [x] U2.1 — [state.js](nigehban-app/src/state.js): `idle · high_alert · checkin_pending · fall_pending · sos_live`, with the legal transitions written as a table. A fifth state was needed: `fall_pending` is the countdown, and it is the one place a deadline is legitimately client-owned, because no server row exists to own it until the alert does.
+- [x] U2.2 — `bandEventToAction()` maps every band event, and each socket handler in [App.js](nigehban-app/App.js) dispatches exactly one action. An event that is illegal in the current state is dropped rather than applied — a `buzz_now` arriving behind a live SOS can no longer demote it to a check-in.
+- [x] U2.3 — Driven from the BAND tab, which produces real gestures.
 
 **Design rule:** the phone is an actuator, never a timekeeper. This machine
 reflects server-owned state; it must not own a deadline.
@@ -127,29 +127,38 @@ reflects server-owned state; it must not own a deadline.
 
 Built against **mocked** WS messages first, wired to B2 when it lands.
 
-- [ ] U3.1 — **Check-in countdown** — full-screen, ack button, counting down to the server's `due_at`, never to a local timer.
-- [ ] U3.2 — **High Alert panel** — arm/disarm, PIN required to disarm (matrix #16), next-buzz indicator.
-- [ ] U3.3 — **Fall countdown** — 30 s at severity 4, 15 s at severity 5; "I'm fine" cancels and logs a near-miss.
-- [ ] U3.4 — **Battery states** — 20 % family alert, 5 % `going_dark` (matrix #13, #14), via `expo-battery`.
-- [ ] U3.5 — **SOS live view** — what the wearer sees after firing; stand-down from app or band.
+- [x] U3.1 — **Check-in countdown** — a sheet on arrival, a persistent banner once that is dismissed, both counting to the server's `due_at`. The deadline had to be put on the wire first: `checkin_req` and `buzz_now` carried only `window`, so a message that arrived late started a fresh ninety seconds.
+- [x] U3.2 — **High Alert panel** — armed in one tap, disarmed behind four digits ([PinSheet.js](nigehban-app/src/components/PinSheet.js), keystore-backed). Arming never asks; that asymmetry is the feature. The next buzz is shown to the minute, because the interval is randomised precisely so that it cannot be timed.
+- [x] U3.3 — **Fall countdown** — [FallCountdown.js](nigehban-app/src/components/FallCountdown.js): 30 s at severity 4, 15 s at severity 5, vibrating through each of the last five seconds. "I'm fine" writes a `near_miss`, which the server records and tells nobody.
+- [x] U3.4 — **Battery states** — one alert per threshold crossing, latched and re-armed on charge: `low_battery` at 20 %, `going_dark` at 5 % (matrix #13, #14). The wearer sees a banner saying what her family was told.
+- [x] U3.5 — **SOS live view** — [SosLiveView.js](nigehban-app/src/components/SosLiveView.js). Leads with how long it has been running and who has said "I'm on it", not with a delivery receipt; stand down from the app, or key 1 on the band.
 
 **Done when:** all five run end-to-end off mocked messages with no server changes.
 
 ### U4 · Family-side UI · Owner M1 · Phase 2–3 · ~6 h
 
-- [ ] U4.1 — **Invite flow** — replaces today's instant link in [Family.js](nigehban-app/src/screens/Family.js). Send · pending · accept · decline. Consent is the whole point (exec plan §1, the safety bug).
-- [ ] U4.2 — **Watch-status tile** — band link, service alive, last beat, from `GET /watch/{member_id}`. Goes amber within 3 min of the service dying (matrix #19).
-- [ ] U4.3 — **Alert takeover hardening** — the modal at [App.js:221](nigehban-app/App.js#L221) already exists; add map/directions, "I'm on it" attribution, and the stand-down echo.
-- [ ] U4.4 — **Good Samaritan respond** — coarse pin only; name and exact location released *only* after "I'm going" (matrix #20).
+- [x] U4.1 — **Invite flow** — send · pending · accept · decline, in [Family.js](nigehban-app/src/screens/Family.js).
+- [x] U4.2 — **Watch-status tile** — [WatchStatusTile.js](nigehban-app/src/components/WatchStatusTile.js) reads `GET /watch/{member_id}` and turns amber at the same 180 s the server uses, so the screen and the sweeper never disagree in front of a user (matrix #19).
+- [x] U4.3 — **Alert takeover hardening** — map link, "I'm on it" posting to `/alert/{id}/ack`, and the stand-down echo clearing the takeover on every family phone.
+- [x] U4.4 — **Good Samaritan respond** — [SamaritanCall.js](nigehban-app/src/components/SamaritanCall.js), on top of B3.3 and B3.4 below. Before "I'm going" there is no name and the pin is snapped to a 300 m grid; saying yes releases the name and the exact position, and puts the responder's own name on the alert.
 
 **Done when:** matrix rows 1, 2, 7, 19, 20 pass on two phones.
 
 ### U5 · Onboarding & polish · Owner M1/M2 · Phase 3 · ~4 h
 
-- [ ] U5.1 — **OEM onboarding screen** (M2) — per-vendor autostart deep links from exec plan §7, each wrapped in try/catch with the settings-page fallback.
-- [ ] U5.2 — Permission ladder: notifications → location → background location → battery-optimisation exemption, each with one sentence of why.
-- [ ] U5.3 — Empty, offline, and permission-denied states on all four screens.
-- [ ] U5.4 — Demo-room contrast pass. [theme.js](nigehban-app/src/theme.js) was tuned for a bright hall; verify at full brightness on the worst screen you own.
+- [x] U5.1 — **OEM onboarding** — [Setup.js](nigehban-app/src/screens/Setup.js), now the fifth tab. The vendor is read from `Platform.constants.Manufacturer` and only that vendor's instructions are shown; every deep link is wrapped, falls back to the app-settings page, and leaves the manual steps on screen for when a class name has moved.
+- [x] U5.2 — Permission ladder: notifications → location → background location → battery exemption, one rung at a time, each with one sentence of why and a granted/denied state. Home nudges to it while anything is outstanding.
+- [x] U5.3 — Empty, offline, loading and permission-denied states on every screen — including a server-offline banner that says plainly that an alert raised now would reach nobody.
+- [x] U5.4 — Contrast pass, folded into U6: every foreground/background pair in [theme.js](nigehban-app/src/theme.js) carries its measured ratio against `surface`, and body text never uses the `faint` tone.
+
+### U6 · Design system · Owner M1 · **done**
+
+Four screens that had each been styled once are now one system.
+
+- [x] U6.1 — [theme.js](nigehban-app/src/theme.js): semantic colour tokens, a type scale, a 4/8 spacing scale, three corner radii. No screen sets a raw hex or a raw font size.
+- [x] U6.2 — Type: **Outfit** for everything a person reads, **Space Grotesk** for headings, figures and countdowns. Loaded defensively in [fonts.js](nigehban-app/src/fonts.js) — a build without the font module falls back to the system face rather than showing nothing.
+- [x] U6.3 — [ui.js](nigehban-app/src/ui.js): one kit — card, button, chip, field, banner, empty state, progress bar, stat — with a 48 pt minimum target, press feedback that never moves layout, and an accessibility label on every icon-only control.
+- [x] U6.4 — Every emoji gone, including from push titles and the foreground-service notification, replaced by one icon family (Feather, imported by path so the bundle carries 56 KB of icons rather than 3.4 MB).
 
 **Done when:** a fresh install on an untouched Xiaomi reaches a working armed state without anyone opening Settings manually.
 
@@ -208,8 +217,8 @@ family member's request does.
 
 - [x] B3.1 — ~~`POST /checkin/{member_id}` reworked to write a `checkins` row with `due_at`; add `POST /checkin/{id}/ack` for band or app.~~ Shipped with B2, which needs it.
 - [x] B3.2 — ~~`POST /watch/high_alert` — arm/disarm.~~ Shipped with B2, same reason.
-- [ ] B3.3 — `POST /presence` — geohash6, lat/lon rounded to ~100 m.
-- [ ] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the coarse pin, logs the responder.
+- [x] B3.3 — `POST /presence` — geohash6 plus lat/lon rounded to ~100 m, one row per person, overwritten. A presence, not a trail, and only read while it is fresh.
+- [x] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the name and the exact pin, logs the responder against the alert, and tells the wearer and their family who is coming. A severity-5 alert carrying a position now fans an anonymous, coarse copy out to fresh presences within 800 m. Both are covered by [tests/test_samaritan_and_checkin.py](tests/test_samaritan_and_checkin.py).
 - [ ] B3.5 — Qwen severity scoring + Urdu dispatch text via Model Studio. *Cut line Day 3 21:00 → fall back to `RiskEngine._template`, which already works.*
 - [ ] B3.6 — WhatsApp fan-out.
 
@@ -421,13 +430,14 @@ and the board should say so.
 | V1 Virtual band | M1 | 0 | 6 h | ☑ done |
 | G1 Gesture map aligned to §5 | M1/M4 | 0 | 1 h | ☑ done |
 | U1 Configurable transport | M1 | 0 | 2 h | ☑ done |
-| U2 Client state machine | M1 | 0 | 4 h | ☐ |
-| U3 Safety-feature UI | M1 | 2–3 | 8 h | ☐ |
-| U4 Family-side UI | M1 | 2–3 | 6 h | ☐ |
-| U5 Onboarding & polish | M1/M2 | 3 | 4 h | ☐ |
+| U2 Client state machine | M1 | 0 | 4 h | ☑ done |
+| U3 Safety-feature UI | M1 | 2–3 | 8 h | ☑ done |
+| U4 Family-side UI | M1 | 2–3 | 6 h | ☑ done |
+| U5 Onboarding & polish | M1/M2 | 3 | 4 h | ☑ done |
+| U6 Design system | M1 | 3 | 6 h | ☑ done |
 | B1 Consent + schema | M3 | 0 | 4 h | ☑ done |
 | B2 The sweeper | M3 | 2 | 5 h | ☑ done |
-| B3 Feature endpoints | M3 | 3 | 6 h | ◐ B3.1, B3.2 done |
+| B3 Feature endpoints | M3 | 3 | 6 h | ◐ B3.1–B3.4 done; Qwen and WhatsApp open |
 | B4 Hardening | M3 | 5 | 2 h | ☐ |
 | N1 Config plugin + dev build | M2 | 0 | 3 h | ☐ |
 | N2 Foreground service | M2 | 2 | 8 h | ☐ |

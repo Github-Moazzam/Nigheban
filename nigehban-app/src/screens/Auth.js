@@ -1,17 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView,
-  StyleSheet, Text, TextInput, View,
+  ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
+  StyleSheet, Text, View,
 } from 'react-native';
 import {
   call, discoverServers, loadServerUrl, normaliseUrl, probe,
   saveServerUrl, saveSession, serverFromDevHost,
 } from '../api';
-import { C, MONO } from '../theme';
-import { Button, Card, Label } from '../ui';
+import { C, S, T } from '../theme';
+import { Banner, Button, Card, Chip, Divider, Field, Icon, Txt } from '../ui';
 
-const mono = Platform.select(MONO);
-
+/**
+ * The first screen, and the only one that asks for anything before it earns
+ * trust. Three fields, one of which the app usually fills in by itself, and a
+ * sentence at the bottom saying exactly where the data goes.
+ */
 export default function Auth({ initialUrl, onDone }) {
   const [mode, setMode] = useState('login');
   const [url, setUrl] = useState(initialUrl || '');
@@ -23,10 +26,11 @@ export default function Auth({ initialUrl, onDone }) {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [resolved, setResolved] = useState(null);
+  const [showPw, setShowPw] = useState(false);
 
-  // Work out the server address without asking. Cheapest source first: the
-  // dev host the bundle came from, then whatever worked last time. Only if
-  // both miss does the user see an empty box.
+  // Work out the server address without asking. Cheapest source first: the dev
+  // host the bundle came from, then whatever worked last time. Only if both
+  // miss does anyone see an empty box.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -55,8 +59,8 @@ export default function Auth({ initialUrl, onDone }) {
     try {
       const hits = await discoverServers(setProgress);
       if (hits.length === 0) {
-        setErr('No server found on this Wi-Fi. Is it running, and is the '
-             + 'laptop on the same network? The firewall may also be blocking it.');
+        setErr('No server found on this Wi-Fi. Is it running, and is the laptop on '
+             + 'the same network? A firewall may also be blocking it.');
       } else if (hits.length === 1) {
         setUrl(hits[0]);
       } else {
@@ -82,7 +86,8 @@ export default function Auth({ initialUrl, onDone }) {
       const r = await call({ url: clean }, mode === 'login' ? '/login' : '/register',
                            { method: 'POST', body });
       if (!r || !r.token) {
-        throw new Error('Invalid server response. Make sure port is 8000 (http://localhost:8000), not 8081!');
+        throw new Error('That address answered, but not like the Nigehban server. '
+                      + 'Check the port — the server is on 8000, Metro is on 8081.');
       }
       const session = { url: clean, token: r.token, user_id: r.user_id, name: r.name };
       await saveSession(session);
@@ -96,92 +101,87 @@ export default function Auth({ initialUrl, onDone }) {
   };
 
   return (
-    <KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={s.flex}
+                          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView contentContainerStyle={s.wrap} keyboardShouldPersistTaps="handled">
         <View style={s.brand}>
-          <Text style={s.mark}>◈</Text>
-          <Text style={s.title}>NIGEHBAN</Text>
-          <Text style={s.sub}>someone is watching out for you</Text>
+          <View style={s.mark}>
+            <Icon name="shield" size={26} color={C.green} />
+          </View>
+          <Txt variant="h1" style={{ letterSpacing: 3 }}>NIGEHBAN</Txt>
+          <Text style={[T.body, { color: C.dim }]}>Someone is watching out for you</Text>
         </View>
 
-        <Card style={{ gap: 16 }}>
-          <View>
-            <Label>Server address</Label>
-            <TextInput
-              style={s.input} value={url} onChangeText={setUrl}
-              placeholder="abc123.ngrok-free.app" placeholderTextColor={C.faint}
+        <Card style={{ gap: S.lg }}>
+          <View style={{ gap: S.sm }}>
+            <Field
+              label="Server address" value={url} onChangeText={setUrl}
+              placeholder="abc123.ngrok-free.app"
               autoCapitalize="none" autoCorrect={false} keyboardType="url"
-            />
-            <Text style={resolved ? s.hintOk : s.hint}>
-              {resolved
-                ? `found automatically from the ${resolved}`
+              hint={resolved
+                ? undefined
                 : 'Paste the address the laptop printed. A tunnel URL works from '
-                  + 'anywhere — mobile data included — and needs no Wi-Fi in common.'}
-            </Text>
+                  + 'anywhere, mobile data included.'}
+            />
+            {resolved ? (
+              <Chip text={`found from the ${resolved}`} tone={C.green} icon="check" />
+            ) : null}
+
             {scanning ? (
               <View style={s.scanRow}>
                 <ActivityIndicator color={C.green} size="small" />
-                <Text style={s.hint}>
-                  searching this Wi-Fi… {Math.round(progress * 100)}%
+                <Text style={[T.meta, { color: C.dim }]}>
+                  Searching this Wi-Fi… {Math.round(progress * 100)}%
                 </Text>
               </View>
             ) : (
-              <View style={{ marginTop: 8 }}>
-                <Button title="FIND MY LAPTOP ON THIS WI-FI" tone={C.dim}
-                        sub="only works on the same network" onPress={findServer} />
-              </View>
+              <Button title="FIND MY LAPTOP ON THIS WI-FI" tone={C.dim} icon="search"
+                      sub="only works on the same network" onPress={findServer} />
             )}
           </View>
 
-          {mode === 'register' && (
-            <View>
-              <Label>Your name</Label>
-              <TextInput
-                style={s.input} value={name} onChangeText={setName}
-                placeholder="Ali" placeholderTextColor={C.faint}
-              />
-            </View>
-          )}
+          <Divider />
 
-          <View>
-            <Label>Username</Label>
-            <TextInput
-              style={s.input} value={username} onChangeText={setUsername}
-              placeholder="ali" placeholderTextColor={C.faint}
-              autoCapitalize="none" autoCorrect={false}
-            />
+          {mode === 'register' ? (
+            <Field label="Your name" value={name} onChangeText={setName}
+                   placeholder="Ali" autoCapitalize="words"
+                   hint="This is the name your family sees on an alert." />
+          ) : null}
+
+          <Field label="Username" value={username} onChangeText={setUsername}
+                 placeholder="ali" autoCapitalize="none" autoCorrect={false}
+                 textContentType="username" />
+
+          <View style={{ gap: 6 }}>
+            <Field label="Password" value={password} onChangeText={setPassword}
+                   placeholder="••••••" secureTextEntry={!showPw}
+                   textContentType="password" />
+            <Pressable onPress={() => setShowPw((v) => !v)} style={s.pwToggle}
+                       accessibilityRole="button">
+              <Icon name={showPw ? 'eye-off' : 'eye'} size={14} color={C.dim} />
+              <Text style={[T.meta, { color: C.dim }]}>
+                {showPw ? 'Hide password' : 'Show password'}
+              </Text>
+            </Pressable>
           </View>
 
-          <View>
-            <Label>Password</Label>
-            <TextInput
-              style={s.input} value={password} onChangeText={setPassword}
-              placeholder="••••" placeholderTextColor={C.faint} secureTextEntry
-            />
-          </View>
+          {err ? (
+            <Banner tone={C.red} icon="alert-circle" title="That did not work">{err}</Banner>
+          ) : null}
 
-          {err ? <Text style={s.err}>{err}</Text> : null}
+          <Button title={mode === 'login' ? 'SIGN IN' : 'CREATE ACCOUNT'}
+                  filled icon="log-in" loading={busy} onPress={submit} />
 
-          {busy ? (
-            <ActivityIndicator color={C.green} style={{ paddingVertical: 14 }} />
-          ) : (
-            <Button
-              title={mode === 'login' ? 'SIGN IN' : 'CREATE ACCOUNT'}
-              filled onPress={submit}
-            />
-          )}
-
-          <Button
-            title={mode === 'login' ? 'New here? Create an account' : 'I already have an account'}
-            tone={C.dim}
-            onPress={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(null); }}
-          />
+          <Button title={mode === 'login' ? 'New here? Create an account'
+                                          : 'I already have an account'}
+                  tone={C.dim}
+                  onPress={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(null); }} />
         </Card>
 
         <Text style={s.footer}>
-          Your account, your family list and every alert live on the server you
-          point this at. During testing that is a laptop, reachable through a
-          tunnel; nothing is stored anywhere else.
+          Your account, your family list and every alert live on the server you point
+          this at. During testing that is a laptop reachable through a tunnel; nothing
+          is stored anywhere else.
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -190,25 +190,13 @@ export default function Auth({ initialUrl, onDone }) {
 
 const s = StyleSheet.create({
   flex: { flex: 1, backgroundColor: C.bg },
-  wrap: { padding: 22, paddingTop: 72, paddingBottom: 48, gap: 26 },
-  brand: { alignItems: 'center', gap: 6 },
-  mark: { color: C.green, fontSize: 34, marginBottom: 2 },
-  title: { fontFamily: mono, color: C.text, fontSize: 24, letterSpacing: 7 },
-  sub: { fontFamily: mono, color: C.faint, fontSize: 11, letterSpacing: 0.6 },
-  input: {
-    backgroundColor: C.bg, borderWidth: 1, borderColor: C.line, borderRadius: 4,
-    color: C.text, fontFamily: mono, fontSize: 15, paddingHorizontal: 12,
-    paddingVertical: 11,
+  wrap: { padding: S.xl, paddingTop: 64, paddingBottom: 48, gap: S.xl },
+  brand: { alignItems: 'center', gap: S.sm },
+  mark: {
+    width: 56, height: 56, borderRadius: 10, backgroundColor: C.greenSoft,
+    alignItems: 'center', justifyContent: 'center', marginBottom: S.sm,
   },
-  hint: { fontFamily: mono, color: C.faint, fontSize: 10, marginTop: 5 },
-  hintOk: { fontFamily: mono, color: C.green, fontSize: 10, marginTop: 5 },
-  scanRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
-  err: {
-    fontFamily: mono, color: C.alarm, fontSize: 12, backgroundColor: C.alarmBg,
-    borderRadius: 4, padding: 10, lineHeight: 17,
-  },
-  footer: {
-    fontFamily: mono, color: C.faint, fontSize: 10, lineHeight: 16,
-    textAlign: 'center', paddingHorizontal: 8,
-  },
+  scanRow: { flexDirection: 'row', alignItems: 'center', gap: S.sm, paddingVertical: S.md },
+  pwToggle: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 },
+  footer: { ...T.meta, color: C.faint, textAlign: 'center', paddingHorizontal: S.sm },
 });

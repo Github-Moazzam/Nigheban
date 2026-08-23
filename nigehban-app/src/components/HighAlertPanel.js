@@ -1,140 +1,132 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import { C, MONO } from '../theme';
-import { Button, Card } from '../ui';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { hasPin } from '../security';
+import { C, S, T } from '../theme';
+import { Button, Card, Chip, Icon, Txt } from '../ui';
+import PinSheet from './PinSheet';
 
 /**
- * HighAlertPanel — Controls High Alert mode arming and disarming.
- * High contrast styling for dark theme readability.
+ * U3.2 — High Alert: arm freely, disarm deliberately.
+ *
+ * Arming is one tap and never asks for anything. Disarming asks for the PIN
+ * (matrix #16), because the whole mode is built for the case where somebody
+ * else may end up holding the phone. That asymmetry is the feature.
+ *
+ * The next-buzz time is the server's `next_buzz_at`, rendered as an
+ * approximation on purpose. The interval is randomised between five and ten
+ * minutes precisely so that it cannot be timed and planned around; printing a
+ * second-accurate countdown would hand that back.
  */
 export default function HighAlertPanel({ isArmed = false, nextBuzzAt = null, onToggle, style }) {
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [pinMode, setPinMode] = useState(null);      // null | 'verify' | 'set'
+  const [pinSet, setPinSet] = useState(true);
+  const [, force] = useState(0);
 
-  const handlePress = async () => {
-    if (!onToggle || loading) return;
-    setLoading(true);
-    try {
-      await onToggle(!isArmed);
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => { hasPin().then(setPinSet).catch(() => setPinSet(false)); }, [pinMode]);
+
+  // One tick a minute is enough for a value printed to the minute.
+  useEffect(() => {
+    if (!isArmed || !nextBuzzAt) return undefined;
+    const id = setInterval(() => force((n) => n + 1), 20000);
+    return () => clearInterval(id);
+  }, [isArmed, nextBuzzAt]);
+
+  const apply = useCallback(async (on) => {
+    if (!onToggle || busy) return;
+    setBusy(true);
+    try { await onToggle(on); } finally { setBusy(false); }
+  }, [onToggle, busy]);
+
+  const press = async () => {
+    if (!isArmed) { apply(true); return; }
+    if (await hasPin()) { setPinMode('verify'); return; }
+    apply(false);                                   // nothing set: do not lock her out
   };
 
-  // Calculate remaining seconds to next buzz
-  const now = Date.now() / 1000;
-  const remainingSec = nextBuzzAt ? Math.max(0, Math.floor(nextBuzzAt - now)) : null;
-  const remainingMin = remainingSec !== null ? Math.ceil(remainingSec / 60) : null;
+  const mins = nextBuzzAt
+    ? Math.max(0, Math.ceil((nextBuzzAt - Date.now() / 1000) / 60))
+    : null;
 
   return (
-    <Card style={[s.container, isArmed && s.containerArmed, style]}>
-      <View style={s.header}>
-        <View style={s.titleRow}>
-          <Text style={s.icon}>{isArmed ? '🛡️' : '⏱️'}</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={s.title}>HIGH ALERT MODE</Text>
-            <Text style={s.sub}>
+    <>
+      <Card tone={isArmed ? C.green : undefined} style={[{ gap: S.md }, style]}>
+        <View style={s.head}>
+          <View style={[s.mark, { backgroundColor: isArmed ? C.green : C.raised }]}>
+            <Icon name="shield" size={18} color={isArmed ? C.bg : C.dim} />
+          </View>
+          <View style={{ flex: 1, gap: 2 }}>
+            <Txt variant="h2">High Alert</Txt>
+            <Text style={[T.meta, { color: C.dim }]}>
               {isArmed
-                ? 'Random 5–10m check-in buzzes armed server-side'
-                : 'Regular status monitoring'}
+                ? 'The server checks on you every five to ten minutes'
+                : 'For the walk home, or any route you want watched'}
             </Text>
           </View>
+          <Chip text={isArmed ? 'armed' : 'off'} tone={isArmed ? C.green : C.faint} />
         </View>
 
-        <View style={[s.statusBadge, isArmed ? s.badgeArmed : s.badgeOff]}>
-          <Text style={[s.statusText, { color: isArmed ? '#63BE93' : '#A0A0A0' }]}>
-            {isArmed ? 'ARMED' : 'OFF'}
+        {isArmed ? (
+          <View style={s.nextRow}>
+            <Icon name="clock" size={14} color={C.dim} />
+            <Text style={[T.meta, { color: C.dim, flex: 1 }]}>
+              {mins == null ? 'First check-in is being scheduled'
+                : mins <= 1 ? 'Next check-in due about now'
+                : `Next check-in in about ${mins} minutes`}
+            </Text>
+          </View>
+        ) : null}
+
+        <Button
+          title={isArmed ? 'DISARM' : 'ARM HIGH ALERT'}
+          icon={isArmed ? 'unlock' : 'shield'}
+          filled={!isArmed}
+          tone={isArmed ? C.dim : C.green}
+          loading={busy}
+          onPress={press}
+        />
+
+        {isArmed && !pinSet ? (
+          <Pressable onPress={() => setPinMode('set')} style={s.pinCta}
+                     accessibilityRole="button">
+            <Icon name="lock" size={14} color={C.amber} />
+            <Text style={[T.meta, { color: C.amber, flex: 1 }]}>
+              Set a disarm PIN, so this cannot be switched off by whoever is holding your phone.
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {isArmed ? (
+          <Text style={[T.meta, { color: C.faint }]}>
+            Miss one of these and your family is told — even if this app has been
+            closed since you armed it.
           </Text>
-        </View>
-      </View>
+        ) : null}
+      </Card>
 
-      {isArmed && (
-        <View style={s.buzzInfo}>
-          <Text style={s.buzzText}>
-            {remainingMin !== null
-              ? `Next check-in buzz expected in ~${remainingMin} min`
-              : 'Server scheduling next buzz...'}
-          </Text>
-        </View>
-      )}
-
-      <Button
-        title={loading ? 'UPDATING...' : isArmed ? 'DISARM HIGH ALERT' : 'ARM HIGH ALERT'}
-        tone={isArmed ? C.amber : C.green}
-        onPress={handlePress}
-        disabled={loading}
+      <PinSheet
+        visible={pinMode !== null}
+        mode={pinMode === 'set' ? 'set' : 'verify'}
+        onCancel={() => setPinMode(null)}
+        onDone={() => {
+          const wasVerify = pinMode === 'verify';
+          setPinMode(null);
+          if (wasVerify) apply(false);
+        }}
       />
-    </Card>
+    </>
   );
 }
 
 const s = StyleSheet.create({
-  container: {
-    padding: 16,
-    gap: 14,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: '#121815',
+  head: { flexDirection: 'row', alignItems: 'center', gap: S.md },
+  mark: {
+    width: 40, height: 40, borderRadius: 6,
+    alignItems: 'center', justifyContent: 'center',
   },
-  containerArmed: {
-    borderColor: '#63BE93',
-    backgroundColor: '#13261C',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  icon: {
-    fontSize: 22,
-  },
-  title: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 13,
-    fontWeight: 'bold',
-    color: '#EAEAEA', // High contrast title text
-  },
-  sub: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 11,
-    color: '#B0B0B0', // High contrast readable subtitle
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  statusBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 4,
-    borderWidth: 1,
-  },
-  badgeArmed: {
-    backgroundColor: '#1B3827',
-    borderColor: '#63BE93',
-  },
-  badgeOff: {
-    backgroundColor: '#1A1D1B',
-    borderColor: C.dim,
-  },
-  statusText: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 11,
-    fontWeight: 'bold',
-  },
-  buzzInfo: {
-    padding: 10,
-    backgroundColor: '#18241D',
-    borderRadius: 4,
-    borderLeftWidth: 3,
-    borderLeftColor: '#63BE93',
-  },
-  buzzText: {
-    fontFamily: MONO.fontFamily,
-    fontSize: 11,
-    color: '#63BE93',
+  nextRow: { flexDirection: 'row', alignItems: 'center', gap: S.sm },
+  pinCta: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: S.sm,
+    backgroundColor: C.amberSoft, padding: S.md, borderRadius: 6,
   },
 });

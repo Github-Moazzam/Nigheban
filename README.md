@@ -174,9 +174,14 @@ nigehban-app/
   src/virtualBand.js        the phone AS the band — the .ino ported to JS
   src/bandLink.js           one seam, two radios: real BLE or virtual
   src/watch.js              heartbeat: the silence the server watches for
+  src/state.js              the client state machine, transitions as data
+  src/theme.js  src/ui.js   the design system: tokens, type scale, component kit
+  src/fonts.js              Outfit + Space Grotesk, loaded without blocking
+  src/security.js           the four digits in front of disarming High Alert
   src/components/           CheckinBanner · HighAlertPanel · WatchStatusTile
-  src/screens/              Auth · Home · Band · Family · Alerts
-tests/                      consent + sweeper, end to end, no phone needed
+                            FallCountdown · SosLiveView · SamaritanCall · PinSheet
+  src/screens/              Auth · Home · Band · Family · Alerts · Setup
+tests/                      consent + sweeper + samaritan, end to end, no phone needed
 nigehban_band_esp32/        stand-in firmware (Arduino)
 scripts/dev-tunnel.*        server + public HTTPS tunnel, self-verifying
 nigehban_hub.py             laptop-side Guardian — check-in timer, disconnect
