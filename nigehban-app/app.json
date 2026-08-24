@@ -23,7 +23,7 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png",
-        "backgroundColor": "#0B1310"
+        "backgroundColor": "#0B0D0F"
       },
       "permissions": [
         "android.permission.BLUETOOTH",
@@ -43,7 +43,7 @@
         {
           "image": "./assets/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#0B1310"
+          "backgroundColor": "#0B0D0F"
         }
       ],
       [
@@ -72,7 +72,9 @@
           "isAndroidBackgroundLocationEnabled": true
         }
       ],
-      "./plugins/withNigehbanAndroid"
+      "./plugins/withNigehbanAndroid",
+      "expo-font",
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {

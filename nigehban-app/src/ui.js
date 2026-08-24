@@ -1,90 +1,300 @@
+// One icon family, imported by path so the bundle carries Feather alone
+// rather than every set @expo/vector-icons ships.
+import Feather from '@expo/vector-icons/Feather';
 import React from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import { C, MONO } from './theme';
+import {
+  ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View,
+} from 'react-native';
+import { C, F, HIT, R, S, T, toneSoft } from './theme';
 
-const mono = Platform.select(MONO);
+/**
+ * The component kit.
+ *
+ * Every screen is built from these, so a change here is a change everywhere --
+ * which is the only way a four-tab app stays consistent under a deadline.
+ * Rules the kit enforces on its callers:
+ *
+ *   - Controls are at least 48pt tall. A person raising an alarm is not aiming.
+ *   - Every pressable dims on press within a frame, and none of them move.
+ *   - Icons come from one family (Feather, 2px stroke). No emoji anywhere.
+ *   - Colour never carries meaning on its own; there is always a word next to it.
+ */
 
-export function Label({ children, color }) {
-  return <Text style={[s.label, color && { color }]}>{children}</Text>;
+// --------------------------------------------------------------- text ---
+export function Txt({ style, variant = 'body', color = C.text, children, ...rest }) {
+  return <Text {...rest} style={[T[variant], { color }, style]}>{children}</Text>;
 }
 
-export function Card({ children, tone, style }) {
-  const border = tone ? { borderColor: tone, borderLeftWidth: 3 } : null;
-  return <View style={[s.card, border, style]}>{children}</View>;
+/** Section eyebrow. Uppercased in place rather than by transform, for VoiceOver. */
+export function Label({ children, color = C.faint, style }) {
+  return (
+    <Text style={[T.label, { color, textTransform: 'uppercase' }, style]}>
+      {children}
+    </Text>
+  );
 }
 
-/** A labelled figure. `tone` colours the value when it means something. */
-export function Stat({ label, value, tone, sub }) {
+export function Icon({ name, size = 18, color = C.dim, style }) {
+  return <Feather name={name} size={size} color={color} style={style} />;
+}
+
+// ------------------------------------------------------------ surface ---
+/**
+ * `tone` tints the whole card instead of outlining it. `accent` adds the one
+ * piece of chrome the system allows: a 3pt bar down the left of a card that is
+ * reporting a live emergency.
+ */
+export function Card({ children, tone, accent, style }) {
+  return (
+    <View
+      style={[
+        s.card,
+        tone && { backgroundColor: toneSoft(tone) },
+        accent && { borderLeftWidth: 3, borderLeftColor: accent },
+        style,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
+export function Divider({ style }) {
+  return <View style={[s.divider, style]} />;
+}
+
+// -------------------------------------------------------------- state ---
+/** A labelled figure. `tone` colours the value when the value means something. */
+export function Stat({ label, value, tone = C.text, sub, icon }) {
   return (
     <View style={s.stat}>
       <Label>{label}</Label>
-      <Text style={[s.statValue, tone && { color: tone }]}>{value}</Text>
-      {sub ? <Text style={s.statSub}>{sub}</Text> : null}
+      <View style={s.statRow}>
+        {icon ? <Icon name={icon} size={14} color={tone} /> : null}
+        <Text style={[T.number, { color: tone, flexShrink: 1 }]} numberOfLines={2}>
+          {value}
+        </Text>
+      </View>
+      {sub ? <Text style={[T.meta, { color: C.faint, fontSize: 12 }]}>{sub}</Text> : null}
     </View>
   );
 }
 
-export function Pill({ text, tone = C.dim, bg = 'transparent' }) {
+/**
+ * Status chip: a filled tint, a dot and a word. Deliberately not a bordered
+ * pill -- the fill is what separates it from the card, and the word is what
+ * carries the meaning for anyone who cannot see the hue.
+ */
+export function Chip({ text, tone = C.dim, icon, style }) {
   return (
-    <View style={[s.pill, { borderColor: tone, backgroundColor: bg }]}>
-      <Text style={[s.pillText, { color: tone }]}>{text}</Text>
+    <View style={[s.chip, { backgroundColor: toneSoft(tone) }, style]}>
+      {icon
+        ? <Icon name={icon} size={12} color={tone} />
+        : <View style={[s.dot, { backgroundColor: tone }]} />}
+      <Text style={[T.label, { color: tone }]}>{text.toUpperCase()}</Text>
     </View>
   );
 }
 
-export function Button({ title, onPress, tone = C.green, filled, disabled, sub, big }) {
+/** Back-compat alias for the old bordered pill. Same call sites, new look. */
+export function Pill({ text, tone = C.dim, icon }) {
+  return <Chip text={text} tone={tone} icon={icon} />;
+}
+
+// ------------------------------------------------------------ actions ---
+/**
+ * One button, four jobs:
+ *   filled            the single primary action on a screen
+ *   plain (default)   a secondary action, tinted rather than outlined
+ *   tone={C.dim}      tertiary; reads as a link but keeps the 48pt target
+ *   big               the emergency size, used by takeovers only
+ */
+export function Button({
+  title, onPress, onLongPress, delayLongPress, tone = C.green, filled, disabled,
+  loading, sub, big, icon, style, accessibilityLabel,
+}) {
+  const inactive = disabled || loading;
+  const fg = filled && !inactive ? C.bg : inactive ? C.faint : tone;
+
   return (
     <Pressable
       onPress={onPress}
-      disabled={disabled}
+      onLongPress={onLongPress}
+      delayLongPress={delayLongPress}
+      disabled={inactive}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: !!inactive }}
+      accessibilityLabel={accessibilityLabel || title}
       style={({ pressed }) => [
         s.btn,
         big && s.btnBig,
-        { borderColor: disabled ? C.line : tone },
-        filled && !disabled && { backgroundColor: tone },
-        pressed && !disabled && { opacity: 0.7 },
-        disabled && { opacity: 0.45 },
+        { backgroundColor: filled && !inactive ? tone : toneSoft(tone) },
+        pressed && !inactive && s.btnPressed,
+        inactive && { opacity: 0.45 },
+        style,
       ]}
     >
-      <Text
-        style={[
-          s.btnText,
-          big && s.btnTextBig,
-          { color: filled && !disabled ? C.bg : disabled ? C.faint : tone },
-        ]}
-      >
-        {title}
-      </Text>
+      <View style={s.btnRow}>
+        {loading ? <ActivityIndicator size="small" color={fg} /> : null}
+        {icon && !loading ? <Icon name={icon} size={big ? 22 : 16} color={fg} /> : null}
+        <Text style={[T.button, big && s.btnTextBig, { color: fg }]}>{title}</Text>
+      </View>
       {sub ? (
-        <Text style={[s.btnSub, { color: filled && !disabled ? C.bg : C.faint }]}>{sub}</Text>
+        <Text style={[T.meta, s.btnSub, { color: filled && !inactive ? C.bg : C.faint }]}>
+          {sub}
+        </Text>
       ) : null}
     </Pressable>
   );
 }
 
+/** Icon-only control. Carries a label for screen readers and a 44pt hit area. */
+export function IconButton({ name, onPress, label, tone = C.dim, size = 20 }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={HIT}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={({ pressed }) => [s.iconBtn, pressed && { backgroundColor: C.raised }]}
+    >
+      <Icon name={name} size={size} color={tone} />
+    </Pressable>
+  );
+}
+
+// ------------------------------------------------------------- inputs ---
+/** A labelled field. Never a placeholder standing in for a label. */
+export function Field({
+  label, hint, error, value, onChangeText, style, ...rest
+}) {
+  return (
+    <View style={{ gap: 6 }}>
+      {label ? <Label>{label}</Label> : null}
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholderTextColor={C.faint}
+        accessibilityLabel={label}
+        style={[s.input, error && { backgroundColor: C.redSoft }, style]}
+        {...rest}
+      />
+      {error ? (
+        <View style={s.fieldNote}>
+          <Icon name="alert-circle" size={13} color={C.red} />
+          <Text style={[T.meta, { color: C.red, flex: 1 }]}>{error}</Text>
+        </View>
+      ) : hint ? (
+        <Text style={[T.meta, { color: C.faint }]}>{hint}</Text>
+      ) : null}
+    </View>
+  );
+}
+
+// ----------------------------------------------------------- feedback ---
+/** Inline message. `tone` picks the hue; the icon and the words carry it too. */
+export function Banner({ tone = C.amber, icon = 'info', title, children, style }) {
+  return (
+    <View style={[s.banner, { backgroundColor: toneSoft(tone) }, style]}>
+      <Icon name={icon} size={16} color={tone} style={{ marginTop: 1 }} />
+      <View style={{ flex: 1, gap: 3 }}>
+        {title ? <Text style={[T.bodyMed, { color: tone }]}>{title}</Text> : null}
+        {typeof children === 'string'
+          ? <Text style={[T.meta, { color: C.dim }]}>{children}</Text>
+          : children}
+      </View>
+    </View>
+  );
+}
+
+/** What a list says when it is empty, which is most of the time in a safety app. */
+export function EmptyState({ icon = 'inbox', title, body, action, onAction }) {
+  return (
+    <View style={s.empty}>
+      <View style={s.emptyIcon}>
+        <Icon name={icon} size={22} color={C.faint} />
+      </View>
+      <Text style={[T.h2, { color: C.dim, textAlign: 'center' }]}>{title}</Text>
+      {body ? (
+        <Text style={[T.meta, { color: C.faint, textAlign: 'center' }]}>{body}</Text>
+      ) : null}
+      {action ? (
+        <View style={{ alignSelf: 'stretch', marginTop: S.sm }}>
+          <Button title={action} onPress={onAction} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** Determinate bar. Used for countdowns, where the shrink *is* the message. */
+export function ProgressBar({ value = 0, tone = C.green, height = 4 }) {
+  const pct = Math.max(0, Math.min(1, value)) * 100;
+  return (
+    <View style={[s.barOuter, { height, borderRadius: height / 2 }]}
+          accessibilityRole="progressbar"
+          accessibilityValue={{ min: 0, max: 100, now: Math.round(pct) }}>
+      <View style={{ width: `${pct}%`, height: '100%', backgroundColor: tone }} />
+    </View>
+  );
+}
+
+// -------------------------------------------------------------- style ---
 const s = StyleSheet.create({
-  label: {
-    fontFamily: mono, fontSize: 10, letterSpacing: 1.4,
-    color: C.faint, textTransform: 'uppercase', marginBottom: 4,
-  },
   card: {
-    backgroundColor: C.surface, borderWidth: 1, borderColor: C.line,
-    borderRadius: 4, padding: 16, gap: 12,
+    backgroundColor: C.surface,
+    borderRadius: R.card,
+    padding: S.lg,
+    gap: S.md,
   },
-  stat: { flex: 1, minWidth: 84 },
-  statValue: { fontFamily: mono, fontSize: 17, color: C.text, fontVariant: ['tabular-nums'] },
-  statSub: { fontFamily: mono, fontSize: 10, color: C.faint, marginTop: 2 },
-  pill: {
-    borderWidth: 1, borderRadius: 100, paddingHorizontal: 9, paddingVertical: 3,
-    alignSelf: 'flex-start',
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: C.line },
+
+  stat: { flex: 1, minWidth: 90, gap: 4 },
+  statRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: S.sm, paddingVertical: 5,
+    borderRadius: R.chip, alignSelf: 'flex-start',
   },
-  pillText: { fontFamily: mono, fontSize: 10, letterSpacing: 1 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+
   btn: {
-    borderWidth: 1, borderRadius: 4, paddingVertical: 14, paddingHorizontal: 16,
-    alignItems: 'center', gap: 3,
+    minHeight: 48, borderRadius: R.control,
+    paddingVertical: 13, paddingHorizontal: S.lg,
+    alignItems: 'center', justifyContent: 'center', gap: 2,
   },
-  btnBig: { paddingVertical: 34, borderWidth: 2, borderRadius: 6 },
-  btnText: { fontFamily: mono, fontSize: 13, letterSpacing: 1.2, fontWeight: '600' },
-  btnTextBig: { fontSize: 26, letterSpacing: 3 },
-  btnSub: { fontFamily: mono, fontSize: 10, letterSpacing: 0.5 },
+  btnRow: { flexDirection: 'row', alignItems: 'center', gap: S.sm },
+  btnBig: { minHeight: 76, paddingVertical: 22, borderRadius: R.card },
+  btnTextBig: { fontSize: 21, letterSpacing: 0.4 },
+  btnPressed: { opacity: 0.72 },
+  btnSub: { fontSize: 12, opacity: 0.85 },
+
+  iconBtn: {
+    width: 40, height: 40, borderRadius: R.control,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  input: {
+    backgroundColor: C.raised, borderRadius: R.control,
+    color: C.text, fontFamily: F.body, fontSize: 16,
+    paddingHorizontal: S.md, minHeight: 48, paddingVertical: 12,
+  },
+  fieldNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+
+  banner: {
+    flexDirection: 'row', gap: S.md, padding: S.md,
+    borderRadius: R.control, alignItems: 'flex-start',
+  },
+
+  empty: {
+    alignItems: 'center', gap: S.sm, paddingVertical: S.xxl,
+    paddingHorizontal: S.xl,
+  },
+  emptyIcon: {
+    width: 48, height: 48, borderRadius: R.card, backgroundColor: C.surface,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 2,
+  },
+
+  barOuter: { backgroundColor: C.raised, overflow: 'hidden' },
 });

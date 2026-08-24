@@ -52,9 +52,9 @@ export async function startBackgroundWatch() {
         distanceInterval: 50, // 50 meters
         deferredUpdatesInterval: 60000,
         foregroundService: {
-          notificationTitle: '🛡️ NIGEHBAN IS WATCHING',
-          notificationBody: 'Wristband link & safety monitoring active',
-          notificationColor: '#63BE93',
+          notificationTitle: 'Nigehban is watching',
+          notificationBody: 'Band link and safety monitoring are active',
+          notificationColor: '#3CC183',
         },
       });
     }

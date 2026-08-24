@@ -30,6 +30,7 @@ accepts. Nothing about a person is revealed before that.
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -53,8 +54,20 @@ PORT = 8000
 
 SEVERITY = {
     "sos": 5, "snatch": 5, "fall": 4, "checkin_missed": 3, "watch_lost": 3,
-    "checkin_req": 2, "checkin_ack": 1, "low_battery": 1, "sos_clear": 1,
+    "going_dark": 3, "checkin_req": 2, "checkin_ack": 1, "low_battery": 1,
+    "sos_clear": 1, "near_miss": 1,
 }
+
+# Kinds that are written down but never sent to anybody. A cancelled fall is
+# the wearer's own record that the detector nearly fired -- useful for tuning
+# the thresholds in Phase 5, and not something to wake four people over.
+PRIVATE_KINDS = {"near_miss"}
+
+# Good Samaritan: how far from a severity-5 alert a stranger can be and still
+# be asked, and how coarse the pin they are shown is until they say yes.
+SAMARITAN_RADIUS_M = 800
+SAMARITAN_COARSE_M = 300
+PRESENCE_FRESH_S   = 900
 
 # How long a pairing code is worth anything. Short on purpose: see PAIRING
 # below. Ten minutes is "we are in the same room, or on the phone together",
@@ -180,7 +193,29 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        -- ---- B3.3 / B3.4: Good Samaritan --------------------------------
+        -- Where somebody was, rounded to about a hundred metres and kept only
+        -- while it is fresh. Precise enough to answer "is anyone near this
+        -- alert", too coarse to be a location history of anyone's day.
+        CREATE TABLE IF NOT EXISTS presence (
+            user_id  TEXT PRIMARY KEY,
+            geohash6 TEXT NOT NULL,
+            lat      REAL NOT NULL,
+            lon      REAL NOT NULL,
+            at       REAL NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        -- A stranger who said "I'm going". Only after this row exists does the
+        -- server hand over a name or an exact pin (matrix #20).
+        CREATE TABLE IF NOT EXISTS samaritans (
+            alert_id INTEGER NOT NULL,
+            user_id  TEXT NOT NULL,
+            at       REAL NOT NULL,
+            PRIMARY KEY (alert_id, user_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_presence_geo ON presence(geohash6, at);
         CREATE INDEX IF NOT EXISTS idx_links_member ON links(member_id);
         CREATE INDEX IF NOT EXISTS idx_invites_to ON invites(to_id, state);
         CREATE INDEX IF NOT EXISTS idx_checkins_due ON checkins(due_at)
@@ -402,6 +437,11 @@ class HeartbeatIn(BaseModel):
     phone_batt: Optional[int] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+
+
+class PresenceIn(BaseModel):
+    lat: float
+    lon: float
 
 
 class AlertIn(BaseModel):
@@ -776,6 +816,69 @@ def remove_family(member_id: str, u=Depends(me)):
 
 
 # ---- alerts -------------------------------------------------------------
+# ---- geography, for the Good Samaritan fan-out --------------------------
+GEO_B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+
+def geohash(lat, lon, precision=6):
+    """Standard geohash. Six characters is a cell of roughly 1.2 x 0.6 km."""
+    lat_r, lon_r = [-90.0, 90.0], [-180.0, 180.0]
+    out, bit, ch, even = [], 0, 0, True
+    while len(out) < precision:
+        if even:
+            mid = (lon_r[0] + lon_r[1]) / 2
+            if lon > mid: ch = (ch << 1) | 1; lon_r[0] = mid
+            else:         ch = ch << 1;       lon_r[1] = mid
+        else:
+            mid = (lat_r[0] + lat_r[1]) / 2
+            if lat > mid: ch = (ch << 1) | 1; lat_r[0] = mid
+            else:         ch = ch << 1;       lat_r[1] = mid
+        even = not even
+        bit += 1
+        if bit == 5:
+            out.append(GEO_B32[ch])
+            bit, ch = 0, 0
+    return "".join(out)
+
+
+def metres_between(lat1, lon1, lat2, lon2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def coarsen(lat, lon):
+    """Snap to a ~330 m grid. What a stranger sees before they say yes."""
+    step = SAMARITAN_COARSE_M / 111000.0
+    return round(lat / step) * step, round(lon / step) * step
+
+
+def nearby_strangers(uid, lat, lon, now=None):
+    """Fresh presence within the radius, minus the person and their family.
+
+    Every fresh row is scored rather than being narrowed by geohash prefix
+    first. At this scale that is a handful of rows, and it avoids the cell-edge
+    bug where the one person standing across the street from an emergency is in
+    the neighbouring cell and never asked. The geohash is still stored, because
+    the contract in B3.3 promises it and a real deployment would index on it.
+    """
+    now = now or time.time()
+    known = set(family_of(uid)) | {uid}
+    with closing(db()) as c:
+        rows = c.execute("SELECT * FROM presence WHERE at > ?",
+                         (now - PRESENCE_FRESH_S,)).fetchall()
+    out = []
+    for r in rows:
+        if r["user_id"] in known:
+            continue
+        d = metres_between(lat, lon, r["lat"], r["lon"])
+        if d <= SAMARITAN_RADIUS_M:
+            out.append((r["user_id"], d))
+    return sorted(out, key=lambda x: x[1])
+
+
 def alert_row(r, author):
     return {"id": r["id"], "kind": r["kind"], "severity": r["severity"],
             "source": r["source"], "lat": r["lat"], "lon": r["lon"],
@@ -807,17 +910,57 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
 
     name = who["name"] if who else uid
     payload = alert_row(row, {"id": uid, "name": name})
+
+    # A near-miss is written down and told to nobody: it is the wearer's own
+    # record that the fall detector nearly fired, not an event.
+    if kind in PRIVATE_KINDS:
+        print(f"  [{kind}] from {name} ({uid}) -> logged, nobody told")
+        return payload, []
+
     targets = family_of(uid)
     await HUB.fanout(targets, {"t": "alert", "alert": payload})
     print(f"  [{kind}] from {name} ({uid}) -> {len(targets)} family member(s), "
           f"{sum(HUB.online(t) for t in targets)} online")
 
     # Send Remote System Push Notification via Expo Push Service API for closed/killed apps
-    push_title = f"🚨 EMERGENCY SOS — {name}" if sev >= 5 else f"⚠️ {kind.upper()} — {name}"
+    push_title = (f"EMERGENCY SOS - {name}" if sev >= 5
+                  else f"{kind.replace('_', ' ').upper()} - {name}")
     push_body = "Tap immediately to open Nigehban for location and emergency details."
     await send_expo_push_notifications(targets, push_title, push_body, {"alert_id": row["id"], "severity": sev})
 
+    if sev >= 5 and lat is not None and lon is not None:
+        await ask_samaritans(row, uid, lat, lon)
+
     return payload, targets
+
+
+async def ask_samaritans(row, uid, lat, lon):
+    """Ask strangers who are close, and tell them almost nothing (matrix #20).
+
+    What goes out is a kind, a coarse pin and a distance. No name, no exact
+    position, no way to work out whose alert it is. Somebody who is only
+    curious learns that an emergency happened near a road junction, which is
+    what they would have learned by hearing it. The rest is released by
+    /samaritan/{id}/respond, and only to the person who committed to going.
+    """
+    near = nearby_strangers(uid, lat, lon)
+    if not near:
+        return
+    clat, clon = coarsen(lat, lon)
+    for who, dist in near[:20]:
+        msg = {"t": "samaritan",
+               "alert": {"id": row["id"], "kind": row["kind"],
+                         "severity": row["severity"], "created_at": row["created_at"],
+                         "lat": round(clat, 4), "lon": round(clon, 4),
+                         "distance_m": int(round(dist / 50.0) * 50),
+                         "maps": f"https://maps.google.com/?q={clat:.4f},{clon:.4f}"}}
+        await HUB.to(who, msg)
+    await send_expo_push_notifications(
+        [w for w, _ in near[:20]],
+        "Someone near you needs help",
+        "A Nigehban emergency was raised close by. Open the app if you can go.",
+        {"alert_id": row["id"], "severity": row["severity"], "samaritan": True})
+    print(f"  [samaritan] alert {row['id']} -> {len(near[:20])} nearby stranger(s)")
 
 
 @app.post("/alert")
@@ -1030,8 +1173,11 @@ async def request_checkin(member_id: str, b: Optional[CheckinIn] = None, u=Depen
             " VALUES (?,?,'manual',?,?)", (member_id, u["id"], now + window, now))
         c.commit()
 
+    # `due_at` is the deadline in the server's own clock. The phone renders a
+    # countdown from it and never invents one: a message that arrives late must
+    # show the time that is actually left, not a fresh ninety seconds.
     await HUB.to(member_id, {"t": "checkin_req", "checkin_id": cur.lastrowid,
-                             "window": window,
+                             "window": window, "due_at": now + window,
                              "from": {"id": u["id"], "name": u["name"]}})
 
     # Hardware System Push Notification for closed/backgrounded apps
@@ -1144,6 +1290,58 @@ def watch_of(member_id: str, u=Depends(me)):
     }
 
 
+# ---- B3.3 / B3.4: the Good Samaritan --------------------------------------
+@app.post("/presence")
+def put_presence(b: PresenceIn, u=Depends(me)):
+    """Where you are, rounded, so a stranger's emergency can find you.
+
+    One row per person, overwritten -- this is a presence, not a trail. It is
+    stored at about a hundred metres, it is only read while it is fresh, and
+    the only thing it is ever used for is deciding who to ask.
+    """
+    lat, lon = round(b.lat, 3), round(b.lon, 3)
+    with closing(db()) as c:
+        c.execute("INSERT INTO presence (user_id,geohash6,lat,lon,at) VALUES (?,?,?,?,?) "
+                  "ON CONFLICT(user_id) DO UPDATE SET geohash6=excluded.geohash6, "
+                  "lat=excluded.lat, lon=excluded.lon, at=excluded.at",
+                  (u["id"], geohash(b.lat, b.lon), lat, lon, time.time()))
+        c.commit()
+    return {"ok": True, "geohash6": geohash(b.lat, b.lon)}
+
+
+@app.post("/samaritan/{alert_id}/respond")
+async def samaritan_respond(alert_id: int, u=Depends(me)):
+    """"I'm going." The only thing that releases a name and an exact pin.
+
+    Committing is the price of the detail, and it is logged with the responder
+    against the alert -- so the person in trouble knows exactly who is on the
+    way, and so a stranger who wanted the address rather than to help has to
+    put their own name to the request.
+    """
+    with closing(db()) as c:
+        row = c.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "no such alert")
+        if row["severity"] < 5:
+            raise HTTPException(403, "only a severity-5 alert asks for strangers")
+        if row["resolved_at"]:
+            raise HTTPException(410, "that alert has been stood down")
+        c.execute("INSERT OR IGNORE INTO samaritans VALUES (?,?,?)",
+                  (alert_id, u["id"], time.time()))
+        c.execute("INSERT OR IGNORE INTO acks VALUES (?,?,?)",
+                  (alert_id, u["id"], time.time()))
+        c.commit()
+        who = c.execute("SELECT id,name FROM users WHERE id=?", (row["user_id"],)).fetchone()
+
+    payload = alert_row(row, {"id": row["user_id"], "name": who["name"] if who else row["user_id"]})
+    responder = {"id": u["id"], "name": u["name"]}
+    await HUB.to(row["user_id"], {"t": "ack", "alert_id": alert_id, "by": responder,
+                                  "samaritan": True})
+    await HUB.fanout(family_of(row["user_id"]),
+                     {"t": "samaritan_on_way", "alert_id": alert_id, "by": responder})
+    return {"ok": True, "alert": payload}
+
+
 # ---- the sweeper --------------------------------------------------------
 async def sweeper():
     """One task, a five-second tick, and every deadline in the product.
@@ -1192,6 +1390,7 @@ async def sweep_once(now):
         buzz = c.execute(
             "SELECT * FROM watch_state WHERE mode='high_alert' AND next_buzz_at IS NOT NULL "
             "AND next_buzz_at<=?", (now,)).fetchall()
+        opened = {}
         for w in buzz:
             # Randomised, not fixed. A predictable buzz can be answered on
             # autopilot -- or by somebody else holding the phone -- and an
@@ -1199,14 +1398,22 @@ async def sweep_once(now):
             nxt = now + random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
             c.execute("UPDATE watch_state SET next_buzz_at=? WHERE user_id=?",
                       (nxt, w["user_id"]))
-            c.execute("INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at)"
-                      " VALUES (?,NULL,'high_alert',?,?)",
-                      (w["user_id"], now + CHECKIN_WINDOW_S, now))
+            cur = c.execute("INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at)"
+                            " VALUES (?,NULL,'high_alert',?,?)",
+                            (w["user_id"], now + CHECKIN_WINDOW_S, now))
+            opened[w["user_id"]] = (cur.lastrowid, nxt)
         if buzz:
             c.commit()
     for w in buzz:
+        checkin_id, nxt = opened[w["user_id"]]
+        # The id has to travel with the buzz. Without it the app has nothing to
+        # acknowledge, so "I am fine" fails and the sweeper escalates a person
+        # who answered -- the worst failure this product can have.
         await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
-                                    "window": CHECKIN_WINDOW_S})
+                                    "checkin_id": checkin_id,
+                                    "window": CHECKIN_WINDOW_S,
+                                    "due_at": now + CHECKIN_WINDOW_S,
+                                    "next_buzz_at": nxt})
 
     # 3. heartbeat watchdog: armed, and gone quiet
     with closing(db()) as c:

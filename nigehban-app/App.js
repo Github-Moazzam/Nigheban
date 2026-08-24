@@ -1,31 +1,48 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Linking, Modal, Platform, Pressable,
-  StyleSheet, Text, Vibration, View,
+  ActivityIndicator, Linking, Modal, Pressable, StyleSheet, Text, Vibration, View,
 } from 'react-native';
 import { call, clearSession, loadSession, useLive } from './src/api';
 import { useBandLink } from './src/bandLink';
+import CheckinBanner from './src/components/CheckinBanner';
+import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
+import SamaritanCall from './src/components/SamaritanCall';
+import { useAppFonts } from './src/fonts';
 import Alerts from './src/screens/Alerts';
-import Band from './src/screens/Band';
 import Auth from './src/screens/Auth';
+import Band from './src/screens/Band';
 import Family from './src/screens/Family';
 import Home from './src/screens/Home';
+import Setup from './src/screens/Setup';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
-import { useHeartbeat } from './src/watch';
+import { bandEventToAction, useSafetyMachine } from './src/state';
+import { C, S, T, sevColor } from './src/theme';
+import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
+import { useHeartbeat, usePresence } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
-import { setupNotificationChannels, sendEmergencyAlarmNotification, registerPushToken } from './src/notifications';
-import { C, MONO, sevColor } from './src/theme';
-import { Button, Pill } from './src/ui';
-
-const mono = Platform.select(MONO);
+import {
+  registerPushToken, sendEmergencyAlarmNotification, setupNotificationChannels,
+} from './src/notifications';
 
 const TABS = [
-  ['home', 'HOME'],
-  ['band', 'BAND'],
-  ['family', 'FAMILY'],
-  ['alerts', 'ALERTS'],
+  ['home',   'Home',   'home'],
+  ['band',   'Band',   'watch'],
+  ['family', 'Family', 'users'],
+  ['alerts', 'Alerts', 'bell'],
+  ['setup',  'Setup',  'settings'],
 ];
+
+const TAKEOVER_TITLE = {
+  sos: 'SOS', snatch: 'BAND TORN OFF', fall: 'FALL DETECTED',
+  checkin_missed: 'MISSED CHECK-IN', watch_lost: 'WATCH STOPPED REPORTING',
+  going_dark: 'PHONE ABOUT TO DIE',
+};
+
+// Battery thresholds, from the acceptance matrix: 20 % tells the family, 5 %
+// says the phone is about to stop being a safety device at all.
+const BATT_LOW = 20;
+const BATT_DARK = 5;
 
 // Local notifications are best-effort: Expo Go on Android has limits, and a
 // demo cannot hinge on the notification shade. The in-app takeover below is
@@ -61,13 +78,14 @@ function Main() {
   const [tab, setTab] = useState('home');
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const [incoming, setIncoming] = useState(null);   // full-screen takeover
-  const [checkinFrom, setCheckinFrom] = useState(null);
-  const [activeSos, setActiveSos] = useState(null); // my own live SOS
-  const [highAlert, setHighAlert] = useState(false);
-  const [nextBuzzAt, setNextBuzzAt] = useState(null);
+  const [incoming, setIncoming] = useState(null);     // family emergency takeover
+  const [askSheet, setAskSheet] = useState(null);     // the check-in question
+  const [samaritan, setSamaritan] = useState(null);   // a stranger nearby
+  const [deliveredTo, setDeliveredTo] = useState(null);
   const [toast, setToast] = useState(null);
+  const [fix, setFix] = useState(null);               // last position, from Home
 
+  const { state, ctx, dispatch, is, watchMode } = useSafetyMachine();
   const insets = useEdgeInsets();
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -76,106 +94,167 @@ function Main() {
       await setupNotificationChannels();
       const s = await loadSession();
       setSession(s);
-      if (s) {
-        startBackgroundWatch();
-        registerPushToken(s);
-      }
+      if (s) { startBackgroundWatch(); registerPushToken(s); }
       setBooting(false);
     })();
   }, []);
 
   useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4000);
+    if (!toast) return undefined;
+    const t = setTimeout(() => setToast(null), 4500);
     return () => clearTimeout(t);
   }, [toast]);
 
   // ---- raising and standing down -----------------------------------------
   const raise = useCallback(async (payload) => {
-    if (!session) return;
+    if (!session) return null;
     try {
-      const r = await call(session, '/alert', { method: 'POST', body: payload });
-      if (payload.kind === 'sos') {
-        setActiveSos(r.alert);
+      const body = { lat: fix?.lat, lon: fix?.lon, accuracy: fix?.acc, ...payload };
+      const r = await call(session, '/alert', { method: 'POST', body });
+      if (['sos', 'snatch', 'fall'].includes(payload.kind)) {
+        dispatch('SOS_RAISED', { alert: r.alert });
+        setDeliveredTo(r.delivered_to);
         Vibration.vibrate([0, 300, 120, 300]);
       }
-      setToast(r.delivered_to
-        ? `sent to ${r.delivered_to} family member${r.delivered_to === 1 ? '' : 's'}`
-        : 'nobody in your family list yet — add someone first');
+      if (payload.kind !== 'near_miss') {
+        setToast(r.delivered_to
+          ? `Sent to ${r.delivered_to} family member${r.delivered_to === 1 ? '' : 's'}`
+          : 'Nobody is in your family list yet — add someone first');
+      }
       bump();
       return r.alert;
     } catch (e) {
       setToast(e.message);
+      return null;
     }
-  }, [session, bump]);
+  }, [session, fix, dispatch, bump]);
 
   const resolve = useCallback(async (id) => {
     try {
       await call(session, `/alert/${id}/resolve`, { method: 'POST' });
-      setActiveSos(null);
-      setToast('stood down — your family has been told');
+      dispatch('SOS_CLEARED');
+      setDeliveredTo(null);
+      setToast('Stood down — your family has been told');
       bump();
     } catch (e) {
       setToast(e.message);
     }
-  }, [session, bump]);
+  }, [session, dispatch, bump]);
 
-  // ---- the band drives the same two actions ------------------------------
-  const activeRef = useRef(activeSos);
-  activeRef.current = activeSos;
+  const ackCheckin = useCallback(async (checkin) => {
+    if (!session) return;
+    setAskSheet(null);
+    try {
+      // Prefer the specific row. Falling back to a plain `checkin_ack` alert is
+      // not a nicety: a buzz that arrived while the socket was down has no id
+      // here, and the server closes every open question either way.
+      if (checkin?.checkin_id) {
+        await call(session, `/checkin/${checkin.checkin_id}/ack`, { method: 'POST' });
+      } else {
+        await call(session, '/alert', { method: 'POST', body: { kind: 'checkin_ack', source: 'app' } });
+      }
+      dispatch('CHECKIN_CLOSED');
+      setToast('Answered — your family can see you are fine');
+      bump();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }, [session, dispatch, bump]);
+
+  const toggleHighAlert = useCallback(async (on) => {
+    if (!session) return;
+    try {
+      const r = await call(session, '/watch/high_alert', { method: 'POST', body: { on } });
+      dispatch('HIGH_ALERT_SET', { on, nextBuzzAt: r.next_buzz_at || null });
+      setToast(on
+        ? 'High Alert armed — the server checks on you even if this app is closed'
+        : 'High Alert off');
+      bump();
+    } catch (e) {
+      // Say what actually happened. A band that buzzed twice while the server
+      // never heard is worse than a plain failure, because the wearer now
+      // believes she is being watched.
+      setToast(`Could not reach the server — High Alert is NOT ${on ? 'on' : 'off'}`);
+    }
+  }, [session, dispatch, bump]);
+
+  // ---- the band drives the same actions ----------------------------------
+  const ctxRef = useRef(ctx);
+  ctxRef.current = ctx;
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const onBandEvent = useCallback((ev) => {
-    if (ev.e === 'sos') {
-      if (!activeRef.current) raise({ kind: 'sos', source: 'band', note: ev.src || '' });
-    } else if (ev.e === 'checkin_ack') {
-      // Key 1 is "I'm fine": it stands down a live SOS, otherwise it is a
-      // plain check-in. That gives start AND stop from the band with no
-      // firmware change at all.
-      if (activeRef.current) resolve(activeRef.current.id);
-      else raise({ kind: 'checkin_ack', source: 'band' });
-    } else if (ev.e === 'fall') {
-      raise({ kind: 'fall', source: 'band', note: ev.peak ? `peak ${ev.peak}g` : '' });
-    } else if (ev.e === 'snatch') {
-      // The band left the wrist while armed. Same urgency as an SOS, but the
-      // wearer did not choose it, so the alert has to record which it was.
-      if (!activeRef.current) raise({ kind: 'snatch', source: 'band' });
-    } else if (ev.e === 'low_battery') {
-      raise({ kind: 'low_battery', source: 'band', note: `${ev.pct ?? '?'}%` });
-    } else if (ev.e === 'high_alert_on' || ev.e === 'high_alert_off') {
-      // High Alert is a server-owned mode, and now actually is one. The server
-      // holds `next_buzz_at` and re-buzzes on its own tick, so the mode
-      // survives this app being killed -- which is the exact scenario it
-      // exists for. The band's hold-3s is only the switch.
-      const on = ev.e === 'high_alert_on';
-      setHighAlert(on);
-      (async () => {
-        try {
-          await call(session, '/watch/high_alert', { method: 'POST', body: { on } });
-          setToast(on
-            ? 'High Alert on — the server will check on you every few minutes, '
-              + 'even if this app is closed'
-            : 'High Alert off');
-        } catch (e) {
-          // Say what actually happened. A band that buzzed twice while the
-          // server never heard is worse than a plain failure, because the
-          // wearer now believes they are being watched.
-          setHighAlert(!on);
-          setToast(`could not reach the server — High Alert is NOT ${on ? 'on' : 'off'}`);
-        }
-      })();
+    const action = bandEventToAction(ev);
+    if (!action) return;
+
+    if (action.type === 'FALL_DETECTED') {
+      if (stateRef.current === 'sos_live') return;      // already the worst case
+      dispatch('FALL_DETECTED', {
+        severity: 4, note: action.note,
+        endsAt: Date.now() + FALL_WINDOW_S[4] * 1000,
+      });
+      return;
     }
-  }, [raise, resolve, session]);
+
+    if (action.type === 'SOS_RAISED') {
+      if (!ctxRef.current.activeSos) {
+        raise({ kind: ev.e === 'snatch' ? 'snatch' : 'sos', source: 'band', note: ev.src || '' });
+      }
+      return;
+    }
+
+    if (action.type === 'CHECKIN_CLOSED') {
+      // Key 1 is "I'm fine": it stands down a live alert, otherwise it answers
+      // the open question. Start and stop from the band, with no firmware change.
+      const live = ctxRef.current.activeSos;
+      if (live) resolve(live.id);
+      else ackCheckin(ctxRef.current.checkin);
+      return;
+    }
+
+    if (action.type === 'HIGH_ALERT_SET') {
+      // The band's hold-3s is only the switch; the mode itself is server-owned
+      // so that it outlives this app being killed.
+      toggleHighAlert(action.on);
+    }
+  }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert]);
 
   const band = useBandLink(onBandEvent);
 
-  // The server's watchdog listens for silence, so the phone has to speak while
-  // anything is armed. Foreground only for now -- N2's foreground service is
-  // what keeps this going once Android backgrounds the app.
+  // ---- U3.4 battery: one alert per threshold crossing --------------------
+  const battLatch = useRef({ low: false, dark: false });
+  useEffect(() => {
+    const level = band.battery;
+    if (level == null) return;
+    const low = level <= BATT_LOW;
+    const dark = level <= BATT_DARK;
+
+    if (dark && !battLatch.current.dark) {
+      battLatch.current = { low: true, dark: true };
+      raise({ kind: 'going_dark', source: 'app', note: `${Math.round(level)}%` });
+      setToast('Battery critical — your family has been told where you were');
+    } else if (low && !battLatch.current.low) {
+      battLatch.current.low = true;
+      raise({ kind: 'low_battery', source: 'app', note: `${Math.round(level)}%` });
+    } else if (!low) {
+      battLatch.current = { low: false, dark: false };   // charged: arm it again
+    }
+    dispatch('BATTERY', { level, low, goingDark: dark });
+  }, [band.battery, raise, dispatch]);
+
+  // The server's watchdog listens for silence, so the phone speaks while
+  // anything is armed. N2's foreground service is what keeps this going once
+  // Android backgrounds the app.
   useHeartbeat(session, {
-    mode: activeSos ? 'sos' : highAlert ? 'high_alert' : 'idle',
+    mode: watchMode,
     bandLink: band.status === 'connected' || band.status === 'virtual',
     batt: band.battery,
   });
+
+  // Presence is what makes the Good Samaritan fan-out possible at all: it is
+  // the only way the server can know who is close to somebody else's emergency.
+  usePresence(session, fix);
 
   // ---- live socket --------------------------------------------------------
   const serverOnline = useLive(session, {
@@ -186,7 +265,7 @@ function Main() {
         Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
         sendEmergencyAlarmNotification(a);
       } else {
-        notify(`${a.user.name} — ${a.kind.toUpperCase()}`,
+        notify(`${a.user.name} — ${a.kind.replace('_', ' ')}`,
                a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
       }
       bump();
@@ -196,36 +275,46 @@ function Main() {
       setToast(`${m.user.name} is safe — they stood the alert down`);
       bump();
     },
-    ack: (m) => setToast(`${m.by.name} has seen your alert and is responding`),
+    ack: (m) => {
+      dispatch('RESPONDER', { by: m.by });
+      setToast(m.samaritan
+        ? `${m.by.name} is nearby and on the way`
+        : `${m.by.name} has seen your alert and is responding`);
+    },
     checkin_req: (m) => {
-      setCheckinFrom({
-        ...m.from,
-        checkin_id: m.checkin_id,
-        window: m.window || 90,
-        _startAt: Date.now() / 1000,
-      });
+      const checkin = {
+        ...m.from, checkin_id: m.checkin_id, window: m.window || 90,
+        due_at: m.due_at, _startAt: Date.now() / 1000,
+      };
+      dispatch('CHECKIN_ASKED', { checkin });
+      setAskSheet(checkin);
       Vibration.vibrate([0, 200, 100, 200]);
-      band.send({ c: 'checkin_req', window: m.window ?? 45 });   // buzz the band too
+      band.send({ c: 'checkin_req', window: m.window ?? 45 });
       notify(`${m.from.name} is checking on you`, 'Tap "I am fine" to answer.');
     },
     // The sweeper's own knock, on the server's schedule rather than anyone's
-    // thumb. It looks the same to the wearer, which is the point: the mode
-    // keeps working whether or not a family member is awake.
+    // thumb. It looks the same to the wearer, which is the point.
     buzz_now: (m) => {
-      setCheckinFrom({
-        name: null,
-        system: true,
-        reason: m.reason,
-        checkin_id: m.checkin_id,
-        window: m.window || 90,
-        _startAt: Date.now() / 1000,
-      });
+      const checkin = {
+        name: null, system: true, reason: m.reason, checkin_id: m.checkin_id,
+        window: m.window || 90, due_at: m.due_at, _startAt: Date.now() / 1000,
+      };
+      dispatch('CHECKIN_ASKED', { checkin });
+      if (m.next_buzz_at) dispatch('NEXT_BUZZ', { at: m.next_buzz_at });
+      setAskSheet(checkin);
       Vibration.vibrate([0, 400, 200, 400]);
       band.send({ c: 'checkin_req', window: m.window ?? 90 });
       notify('Nigehban is checking on you', 'Tap "I am fine" to answer.');
     },
     checkin_ack: (m) => setToast(`${m.by.name} answered — they are fine`),
-    watch_updated: (m) => bump(),
+    watch_updated: () => bump(),
+    samaritan: (m) => {
+      setSamaritan(m.alert);
+      Vibration.vibrate([0, 300, 150, 300]);
+      notify('Someone near you needs help',
+             'A Nigehban emergency was raised close by. Open the app if you can go.');
+    },
+    samaritan_on_way: (m) => setToast(`${m.by.name} is nearby and heading there`),
     invite: (m) => {
       setToast(`${m.invite.from.name} is asking to be your family — open FAMILY to answer`);
       notify(`${m.invite.from.name} wants to be your family`,
@@ -238,35 +327,15 @@ function Main() {
   const signOut = async () => {
     await stopBackgroundWatch();
     await clearSession();
+    dispatch('RESET');
     setSession(null);
-    setActiveSos(null);
     setIncoming(null);
   };
 
-  const toggleHighAlert = useCallback(async (on) => {
-    if (!session) return;
-    try {
-      const r = await call(session, '/watch/high_alert', { method: 'POST', body: { on } });
-      setHighAlert(on);
-      setNextBuzzAt(r.next_buzz_at || null);
-      setToast(on ? 'High Alert armed server-side' : 'High Alert disarmed');
-      bump();
-    } catch (e) {
-      setToast(e.message);
-    }
-  }, [session, bump]);
-
-  const ackCheckin = useCallback(async (id) => {
-    if (!session) return;
-    try {
-      await call(session, `/checkin/${id || 0}/ack`, { method: 'POST' });
-      setCheckinFrom(null);
-      setToast('Check-in answered — you are fine');
-      bump();
-    } catch (e) {
-      setToast(e.message);
-    }
-  }, [session, bump]);
+  const respondAsSamaritan = useCallback(async (alertId) => {
+    const r = await call(session, `/samaritan/${alertId}/respond`, { method: 'POST' });
+    return r.alert;
+  }, [session]);
 
   if (booting) {
     return (
@@ -294,101 +363,126 @@ function Main() {
           <Text style={st.brand}>NIGEHBAN</Text>
           <Text style={st.who}>{session.name} · {session.user_id}</Text>
         </View>
-        <View style={{ alignItems: 'flex-end', gap: 6 }}>
-          <Pill text={serverOnline ? 'connected' : 'offline'}
-                tone={serverOnline ? C.green : C.alarm}
-                bg={serverOnline ? C.greenBg : C.alarmBg} />
-          <Pressable onPress={signOut}><Text style={st.signout}>sign out</Text></Pressable>
+        <View style={st.headerRight}>
+          <Chip text={serverOnline ? 'connected' : 'offline'}
+                tone={serverOnline ? C.green : C.red}
+                icon={serverOnline ? 'wifi' : 'wifi-off'} />
+          <IconButton name="log-out" label="Sign out" onPress={signOut} />
         </View>
       </View>
 
       <View style={st.flex}>
         {tab === 'home' && (
-          <Home session={session} band={band} activeSos={activeSos}
-                onRaise={raise} onResolve={resolve} serverOnline={serverOnline}
-                onOpenBand={() => setTab('band')}
-                pendingCheckin={checkinFrom}
-                onAckCheckin={ackCheckin}
-                highAlertArmed={highAlert}
-                nextBuzzAt={nextBuzzAt}
-                onToggleHighAlert={toggleHighAlert} />
+          <Home session={session} band={band} ctx={ctx}
+                deliveredTo={deliveredTo} onRaise={raise} onResolve={resolve}
+                serverOnline={serverOnline} onOpenBand={() => setTab('band')}
+                onOpenSetup={() => setTab('setup')}
+                onAckCheckin={ackCheckin} onToggleHighAlert={toggleHighAlert}
+                onFix={setFix} />
         )}
         {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
         {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}
         {tab === 'alerts' && <Alerts session={session} refreshKey={refreshKey} />}
+        {tab === 'setup' && <Setup />}
       </View>
 
       {toast ? (
-        <Pressable onPress={() => setToast(null)}
-                   style={[st.toast, { bottom: 86 + insets.bottom }]}>
+        <Pressable onPress={() => setToast(null)} accessibilityRole="alert"
+                   style={[st.toast, { bottom: 88 + insets.bottom }]}>
+          <Icon name="info" size={15} color={C.dim} />
           <Text style={st.toastText}>{toast}</Text>
         </Pressable>
       ) : null}
 
-      <View style={[st.tabbar, { paddingBottom: 10 + insets.bottom }]}>
-        {TABS.map(([k, label]) => (
-          <Pressable key={k} onPress={() => setTab(k)} style={st.tabBtn}>
-            <Text style={[st.tabText, tab === k && { color: C.green }]}>{label}</Text>
-            <View style={[st.tabMark, tab === k && { backgroundColor: C.green }]} />
-          </Pressable>
-        ))}
+      <View style={[st.tabbar, { paddingBottom: 8 + insets.bottom }]}>
+        {TABS.map(([k, label, icon]) => {
+          const on = tab === k;
+          return (
+            <Pressable key={k} onPress={() => setTab(k)} style={st.tabBtn}
+                       accessibilityRole="tab" accessibilityState={{ selected: on }}
+                       accessibilityLabel={label}>
+              <Icon name={icon} size={19} color={on ? C.green : C.faint} />
+              <Text style={[st.tabText, on && { color: C.green }]}>{label}</Text>
+            </Pressable>
+          );
+        })}
       </View>
 
+      {/* ---- a fall, and the seconds to say it was nothing ---- */}
+      <FallCountdown
+        fall={is('fall_pending') ? ctx.fall : null}
+        onCancel={() => {
+          dispatch('FALL_CANCELLED');
+          raise({ kind: 'near_miss', source: 'band', note: ctx.fall?.note || '' });
+          setToast('Cancelled — noted for you only, nobody was told');
+        }}
+        onEscalate={() => raise({ kind: 'fall', source: 'band', note: ctx.fall?.note || '' })}
+      />
+
       {/* ---- somebody in the family is in trouble ---- */}
-      <Modal visible={!!incoming} animationType="fade" transparent={false}>
+      <Modal visible={!!incoming} animationType="fade" onRequestClose={() => setIncoming(null)}>
         {incoming ? (
-          <View style={[st.takeover, { backgroundColor: C.alarmBg }]}>
-            <Text style={[st.takeKind, { color: sevColor(incoming.severity) }]}>
-              {incoming.kind === 'fall' ? 'FALL DETECTED'
-                : incoming.kind === 'snatch' ? 'BAND TORN OFF' : 'SOS'}
-            </Text>
-            <Text style={st.takeName}>{incoming.user.name}</Text>
+          <View style={st.takeover}>
+            <View style={[st.takeBadge, { backgroundColor: sevColor(incoming.severity) }]}>
+              <Icon name="alert-octagon" size={16} color={C.bg} />
+              <Text style={st.takeBadgeText}>
+                {TAKEOVER_TITLE[incoming.kind] || incoming.kind.replace('_', ' ').toUpperCase()}
+              </Text>
+            </View>
+
+            <Txt variant="display" style={st.takeName}>{incoming.user.name}</Txt>
             <Text style={st.takeMeta}>
-              {incoming.source === 'band' ? 'raised from the wristband' : 'raised from the phone'}
+              {incoming.source === 'band' ? 'Raised from the wristband'
+                : incoming.source === 'server' ? 'Raised by the server watchdog'
+                : 'Raised from their phone'}
             </Text>
+
             <View style={st.takeBtns}>
               {incoming.maps ? (
-                <Button title="SEE WHERE THEY ARE" filled tone={C.alarm} big
+                <Button title="SEE WHERE THEY ARE" filled big tone={C.red} icon="navigation"
                         onPress={() => { Vibration.cancel(); Linking.openURL(incoming.maps); }} />
               ) : null}
-              <Button title="I'M ON IT" tone={C.green} filled
+              <Button title="I'M ON IT" tone={C.green} filled icon="user-check"
                       onPress={async () => {
                         Vibration.cancel();
-                        try { await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' }); } catch {}
+                        try { await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' }); } catch { /* they are still told by the socket */ }
                         setIncoming(null); bump();
                       }} />
-              <Button title="dismiss" tone={C.dim}
+              <Button title="Dismiss" tone={C.dim}
                       onPress={() => { Vibration.cancel(); setIncoming(null); }} />
             </View>
           </View>
         ) : null}
       </Modal>
 
-      {/* ---- a parent is checking on you ---- */}
-      <Modal visible={!!checkinFrom} animationType="slide" transparent>
+      {/* ---- somebody is checking on you ---- */}
+      <Modal visible={!!askSheet} animationType="slide" transparent
+             onRequestClose={() => setAskSheet(null)}>
         <View style={st.sheetWrap}>
+          <Pressable style={st.sheetBackdrop} onPress={() => setAskSheet(null)}
+                     accessibilityLabel="Answer later" />
           <View style={st.sheet}>
-            <Text style={st.sheetTitle}>
-              {checkinFrom?.system
+            <View style={st.grab} />
+            <Txt variant="h1">
+              {askSheet?.system
                 ? 'Nigehban is checking on you'
-                : `${checkinFrom?.name} is checking on you`}
-            </Text>
+                : `${askSheet?.name} is checking on you`}
+            </Txt>
             <Text style={st.sheetBody}>
-              {checkinFrom?.system
-                ? 'High Alert is on. Answer, or your family is told you did not.'
+              {askSheet?.system
+                ? 'High Alert is on. Answer, or your family is told that you did not.'
                 : 'Answer and they will see straight away that you are fine.'}
             </Text>
-            <Button title="I AM FINE" filled big tone={C.green}
-                    onPress={async () => {
-                      Vibration.cancel();
-                      setCheckinFrom(null);
-                      await raise({ kind: 'checkin_ack', source: 'app' });
-                    }} />
-            <Button title={checkinFrom?.system ? 'later' : 'not now'} tone={C.dim}
-                    onPress={() => { Vibration.cancel(); setCheckinFrom(null); }} />
+            <CheckinBanner checkin={askSheet} onAck={ackCheckin} />
+            <Button title={askSheet?.system ? 'Answer later' : 'Not now'} tone={C.dim}
+                    onPress={() => { Vibration.cancel(); setAskSheet(null); }} />
           </View>
         </View>
       </Modal>
+
+      {/* ---- a stranger nearby needs help ---- */}
+      <SamaritanCall call={samaritan} onRespond={respondAsSamaritan}
+                     onDismiss={() => { Vibration.cancel(); setSamaritan(null); }} />
     </View>
   );
 }
@@ -396,42 +490,68 @@ function Main() {
 const st = StyleSheet.create({
   flex: { flex: 1, backgroundColor: C.bg },
   center: { alignItems: 'center', justifyContent: 'center' },
+
   header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
-    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 12,
-    borderBottomWidth: 1, borderBottomColor: C.line,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: S.lg, paddingTop: S.md, paddingBottom: S.md,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line,
   },
-  brand: { fontFamily: mono, color: C.text, fontSize: 15, letterSpacing: 4 },
-  who: { fontFamily: mono, color: C.faint, fontSize: 10, marginTop: 3 },
-  signout: { fontFamily: mono, color: C.faint, fontSize: 10, textDecorationLine: 'underline' },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: S.sm },
+  brand: { ...T.h2, color: C.text, letterSpacing: 2 },
+  who: { ...T.meta, color: C.faint, marginTop: 1 },
+
   tabbar: {
-    flexDirection: 'row', borderTopWidth: 1, borderTopColor: C.line,
-    backgroundColor: C.surface,
+    flexDirection: 'row', backgroundColor: C.surface,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line,
+    paddingTop: S.sm,
   },
-  tabBtn: { flex: 1, alignItems: 'center', paddingTop: 12, paddingBottom: 10, gap: 6 },
-  tabText: { fontFamily: mono, fontSize: 11, letterSpacing: 1.6, color: C.faint },
-  tabMark: { height: 2, width: 22, backgroundColor: 'transparent', borderRadius: 2 },
+  tabBtn: { flex: 1, alignItems: 'center', gap: 4, paddingVertical: 6, minHeight: 48 },
+  tabText: { ...T.label, color: C.faint },
+
   toast: {
-    position: 'absolute', left: 14, right: 14, bottom: 74,
-    backgroundColor: C.raised, borderWidth: 1, borderColor: C.line,
-    borderRadius: 4, padding: 12,
+    position: 'absolute', left: S.lg, right: S.lg, flexDirection: 'row',
+    alignItems: 'center', gap: S.sm, backgroundColor: C.raised,
+    borderRadius: 8, paddingHorizontal: S.md, paddingVertical: S.md,
   },
-  toastText: { fontFamily: mono, color: C.text, fontSize: 12, lineHeight: 18 },
-  takeover: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 26, gap: 10 },
-  takeKind: { fontFamily: mono, fontSize: 46, letterSpacing: 6, fontWeight: '800' },
-  takeName: { fontFamily: mono, color: C.text, fontSize: 26, marginTop: 4 },
-  takeMeta: { fontFamily: mono, color: C.dim, fontSize: 12, marginBottom: 22 },
-  takeBtns: { alignSelf: 'stretch', gap: 12 },
-  sheetWrap: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#000A' },
+  toastText: { ...T.meta, color: C.text, flex: 1 },
+
+  takeover: {
+    flex: 1, backgroundColor: C.redSoft, alignItems: 'center',
+    justifyContent: 'center', padding: S.xl, gap: S.sm,
+  },
+  takeBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: S.sm,
+    paddingHorizontal: S.md, paddingVertical: S.sm, borderRadius: 4,
+  },
+  takeBadgeText: { ...T.label, color: C.bg, fontSize: 12 },
+  takeName: { color: C.text, textAlign: 'center', marginTop: S.md },
+  takeMeta: { ...T.body, color: C.dim, marginBottom: S.xl },
+  takeBtns: { alignSelf: 'stretch', gap: S.md },
+
+  sheetWrap: { flex: 1, justifyContent: 'flex-end' },
+  sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: C.scrim },
   sheet: {
-    backgroundColor: C.surface, borderTopWidth: 2, borderTopColor: C.green,
-    padding: 22, paddingBottom: 34, gap: 14,
+    backgroundColor: C.surface, borderTopLeftRadius: 14, borderTopRightRadius: 14,
+    padding: S.xl, paddingBottom: S.xxl, gap: S.md,
   },
-  sheetTitle: { fontFamily: mono, color: C.text, fontSize: 19, lineHeight: 26 },
-  sheetBody: { fontFamily: mono, color: C.dim, fontSize: 12, lineHeight: 19 },
+  grab: {
+    width: 36, height: 4, borderRadius: 2, backgroundColor: C.line,
+    alignSelf: 'center', marginBottom: S.sm,
+  },
+  sheetBody: { ...T.body, color: C.dim },
 });
 
 export default function App() {
+  const fontsReady = useAppFonts();
+
+  if (!fontsReady) {
+    return (
+      <View style={[st.flex, st.center]}>
+        <ActivityIndicator color={C.green} size="large" />
+      </View>
+    );
+  }
+
   return (
     <SafeAreaRoot>
       <Main />

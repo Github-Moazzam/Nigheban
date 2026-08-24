@@ -1,29 +1,48 @@
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
+  Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import CheckinBanner from '../components/CheckinBanner';
 import HighAlertPanel from '../components/HighAlertPanel';
-import { C, MONO, fmtAgo } from '../theme';
-import { Button, Card, Label, Pill, Stat } from '../ui';
-
-const mono = Platform.select(MONO);
+import SosLiveView from '../components/SosLiveView';
+import { pendingPermissions } from './Setup';
+import { C, S, T, fmtAgo } from '../theme';
+import { Banner, Button, Card, Chip, Divider, Icon, Stat, Txt } from '../ui';
 
 const BAND_LABEL = {
-  idle: 'not connected', scanning: 'looking for the band…', connecting: 'connecting…',
-  connected: 'connected', disconnected: 'lost the band', simulated: 'simulated',
-  virtual: 'this phone is the band',
-  'no-permission': 'bluetooth permission denied',
+  idle: 'Not connected', scanning: 'Searching', connecting: 'Connecting',
+  connected: 'Connected', disconnected: 'Lost the band', simulated: 'Simulated',
+  virtual: 'This phone is the band',
+  'no-permission': 'Bluetooth denied',
 };
 
-export default function Home({ session, band, activeSos, onRaise, onResolve,
-                              serverOnline, onOpenBand, pendingCheckin,
-                              onAckCheckin, highAlertArmed, nextBuzzAt, onToggleHighAlert }) {
+/**
+ * HOME — one question answered above the fold: can she raise an alarm right now?
+ *
+ * Everything on this screen is ordered by what a frightened person needs
+ * first. The SOS control is the largest thing on it and never moves, never
+ * scrolls out of reach behind a card, and never changes size when state
+ * changes elsewhere. The rest is status: the band, the watch, the battery, the
+ * fix — each one written so that a failure reads as a sentence, not a colour.
+ */
+export default function Home({
+  session, band, ctx, deliveredTo, onRaise, onResolve, serverOnline,
+  onOpenBand, onOpenSetup, onAckCheckin, onToggleHighAlert, onFix,
+}) {
   const [fix, setFix] = useState(null);
-  const [locNote, setLocNote] = useState('asking for location…');
+  const [locState, setLocState] = useState('asking');   // asking|ok|denied|error
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [setupLeft, setSetupLeft] = useState(0);
+
+  // A safety app that has been denied notifications is a safety app that does
+  // not work, and nothing else on this screen would say so.
+  useEffect(() => {
+    let alive = true;
+    pendingPermissions().then((n) => { if (alive) setSetupLeft(n); }).catch(() => {});
+    return () => { alive = false; };
+  }, [refreshing]);
 
   // Location is requested once and then watched, so an SOS never waits on GPS.
   useEffect(() => {
@@ -31,20 +50,22 @@ export default function Home({ session, band, activeSos, onRaise, onResolve,
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') { setLocNote('location permission denied'); return; }
+        if (status !== 'granted') { setLocState('denied'); return; }
         sub = await Location.watchPositionAsync(
           { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 5 },
           (p) => {
-            setFix({ lat: p.coords.latitude, lon: p.coords.longitude,
-                     acc: p.coords.accuracy, at: Date.now() });
-            setLocNote(null);
+            const next = { lat: p.coords.latitude, lon: p.coords.longitude,
+                           acc: p.coords.accuracy, at: Date.now() };
+            setFix(next);
+            setLocState('ok');
+            onFix?.(next);
           });
-      } catch (e) {
-        setLocNote('location unavailable');
+      } catch {
+        setLocState('error');
       }
     })();
     return () => sub?.remove();
-  }, []);
+  }, [onFix]);
 
   const fire = useCallback(async (kind, source) => {
     setBusy(true);
@@ -57,138 +78,194 @@ export default function Home({ session, band, activeSos, onRaise, onResolve,
 
   const bandTone =
     band.status === 'connected' ? C.green
-    : band.status === 'virtual' ? C.amber
-    : band.simulated ? C.amber
-    : band.status.startsWith('error') || band.status === 'disconnected' ? C.alarm
+    : band.status === 'virtual' || band.simulated ? C.amber
+    : band.status === 'disconnected' || band.status === 'no-permission' ? C.red
     : C.dim;
+
+  const batt = ctx.battery;
 
   return (
     <ScrollView
       contentContainerStyle={s.wrap}
-      refreshControl={<RefreshControl refreshing={refreshing} tintColor={C.green}
-        onRefresh={async () => { setRefreshing(true); setTimeout(() => setRefreshing(false), 600); }} />}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} tintColor={C.green}
+          onRefresh={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 600); }} />
+      }
     >
-      {/* ---- active check-in countdown banner ---- */}
-      {pendingCheckin ? (
-        <CheckinBanner checkin={pendingCheckin} onAck={onAckCheckin} />
+      {/* ---- things that are wrong, before anything else ---- */}
+      {!serverOnline ? (
+        <Banner tone={C.red} icon="wifi-off" title="Not connected to the server">
+          Alerts raised now will not reach anybody. Check the address on the sign-in
+          screen — a tunnel URL changes every time the laptop restarts.
+        </Banner>
       ) : null}
 
-      {/* ---- the one thing that matters ---- */}
-      {activeSos ? (
-        <Card tone={C.alarm} style={{ backgroundColor: C.alarmBg }}>
-          <Label color={C.alarm}>SOS is live</Label>
-          <Text style={s.sosLive}>Your family has been alerted</Text>
-          <Text style={s.sosMeta}>
-            raised {fmtAgo(activeSos.created_at)} · from {activeSos.source === 'band' ? 'the band' : 'this phone'}
-          </Text>
-          <Button title="I'M SAFE — STAND DOWN" tone={C.green} filled
-                  disabled={busy} onPress={() => onResolve(activeSos.id)} />
-        </Card>
+      {setupLeft > 0 ? (
+        <Banner tone={C.amber} icon="settings"
+                title={`${setupLeft} permission${setupLeft === 1 ? '' : 's'} still missing`}>
+          <>
+            <Text style={[T.meta, { color: C.dim }]}>
+              Until these are granted, parts of the watch cannot run — and Android
+              will not ask you again on its own.
+            </Text>
+            <View style={{ marginTop: S.sm }}>
+              <Button title="FINISH SETUP" icon="arrow-right" onPress={onOpenSetup} />
+            </View>
+          </>
+        </Banner>
+      ) : null}
+
+      {batt.goingDark ? (
+        <Banner tone={C.red} icon="battery" title="This phone is about to die">
+          Your family has been told where you were. Charge it, or tell someone
+          where you are going while you still can.
+        </Banner>
+      ) : batt.low ? (
+        <Banner tone={C.amber} icon="battery" title={`Battery at ${Math.round(batt.level)}%`}>
+          Your family has been warned. Below 5% the watch stops being able to help.
+        </Banner>
+      ) : null}
+
+      {/* ---- an open question ---- */}
+      {ctx.checkin ? <CheckinBanner checkin={ctx.checkin} onAck={onAckCheckin} /> : null}
+
+      {/* ---- the one control that matters ---- */}
+      {ctx.activeSos ? (
+        <SosLiveView alert={ctx.activeSos} deliveredTo={deliveredTo}
+                     responders={ctx.responders} busy={busy}
+                     fix={fix} onStandDown={onResolve} />
       ) : (
         <Pressable
           onLongPress={() => fire('sos', 'app')}
           delayLongPress={600}
-          style={({ pressed }) => [s.sosBtn, pressed && { backgroundColor: C.alarmBg }]}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel="Raise an SOS. Press and hold."
+          style={({ pressed }) => [s.sos, pressed && { backgroundColor: C.red }]}
         >
-          <Text style={s.sosGlyph}>SOS</Text>
-          <Text style={s.sosHint}>press and hold</Text>
+          {({ pressed }) => (
+            <>
+              <Icon name="alert-octagon" size={30} color={pressed ? C.bg : C.red} />
+              <Text style={[s.sosGlyph, pressed && { color: C.bg }]}>SOS</Text>
+              <Text style={[s.sosHint, pressed && { color: C.bg }]}>
+                Press and hold for a second
+              </Text>
+            </>
+          )}
         </Pressable>
       )}
 
-      {/* ---- high alert mode panel ---- */}
-      <HighAlertPanel
-        isArmed={highAlertArmed}
-        nextBuzzAt={nextBuzzAt}
-        onToggle={onToggleHighAlert}
-      />
+      {/* ---- the mode ---- */}
+      <HighAlertPanel isArmed={ctx.highAlert} nextBuzzAt={ctx.nextBuzzAt}
+                      onToggle={onToggleHighAlert} />
 
-      {/* ---- band ---- */}
+      {/* ---- the band ---- */}
       <Card>
         <View style={s.row}>
-          <Label>Wristband</Label>
-          <Pill text={serverOnline ? 'server ok' : 'server offline'}
-                tone={serverOnline ? C.green : C.alarm} />
+          <Txt variant="h2">Wristband</Txt>
+          <Chip text={BAND_LABEL[band.status] || band.status} tone={bandTone}
+                icon={band.status === 'connected' ? 'bluetooth' : 'bluetooth-off'} />
         </View>
-        <View style={s.statRow}>
-          <Stat label="link" value={BAND_LABEL[band.status] || band.status} tone={bandTone} />
-          <Stat label="battery" value={band.battery != null ? `${band.battery}%` : '—'}
-                tone={band.battery != null && band.battery <= 20 ? C.amber : C.text} />
-          <Stat label="anti-snatch" value={band.armed ? 'ARMED' : 'off'}
+
+        <View style={s.stats}>
+          <Stat label="Battery" icon="battery"
+                value={band.battery != null ? `${Math.round(band.battery)}%` : '—'}
+                tone={band.battery == null ? C.dim
+                      : band.battery <= 5 ? C.red
+                      : band.battery <= 20 ? C.amber : C.text} />
+          <Stat label="Anti-snatch" icon={band.armed ? 'lock' : 'unlock'}
+                value={band.armed ? 'Armed' : 'Off'}
                 tone={band.armed ? C.green : C.dim} />
+          <Stat label="Last heard" icon="activity"
+                value={band.lastSeen ? fmtAgo(band.lastSeen / 1000) : '—'}
+                tone={C.text} />
         </View>
-        {band.lastSeen ? (
-          <Text style={s.meta}>last heard from {fmtAgo(band.lastSeen / 1000)}</Text>
-        ) : null}
 
         {band.status === 'virtual' ? (
           <>
-            <Text style={s.simNote}>
+            <Divider />
+            <Text style={[T.meta, { color: C.dim }]}>
               No wristband here, so this phone is running the band firmware itself —
-              the same gestures, the same events on the wire. The band console is
-              where you press the key.
+              the same gestures, the same events on the wire.
             </Text>
-            <Button title="OPEN BAND CONSOLE" filled onPress={onOpenBand} />
+            <Button title="OPEN BAND CONSOLE" icon="terminal" onPress={onOpenBand} />
           </>
         ) : band.status === 'connected' ? (
-          <View style={s.simRow}>
-            <View style={s.simCell}>
-              <Button title="BUZZ THE BAND" tone={C.dim}
+          <View style={s.btnRow}>
+            <View style={{ flex: 1 }}>
+              <Button title="BUZZ IT" icon="bell" tone={C.dim}
                       onPress={() => band.send({ c: 'buzz', n: 2 })} />
             </View>
-            <View style={s.simCell}>
-              <Button title="DISCONNECT" tone={C.dim} onPress={band.disconnect} />
+            <View style={{ flex: 1 }}>
+              <Button title="DISCONNECT" icon="x" tone={C.dim} onPress={band.disconnect} />
             </View>
           </View>
+        ) : band.status === 'no-permission' ? (
+          <>
+            <Text style={[T.meta, { color: C.amber }]}>
+              Bluetooth permission was denied, so the band cannot be found.
+            </Text>
+            <Button title="FIX THIS IN SETUP" icon="settings" onPress={onOpenSetup} />
+          </>
         ) : (
-          <Button title="CONNECT TO BAND" filled onPress={band.connect} />
+          <Button title="CONNECT TO BAND" filled icon="bluetooth" onPress={band.connect} />
         )}
       </Card>
 
       {/* ---- location ---- */}
       <Card>
-        <Label>Your location</Label>
-        {fix ? (
+        <View style={s.row}>
+          <Txt variant="h2">Your location</Txt>
+          <Chip text={locState === 'ok' ? 'live' : locState === 'denied' ? 'denied' : 'waiting'}
+                tone={locState === 'ok' ? C.green : locState === 'denied' ? C.red : C.amber}
+                icon="map-pin" />
+        </View>
+
+        {locState === 'ok' && fix ? (
           <>
-            <Text style={s.coords}>
+            <Text style={[T.number, { color: C.text }]}>
               {fix.lat.toFixed(5)}, {fix.lon.toFixed(5)}
             </Text>
-            <Text style={s.meta}>
-              accurate to about {Math.round(fix.acc)} m · updated {fmtAgo(fix.at / 1000)}
-            </Text>
-            <Text style={s.meta}>
+            <Text style={[T.meta, { color: C.faint }]}>
+              Accurate to about {Math.round(fix.acc)} m · updated {fmtAgo(fix.at / 1000)}.
               This is attached to every alert you raise, so your family gets a map
               pin rather than a guess.
             </Text>
           </>
+        ) : locState === 'denied' ? (
+          <>
+            <Text style={[T.meta, { color: C.amber }]}>
+              Without location, an alert says that something happened but not where.
+              It is the single most useful thing you can turn on.
+            </Text>
+            <Button title="TURN LOCATION ON" icon="map-pin" onPress={onOpenSetup} />
+          </>
         ) : (
-          <Text style={s.meta}>{locNote}</Text>
+          <Text style={[T.meta, { color: C.dim }]}>
+            {locState === 'error'
+              ? 'Location is unavailable on this device.'
+              : 'Waiting for a fix from the phone…'}
+          </Text>
         )}
       </Card>
 
-      <Text style={s.you}>signed in as {session.name} · {session.user_id}</Text>
+      <Text style={s.foot}>Signed in as {session.name} · {session.user_id}</Text>
     </ScrollView>
   );
 }
 
 const s = StyleSheet.create({
-  wrap: { padding: 16, gap: 14, paddingBottom: 40 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  statRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
-  sosBtn: {
-    borderWidth: 2, borderColor: C.alarm, borderRadius: 8, paddingVertical: 40,
-    alignItems: 'center', gap: 6, backgroundColor: C.surface,
+  wrap: { padding: S.lg, gap: S.md, paddingBottom: 40 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: S.sm },
+  stats: { flexDirection: 'row', gap: S.md },
+  btnRow: { flexDirection: 'row', gap: S.md },
+
+  sos: {
+    backgroundColor: C.redSoft, borderRadius: 8, paddingVertical: 36,
+    alignItems: 'center', gap: S.sm,
   },
-  sosGlyph: { fontFamily: mono, color: C.alarm, fontSize: 44, letterSpacing: 10, fontWeight: '700' },
-  sosHint: { fontFamily: mono, color: C.faint, fontSize: 11, letterSpacing: 1.5 },
-  sosLive: { fontFamily: mono, color: C.text, fontSize: 18 },
-  sosMeta: { fontFamily: mono, color: C.dim, fontSize: 11 },
-  meta: { fontFamily: mono, color: C.faint, fontSize: 11, lineHeight: 17 },
-  coords: { fontFamily: mono, color: C.text, fontSize: 16, fontVariant: ['tabular-nums'] },
-  simNote: {
-    fontFamily: mono, color: C.amber, fontSize: 10, lineHeight: 16,
-    backgroundColor: C.amberBg, padding: 10, borderRadius: 4,
-  },
-  simRow: { flexDirection: 'row', gap: 10 },
-  simCell: { flex: 1 },
-  you: { fontFamily: mono, color: C.faint, fontSize: 10, textAlign: 'center', marginTop: 4 },
+  sosGlyph: { ...T.display, color: C.red, fontSize: 46, letterSpacing: 4 },
+  sosHint: { ...T.meta, color: C.dim },
+
+  foot: { ...T.meta, color: C.faint, textAlign: 'center', marginTop: S.sm },
 });
