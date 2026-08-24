@@ -11,6 +11,10 @@ Covers milestone **F1** and de-risks **F2 / F3 / F4** in
 
 ## Setup (once)
 
+> Full install guide, versions, troubleshooting and verified pin macros:
+> **[arduino_setup.md](arduino_setup.md)**. Read that when setting up a new
+> machine; the summary below is enough if the toolchain already works.
+
 | | |
 |---|---|
 | Core | **Seeed nRF52 Boards** (`Seeeduino:nrf52`) — the Adafruit Bluefruit core |
