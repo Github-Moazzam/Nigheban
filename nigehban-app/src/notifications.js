@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { call } from './api';
 
@@ -16,12 +17,45 @@ try {
 
 export const EMERGENCY_CHANNEL_ID = 'nigehban_emergency_alarm';
 
+const INSTALL_ID_KEY = 'nigehban.installId';
+
 /** Set by registerPushToken; read by the Setup screen's diagnostics panel. */
 let lastToken = null;
 let lastError = null;
+let registered = false;
 
 export function pushDiagnostics() {
-  return { token: lastToken, error: lastError };
+  return { token: lastToken, error: lastError, registered };
+}
+
+/**
+ * A stable id for this install, minted once and kept.
+ *
+ * It deliberately is not the push token. Two reasons, and the first one is why
+ * no alert ever reached a closed phone: the server validated the install id as
+ * [A-Za-z0-9_.:-]{8,64}, and "ExponentPushToken[…]" fails on the brackets, so
+ * every registration came back 400 and the devices table stayed empty. The
+ * server now tolerates that old shape so already-installed builds recover, but
+ * tolerating it is not a reason to keep sending it.
+ *
+ * The second reason outlives that bug. The push token rotates — on reinstall,
+ * on restore, whenever FCM decides. Keyed on the token, each rotation inserts a
+ * second device row and leaves the old one holding a token that no longer
+ * delivers. Keyed on the install, the same row is updated in place.
+ */
+async function installId() {
+  try {
+    const saved = await AsyncStorage.getItem(INSTALL_ID_KEY);
+    if (saved) return saved;
+  } catch {
+    /* unreadable storage — mint a fresh one rather than fail the registration */
+  }
+  const id = 'ins-'
+    + Date.now().toString(36)
+    + Math.random().toString(36).slice(2, 10)
+    + Math.random().toString(36).slice(2, 10);
+  try { await AsyncStorage.setItem(INSTALL_ID_KEY, id); } catch { /* non-fatal */ }
+  return id;
 }
 
 /**
@@ -38,6 +72,7 @@ export function pushDiagnostics() {
 export async function registerPushToken(session) {
   if (!Notifications || !session || Platform.OS === 'web') {
     lastError = !Notifications ? 'expo-notifications not available in this build' : 'no session';
+    registered = false;
     return null;
   }
 
@@ -50,6 +85,7 @@ export async function registerPushToken(session) {
     }
     if (finalStatus !== 'granted') {
       lastError = 'notification permission not granted';
+      registered = false;
       return null;
     }
 
@@ -61,19 +97,30 @@ export async function registerPushToken(session) {
     if (tokenData && tokenData.data) {
       lastToken = tokenData.data;
       lastError = null;
+      // Holding "registered" false until the POST comes back is the point.
+      // Recording success as soon as the token existed is what made the
+      // diagnostics panel show a green "registered" chip for months while the
+      // server was rejecting every one of these calls.
+      registered = false;
       await call(session, '/device', {
         method: 'POST',
         body: {
-          id: tokenData.data,
+          id: await installId(),
           push_token: tokenData.data,
           platform: Platform.OS,
+          os_version: String(Platform.Version ?? ''),
+          app_version: Constants?.default?.expoConfig?.version
+            || Constants?.expoConfig?.version
+            || '',
         },
       });
+      registered = true;
       return tokenData.data;
     }
     lastError = 'getExpoPushTokenAsync returned no token';
   } catch (e) {
     lastError = e?.message || String(e);
+    registered = false;
     console.warn('[notifications] registerPushToken failed —', lastError);
   }
   return null;

@@ -94,10 +94,19 @@ function Main() {
       await setupNotificationChannels();
       const s = await loadSession();
       setSession(s);
-      if (s) { startBackgroundWatch(); registerPushToken(s); }
+      if (s) startBackgroundWatch();
       setBooting(false);
     })();
   }, []);
+
+  // Keyed on the session rather than done once at boot. Registering only on
+  // mount meant somebody who had just signed in had no push token on the
+  // server until they next launched the app -- so the first alert after
+  // pairing, the one most likely to be a real test, reached nothing. It also
+  // re-runs on a token change, which is when a rotated push token gets filed.
+  useEffect(() => {
+    if (session?.token) registerPushToken(session);
+  }, [session?.token, session?.url]);
 
   useEffect(() => {
     if (!toast) return undefined;
