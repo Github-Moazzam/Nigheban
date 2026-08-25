@@ -1047,7 +1047,13 @@ def register_device(b: DeviceIn, u=Depends(me)):
     somebody else moves the row rather than leaving a second account's push
     token pointed at the same handset.
     """
-    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,64}", b.id or ""):
+    # Brackets are allowed because builds up to now sent the Expo push token
+    # itself as the install id, and "ExponentPushToken[...]" failed this check
+    # -- so every registration 400'd, the devices table stayed empty, and no
+    # alert was ever pushed to a closed app. The app now sends a real install
+    # id; accepting the old shape means a handset that is already installed
+    # starts working without waiting on a new build.
+    if not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]{8,64}", b.id or ""):
         raise HTTPException(400, "bad install id")
     with closing(db()) as c:
         c.execute(
@@ -1070,8 +1076,22 @@ def push_tokens_for(uids):
     with closing(db()) as c:
         rows = c.execute(
             "SELECT DISTINCT push_token FROM devices WHERE push_token IS NOT NULL"
+            " AND push_token != ''"
             " AND user_id IN (%s)" % ",".join("?" * len(uids)), list(uids)).fetchall()
     return [r["push_token"] for r in rows]
+
+
+def forget_push_tokens(tokens):
+    """Drop tokens Expo says are gone, so a dead install stops being retried.
+
+    The row stays -- it is still that person's handset, and the next
+    registration fills the token back in.
+    """
+    with closing(db()) as c:
+        c.execute("UPDATE devices SET push_token=NULL WHERE push_token IN (%s)"
+                  % ",".join("?" * len(tokens)), list(tokens))
+        c.commit()
+    print(f"  [expo push] forgot {len(tokens)} unregistered token(s)")
 
 
 async def send_expo_push_notifications(uids, title, body, data=None):
@@ -1082,6 +1102,14 @@ async def send_expo_push_notifications(uids, title, body, data=None):
     """
     tokens = push_tokens_for(uids)
     if not tokens:
+        # Saying nothing here looked exactly like a successful send: the alert
+        # fanned out, the log said "0 online", and that was the last line
+        # printed. But "nobody has a push token" is the entire failure, not a
+        # quiet edge case -- it is the difference between an alert that reaches
+        # a closed phone and one that reaches nobody at all.
+        print(f"  [expo push] no registered device among {len(uids)} target(s)"
+              f" -- nothing sent (has the family member opened the app and"
+              f" granted notifications?)")
         return
 
     payloads = []
@@ -1102,6 +1130,8 @@ async def send_expo_push_notifications(uids, title, body, data=None):
     if not payloads:
         return
 
+    dead = []
+
     def _do_post():
         try:
             req = urllib.request.Request(
@@ -1120,15 +1150,24 @@ async def send_expo_push_notifications(uids, title, body, data=None):
                 tickets = json.loads(raw).get("data", [])
             except Exception:
                 tickets = []
+            ok = 0
             for token, ticket in zip(sent_tokens, tickets):
                 status = ticket.get("status")
-                if status != "ok":
-                    detail = ticket.get("message") or ticket.get("details")
-                    print(f"  [expo push ticket error] {token[:24]}... -> {status}: {detail}")
+                if status == "ok":
+                    ok += 1
+                    continue
+                details = ticket.get("details")
+                detail = ticket.get("message") or details
+                print(f"  [expo push ticket error] {token[:24]}... -> {status}: {detail}")
+                if isinstance(details, dict) and details.get("error") == "DeviceNotRegistered":
+                    dead.append(token)
+            print(f"  [expo push] {ok}/{len(sent_tokens)} accepted by Expo")
         except Exception as e:
             print(f"  [expo push error] {e}")
 
     await asyncio.to_thread(_do_post)
+    if dead:
+        await asyncio.to_thread(forget_push_tokens, dead)
 
 
 # ---- check-ins: questions with a deadline -------------------------------

@@ -127,7 +127,7 @@ export default function Setup({ onDone, session }) {
   const [checking, setChecking] = useState(true);
   const [diag, setDiag] = useState({
     bgModules: null, bgRunning: null, bgError: null,
-    pushToken: null, pushError: null, testSent: false,
+    pushToken: null, pushError: null, pushRegistered: false, testSent: false,
   });
   const [diagBusy, setDiagBusy] = useState(false);
   const vendor = vendorKey();
@@ -157,6 +157,7 @@ export default function Setup({ onDone, session }) {
       bgError: bg.lastError,
       pushToken: push.token,
       pushError: push.error,
+      pushRegistered: push.registered,
     }));
   }, []);
 
@@ -362,8 +363,13 @@ export default function Setup({ onDone, session }) {
 
             <View style={s.diagRow}>
               <Text style={[T.meta, { color: C.dim }]}>Server push</Text>
-              {diag.pushToken ? (
+              {/* Green only once the server has accepted the token. Having a
+                  token locally proves nothing -- the server is what sends the
+                  push, and it spent this whole time rejecting them. */}
+              {diag.pushRegistered ? (
                 <Chip text="registered" tone={C.green} icon="check" />
+              ) : diag.pushToken ? (
+                <Chip text="server refused it" tone={C.red} icon="x" />
               ) : (
                 <Chip text="not registered" tone={C.amber} icon="alert-triangle" />
               )}
