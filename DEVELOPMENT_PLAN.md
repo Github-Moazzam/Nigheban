@@ -256,18 +256,22 @@ Everything here is JavaScript (exec plan §7.0). Nobody writes Kotlin.
 
 The hardest single task on the board.
 
-- [ ] N2.1 — `Location.startLocationUpdatesAsync(WATCH_TASK, …)` with the `foregroundService` block from exec plan §7.
-- [ ] N2.2 — BLE reconnect loop that survives the app being swiped from Recents (matrix #10, #12).
+- [x] N2.1 — `Location.startLocationUpdatesAsync(WATCH_TASK, …)` with the `foregroundService` block from exec plan §7. Shipped once already, but silently dead: `expo-task-manager` was never in `package.json`, so `bgService.js`'s `require()` failed and `startBackgroundWatch()` always returned `false` with no error surfaced anywhere. Fixed 2026-08-25 — dependency installed, failures now logged and visible in Setup's diagnostics panel (step 5).
+- [x] N2.2 — BLE reconnect loop that survives the app being swiped from Recents (matrix #10, #12). Fixed 2026-08-25 — `band.js`'s `onDisconnected` previously just set status to `disconnected` and stopped; an unexpected drop now retries `connect()` after 3 s, distinguished from a deliberate `disconnect()` via a `wantsConnection` ref so the retry doesn't fight the user's own button. Depends on N2.1 actually keeping the JS runtime alive to retry from.
 - [ ] N2.3 — Boot receiver → service restarts and reconnects in under 60 s (matrix #11).
 - [ ] N2.4 — WorkManager watchdog: is the service alive, is BLE connected, is the socket up. **Watchdog only** — never a timer; the 15-minute floor makes it useless as one.
-- [ ] N2.5 — `isIgnoringBatteryOptimizations()` surfaced in the UI.
+- [x] N2.5 — `isIgnoringBatteryOptimizations()` surfaced in the UI — Setup.js step 4, "BATTERY: SET TO UNRESTRICTED".
 
 **Done when:** the Phase 2 exit gate — phone locked, screen off, app swiped from Recents, 20 minutes in a pocket, press the band, the family phone rings.
 
 ### N3 · Push + alarm · Owner M2 · Phase 2 · ~4 h
 
-- [ ] N3.1 — FCM project; high-priority push tested with curl before the app consumes it.
-- [ ] N3.2 — Alarm-importance channel with DND bypass, via `expo-notifications`.
+- [ ] N3.1 — FCM project; high-priority push tested with curl before the app consumes it. **Server side is ready** — `send_expo_push_notifications()` now logs every Expo ticket's status instead of discarding the response — but the FCM (V1) project itself has never been created, so every push ticket will read `InvalidCredentials`/`DeviceNotRegistered` until that's done. External, one-time steps:
+  1. console.firebase.google.com → create a project → add an Android app with package `com.nigehban.app` → download `google-services.json` into `nigehban-app/`.
+  2. Add `"android": { "googleServicesFile": "./google-services.json" }` to `nigehban-app/app.json`.
+  3. `eas credentials` → Android → push notifications → upload the Firebase service account key (Project settings → Service accounts → Generate new private key, in the Firebase console).
+  4. Rebuild (`eas build -p android --profile development`), sign in, let it register a push token, then `curl -H "Content-Type: application/json" -d '{"to":"<token from server/nigehban.db devices table>","title":"test","body":"hi"}' https://exp.host/--/api/v2/push/send` and check the terminal running `nigehban_server.py` — the server logs the same ticket status now, so a failed send shows the reason without touching the phone again.
+- [ ] N3.2 — Alarm-importance channel with DND bypass, via `expo-notifications`. Channel itself exists (`notifications.js`), untestable end-to-end until N3.1 lands.
 - [ ] N3.3 — Full-screen intent over the lock screen via Notifee (matrix #6 — fires with the family app **killed**).
 - [ ] N3.4 — Siren + vibration until dismissed.
 

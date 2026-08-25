@@ -383,7 +383,7 @@ function Main() {
         {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
         {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}
         {tab === 'alerts' && <Alerts session={session} refreshKey={refreshKey} />}
-        {tab === 'setup' && <Setup />}
+        {tab === 'setup' && <Setup session={session} />}
       </View>
 
       {toast ? (

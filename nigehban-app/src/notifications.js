@@ -2,20 +2,44 @@ import { Platform } from 'react-native';
 import { call } from './api';
 
 let Notifications = null;
+let Constants = null;
 try {
   Notifications = require('expo-notifications');
 } catch {
   /* Notifications module fallback */
 }
+try {
+  Constants = require('expo-constants');
+} catch {
+  /* projectId lookup falls back to the implicit resolution below */
+}
 
 export const EMERGENCY_CHANNEL_ID = 'nigehban_emergency_alarm';
 
+/** Set by registerPushToken; read by the Setup screen's diagnostics panel. */
+let lastToken = null;
+let lastError = null;
+
+export function pushDiagnostics() {
+  return { token: lastToken, error: lastError };
+}
+
 /**
  * Register Expo Push Token with backend server (POST /device).
- * Allows server to send Remote Push Notifications when app is completely closed.
+ * Allows server to send Remote Push Notifications when app is completely
+ * closed — this is the ONLY delivery path that survives a force-stop, and it
+ * only works once the project has real FCM (V1) credentials uploaded via
+ * `eas credentials`; without that, getExpoPushTokenAsync() throws or the
+ * token exists but Expo's push API rejects every send.
+ *
+ * Returns the token string on success, or null (with the reason recorded in
+ * pushDiagnostics()) on failure.
  */
 export async function registerPushToken(session) {
-  if (!Notifications || !session || Platform.OS === 'web') return false;
+  if (!Notifications || !session || Platform.OS === 'web') {
+    lastError = !Notifications ? 'expo-notifications not available in this build' : 'no session';
+    return null;
+  }
 
   try {
     const { status } = await Notifications.getPermissionsAsync();
@@ -24,10 +48,19 @@ export async function registerPushToken(session) {
       const { status: reqStatus } = await Notifications.requestPermissionsAsync();
       finalStatus = reqStatus;
     }
-    if (finalStatus !== 'granted') return false;
+    if (finalStatus !== 'granted') {
+      lastError = 'notification permission not granted';
+      return null;
+    }
 
-    const tokenData = await Notifications.getExpoPushTokenAsync();
+    const projectId = Constants?.default?.expoConfig?.extra?.eas?.projectId
+      || Constants?.expoConfig?.extra?.eas?.projectId;
+    const tokenData = await Notifications.getExpoPushTokenAsync(
+      projectId ? { projectId } : undefined
+    );
     if (tokenData && tokenData.data) {
+      lastToken = tokenData.data;
+      lastError = null;
       await call(session, '/device', {
         method: 'POST',
         body: {
@@ -36,12 +69,14 @@ export async function registerPushToken(session) {
           platform: Platform.OS,
         },
       });
-      return true;
+      return tokenData.data;
     }
+    lastError = 'getExpoPushTokenAsync returned no token';
   } catch (e) {
-    /* Push token registration best effort */
+    lastError = e?.message || String(e);
+    console.warn('[notifications] registerPushToken failed —', lastError);
   }
-  return false;
+  return null;
 }
 
 /**

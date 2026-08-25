@@ -76,6 +76,12 @@ export function useBand(onEvent) {
   const cb = useRef(onEvent);
   cb.current = onEvent;
 
+  // Set right before a deliberate disconnect() so onDisconnected can tell
+  // "the user asked for this" from "the radio just dropped" -- only the
+  // second case should retry on its own.
+  const wantsConnection = useRef(false);
+  const retryTimer = useRef(null);
+
   const simulated = !BleManager;
 
   const handleLine = useCallback((line) => {
@@ -96,6 +102,9 @@ export function useBand(onEvent) {
     if (simulated) { setStatus('simulated'); return; }
     if (!(await askPermissions())) { setStatus('no-permission'); return; }
 
+    wantsConnection.current = true;
+    clearTimeout(retryTimer.current);
+
     if (!mgr.current) mgr.current = new BleManager();
     setStatus('scanning');
 
@@ -110,9 +119,17 @@ export function useBand(onEvent) {
         c = await c.discoverAllServicesAndCharacteristics();
         dev.current = c;
 
+        // N2.2 -- a dropped link (out of range for a moment, the radio
+        // throttled while backgrounded, anything) is not the same as the
+        // user choosing to disconnect. Only the former should retry, or a
+        // deliberate disconnect would fight its own button.
         c.onDisconnected(() => {
           dev.current = null;
           setStatus('disconnected');
+          if (wantsConnection.current) {
+            clearTimeout(retryTimer.current);
+            retryTimer.current = setTimeout(() => connect(), 3000);
+          }
         });
 
         c.monitorCharacteristicForService(NUS_SERVICE, NUS_TX, (e, ch) => {
@@ -126,11 +143,17 @@ export function useBand(onEvent) {
         setStatus('connected');
       } catch (e) {
         setStatus('error:' + (e.reason || e.message));
+        if (wantsConnection.current) {
+          clearTimeout(retryTimer.current);
+          retryTimer.current = setTimeout(() => connect(), 3000);
+        }
       }
     });
   }, [simulated, handleLine]);
 
   const disconnect = useCallback(async () => {
+    wantsConnection.current = false;
+    clearTimeout(retryTimer.current);
     try { await dev.current?.cancelConnection(); } catch {}
     dev.current = null;
     setStatus(simulated ? 'simulated' : 'idle');
@@ -154,6 +177,8 @@ export function useBand(onEvent) {
   }, [handleLine, battery]);
 
   useEffect(() => () => {
+    wantsConnection.current = false;
+    clearTimeout(retryTimer.current);
     try { mgr.current?.destroy(); } catch {}
   }, []);
 

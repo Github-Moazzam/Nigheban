@@ -1085,6 +1085,7 @@ async def send_expo_push_notifications(uids, title, body, data=None):
         return
 
     payloads = []
+    sent_tokens = []
     for token in tokens:
         if token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken["):
             payloads.append({
@@ -1096,6 +1097,7 @@ async def send_expo_push_notifications(uids, title, body, data=None):
                 "data": data or {},
                 "channelId": "nigehban_emergency_alarm" if (data and data.get("severity", 0) >= 4) else "nigehban_default"
             })
+            sent_tokens.append(token)
 
     if not payloads:
         return
@@ -1108,7 +1110,21 @@ async def send_expo_push_notifications(uids, title, body, data=None):
                 headers={"Content-Type": "application/json", "Accept": "application/json"}
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
-                pass
+                raw = resp.read().decode('utf-8')
+            # Expo returns 200 even when every ticket failed (bad token,
+            # DeviceNotRegistered, or -- the usual reason nothing arrives --
+            # missing FCM V1 credentials for this project). Log each ticket's
+            # status so a "why no push" question never needs the app rebuilt
+            # to answer; see NIGEHBAN_BUILD_GUIDE.md / DEVELOPMENT_PLAN.md N3.1.
+            try:
+                tickets = json.loads(raw).get("data", [])
+            except Exception:
+                tickets = []
+            for token, ticket in zip(sent_tokens, tickets):
+                status = ticket.get("status")
+                if status != "ok":
+                    detail = ticket.get("message") or ticket.get("details")
+                    print(f"  [expo push ticket error] {token[:24]}... -> {status}: {detail}")
         except Exception as e:
             print(f"  [expo push error] {e}")
 
