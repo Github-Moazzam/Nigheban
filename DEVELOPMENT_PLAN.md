@@ -283,15 +283,22 @@ The hardest single task on the board.
 
 ### F1 · Board bring-up · Owner M4 · Phase 0 · ~3 h
 
-- [ ] F1.1 — Install **Seeed nRF52 Boards** (Adafruit Bluefruit core, *not* the mbed variant).
-- [ ] F1.2 — Blink, then advertise as `Nigehban-01`; verify in **nRF Connect** — no Nigehban app needed, so this waits on nobody.
-- [ ] F1.3 — `BLEUart` up. It is literally the Nordic UART Service the app already speaks.
+- [x] F1.1 — Install **Seeed nRF52 Boards** (Adafruit Bluefruit core, *not* the mbed variant). `Seeeduino:nrf52@1.1.13` + `Seeed Arduino LSM6DS3`; all bench sketches compile.
+- [x] F1.2 — Blink, then advertise as `Nigehban-01`; verify in **nRF Connect** — no Nigehban app needed, so this waits on nobody. Passed via [t6_ble](firmware/t6_ble/).
+- [x] F1.3 — `BLEUart` up. It is literally the Nordic UART Service the app already speaks. Notify and write both verified round-trip in nRF Connect.
 
 ### F2 · Port the gesture layer · Owner M4 · Phase 0–1 · ~5 h
 
-- [ ] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from [the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino) onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap.
-- [ ] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need.
-- [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter.
+- [x] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from [the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino) onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap. All gestures and commands verified against nRF Connect.
+- [x] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need. LSM6DS3 block present but `#if HAS_IMU 0` until F3; both paths compile.
+- [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](firmware/README.md).
+
+> **Tap timing changed during F2.1 and `virtualBand.js` has not caught up.** The
+> band originally waited for a tap burst to close before classifying it, so two
+> *slow* taps became two `checkin_ack`s — the family told "I'm fine" by someone
+> calling for help. The band now fires `sos` on the second tap itself and makes
+> `checkin_ack` wait `TAP_WINDOW_MS` (1200 ms). `virtualBand.js:26` still has
+> the old 420 ms burst logic and therefore still has the bug.
 
 **Done when:** the Phase 1 gate — a button press on the nRF52840 raises an SOS visible on a second phone over the internet, both phones on mobile data.
 

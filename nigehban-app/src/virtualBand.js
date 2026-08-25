@@ -23,7 +23,10 @@ import { Vibration } from 'react-native';
 // ---- constants, copied verbatim from the firmware ------------------------
 // Change one here, measure it on a phone, then copy the number back into the
 // .ino. That direction of travel is the whole point of this file.
-export const CLICK_GAP_MS = 420;    // max gap inside a multi-click burst
+// How long a lone tap waits to see whether a second one is coming. Only ever
+// delays checkin_ack; SOS fires on the second tap itself. See THE SLOW-TAP
+// FAILURE in onPressOut below before changing it.
+export const TAP_WINDOW_MS = 1200;
 export const HOLD_1_MS    = 3000;   // hold 3s
 export const HOLD_2_MS    = 5000;   // hold 5s
 export const HEARTBEAT_MS = 10000;
@@ -200,9 +203,9 @@ export function useVirtualBand(onLine, active = true) {
   // ------------------------------------------------- the button engine ---
   // buttonTick() minus the debounce, which a touch handler already does for
   // us. Everything else is preserved — the hold cues firing *while still
-  // held*, the multi-click burst finalising only once the user stops — because
-  // those are the parts a tester's thumb can actually falsify.
-  const press      = useRef({ start: 0, clicks: 0, held1: false, held2: false });
+  // held*, SOS firing on the second tap, checkin_ack waiting out the window —
+  // because those are the parts a tester's thumb can actually falsify.
+  const press      = useRef({ start: 0, clicks: 0, sos: false, held1: false, held2: false });
   const holdTimers = useRef([]);
   const burstTimer = useRef(null);
   const tickTimer  = useRef(null);
@@ -248,11 +251,35 @@ export function useVirtualBand(onLine, active = true) {
 
     if (!p.held1 && !p.held2 && held < HOLD_1_MS) {
       p.clicks += 1;
+
+      // ------------------------------------------------------------------
+      // THE SLOW-TAP FAILURE — mirrors nigehban_band_nrf52.ino, which carries
+      // the full argument. In short: this used to count taps, wait for the
+      // burst to close, and only then decide. Someone frightened tapping twice
+      // but SLOWLY got two separate bursts, so the family was told "I'm fine"
+      // twice by a person calling for help.
+      //
+      // A false SOS is embarrassing and stood down in seconds. A false
+      // "I'm fine" is silent and final. So SOS fires on the second tap itself
+      // and never has to win a race, while checkin_ack — the claim we must
+      // never make by accident — waits out TAP_WINDOW_MS.
+      //
+      // Keep this identical to the firmware. Two copies of one decision is the
+      // price of the phone standing in for the band; two DIFFERENT copies is
+      // how the stand-in quietly stops being a stand-in.
+      // ------------------------------------------------------------------
+      if (p.clicks === 2 && !p.sos) {
+        p.sos = true;
+        onGesture(btn, 'click', 2);
+      }
+
       burstTimer.current = setTimeout(() => {
         const n = p.clicks;
+        const alreadySos = p.sos;
         p.clicks = 0;
-        if (n > 0) onGesture(btn, 'click', n);
-      }, CLICK_GAP_MS);
+        p.sos = false;
+        if (n > 0 && !alreadySos) onGesture(btn, 'click', n);
+      }, TAP_WINDOW_MS);
     }
   }, [clearHoldTimers, onGesture]);
 
