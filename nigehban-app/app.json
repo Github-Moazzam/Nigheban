@@ -74,7 +74,14 @@
       ],
       "./plugins/withNigehbanAndroid",
       "expo-font",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-task-manager",
+      [
+        "expo-notifications",
+        {
+          "color": "#3CC183"
+        }
+      ]
     ],
     "extra": {
       "eas": {

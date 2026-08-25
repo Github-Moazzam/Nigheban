@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Linking, Platform, RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
+import {
+  backgroundWatchDiagnostics, isBackgroundWatchRunning, startBackgroundWatch,
+} from '../bgService';
+import { pushDiagnostics, registerPushToken } from '../notifications';
 import { C, S, T } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Label, Txt } from '../ui';
 
@@ -118,9 +122,14 @@ export async function pendingPermissions() {
 }
 
 
-export default function Setup({ onDone }) {
+export default function Setup({ onDone, session }) {
   const [perm, setPerm] = useState({ notif: null, loc: null, bg: null });
   const [checking, setChecking] = useState(true);
+  const [diag, setDiag] = useState({
+    bgModules: null, bgRunning: null, bgError: null,
+    pushToken: null, pushError: null, testSent: false,
+  });
+  const [diagBusy, setDiagBusy] = useState(false);
   const vendor = vendorKey();
 
   const refresh = useCallback(async () => {
@@ -134,6 +143,57 @@ export default function Setup({ onDone }) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // U5.5 — "is it actually working" answered on-device, so a build that keeps
+  // failing does not need a new APK for every guess at why.
+  const refreshDiag = useCallback(async () => {
+    const bg = backgroundWatchDiagnostics();
+    const running = await isBackgroundWatchRunning();
+    const push = pushDiagnostics();
+    setDiag((d) => ({
+      ...d,
+      bgModules: bg.modulesLoaded,
+      bgRunning: running,
+      bgError: bg.lastError,
+      pushToken: push.token,
+      pushError: push.error,
+    }));
+  }, []);
+
+  useEffect(() => { refreshDiag(); }, [refreshDiag]);
+
+  const runStartBackgroundWatch = async () => {
+    setDiagBusy(true);
+    await startBackgroundWatch();
+    await refreshDiag();
+    setDiagBusy(false);
+  };
+
+  const runRegisterPush = async () => {
+    if (!session) return;
+    setDiagBusy(true);
+    await registerPushToken(session);
+    await refreshDiag();
+    setDiagBusy(false);
+  };
+
+  const sendTestNotification = async () => {
+    if (!Notifications) return;
+    setDiagBusy(true);
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Nigehban test notification',
+          body: 'If you can see this, local alerts and sound work on this phone.',
+          sound: true,
+          channelId: 'nigehban_default',
+        },
+        trigger: null,
+      });
+      setDiag((d) => ({ ...d, testSent: true }));
+    } catch { /* the chip below stays "not sent" */ }
+    setDiagBusy(false);
+  };
 
   const ask = async (which) => {
     try {
@@ -266,6 +326,75 @@ export default function Setup({ onDone }) {
             open Settings, find Nigehban, and allow autostart and unrestricted battery.
           </Text>
         </Card>
+
+        {/* ---- 5. self-test: answers "is it actually working" on this phone,
+                  without a new build for every guess ---- */}
+        <Card>
+          <View style={s.stepHead}>
+            <View style={s.num}>
+              <Text style={[T.title, { color: C.dim }]}>5</Text>
+            </View>
+            <View style={{ flex: 1, gap: 3 }}>
+              <Txt variant="h2">Is it actually working?</Txt>
+              <Text style={[T.meta, { color: C.dim }]}>
+                Two independent paths keep alerts arriving when the app is closed:
+                the sticky watch notification below (works while the app is swiped
+                away but not force-stopped) and a server push (the only one that
+                survives a full force-stop or reboot).
+              </Text>
+            </View>
+          </View>
+
+          <View style={{ gap: 4 }}>
+            <View style={s.diagRow}>
+              <Text style={[T.meta, { color: C.dim }]}>Watch notification</Text>
+              {diag.bgModules === false ? (
+                <Chip text="build missing a module" tone={C.red} icon="x" />
+              ) : diag.bgRunning ? (
+                <Chip text="running" tone={C.green} icon="check" />
+              ) : (
+                <Chip text="not running" tone={C.amber} icon="alert-triangle" />
+              )}
+            </View>
+            {diag.bgError ? (
+              <Text style={[T.meta, { color: C.faint }]}>{diag.bgError}</Text>
+            ) : null}
+
+            <View style={s.diagRow}>
+              <Text style={[T.meta, { color: C.dim }]}>Server push</Text>
+              {diag.pushToken ? (
+                <Chip text="registered" tone={C.green} icon="check" />
+              ) : (
+                <Chip text="not registered" tone={C.amber} icon="alert-triangle" />
+              )}
+            </View>
+            {diag.pushError ? (
+              <Text style={[T.meta, { color: C.faint }]}>{diag.pushError}</Text>
+            ) : null}
+          </View>
+
+          <Divider />
+
+          <Button title="START WATCH NOTIFICATION NOW" icon="play"
+                  disabled={diagBusy} onPress={runStartBackgroundWatch} />
+          <Button title="REGISTER FOR SERVER PUSH" icon="refresh-cw"
+                  disabled={diagBusy || !session} onPress={runRegisterPush} />
+          <Button title="SEND A TEST NOTIFICATION" icon="bell"
+                  disabled={diagBusy} onPress={sendTestNotification} />
+          {diag.testSent ? (
+            <Text style={[T.meta, { color: C.green }]}>
+              Sent. Pull down the notification shade — if it is not there, the
+              channel or permission above is still the problem.
+            </Text>
+          ) : null}
+
+          <Text style={[T.meta, { color: C.faint }]}>
+            Real proof: swipe Nigehban away from Recents, then send an SOS from a
+            second phone. The watch notification path should still ring within a
+            few seconds. Force-stop the app from Android Settings and repeat — only
+            a working server push reaches you there.
+          </Text>
+        </Card>
       </View>
 
       {onDone ? (
@@ -281,5 +410,8 @@ const s = StyleSheet.create({
   num: {
     width: 32, height: 32, borderRadius: 6, backgroundColor: C.raised,
     alignItems: 'center', justifyContent: 'center',
+  },
+  diagRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
   },
 });
