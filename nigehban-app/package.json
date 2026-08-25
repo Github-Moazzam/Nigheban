@@ -11,6 +11,7 @@
     "expo-battery": "~57.0.2",
     "expo-build-properties": "~57.0.12",
     "expo-clipboard": "~57.0.1",
+    "expo-constants": "~57.0.12",
     "expo-dev-client": "~57.0.13",
     "expo-font": "~57.0.1",
     "expo-intent-launcher": "~57.0.1",
