@@ -12,7 +12,13 @@ events.jsonl
 .env
 .env.*
 !.env.example
-google-services.json
+# nigehban-app/google-services.json is deliberately NOT ignored. It is Firebase
+# *client* config, not a credential -- the API key inside is restricted to the
+# package name plus signing certificate. EAS Build does not upload gitignored
+# files, so ignoring it produces a build with FCM silently missing and push
+# dead. Committing it is also what lets a teammate build from a clean checkout.
+# The FCM service-account key (the JSON with "private_key") is the real secret;
+# that lives in EAS credentials and must never be committed.
 GoogleService-Info.plist
 *.keystore
 *.jks

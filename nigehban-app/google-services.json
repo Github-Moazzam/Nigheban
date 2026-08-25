@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1088072047901",
+    "project_id": "nigheban-d126d",
+    "storage_bucket": "nigheban-d126d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1088072047901:android:8f40bc9790d666db4b95f4",
+        "android_client_info": {
+          "package_name": "com.nigehban.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCXI5Q08u1esOk7ePu-8lWHyz9Q7kt8Ztg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
