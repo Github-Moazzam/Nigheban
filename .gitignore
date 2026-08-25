@@ -20,6 +20,14 @@ events.jsonl
 # The FCM service-account key (the JSON with "private_key") is the real secret;
 # that lives in EAS credentials and must never be committed.
 GoogleService-Info.plist
+# The FCM V1 service-account key -- the JSON containing "private_key". Unlike
+# google-services.json above this is a real credential: it can send push as
+# this Firebase project to every installed handset. It belongs in EAS
+# credentials only. Ignored by name here because the natural mistake is to
+# drop it next to app.json so `eas credentials` can find it, and EAS Build
+# uploads everything that is not ignored.
+*firebase-adminsdk*.json
+service-account*.json
 *.keystore
 *.jks
 *.p8
