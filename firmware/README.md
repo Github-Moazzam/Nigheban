@@ -76,6 +76,19 @@ Real macro names from
 > **`EXECUTION_PLAN.md:512` will not compile.** It writes `PIN_VBAT_ENABLE`;
 > the macro is `VBAT_ENABLE`. Fix when doing **F2.3**.
 
+> ### `VBAT_ENABLE` must stay LOW. HIGH or high-Z destroys the board.
+>
+> The divider is `BAT+ — 1M — P0.31 — 510k — P0.14`, so `VBAT_ENABLE` (P0.14) is
+> its **bottom** leg. LOW completes the path and is what keeps P0.31 safely
+> divided. Set it HIGH, or leave it high-Z as an `INPUT`, and there is no
+> division: P0.31 floats toward `BAT+` through the 1 M — ~4.2 V while charging,
+> against a **3.6 V absolute maximum**. The pin is permanently destroyed. Seeed
+> warn about this explicitly.
+>
+> The tempting power saving — *"the divider drains current, gate it between
+> readings"* — is exactly the fatal move. That drain is 4.2 V / 1.51 MΩ ≈
+> **2.8 µA**, under 1.5% of the F4.3 budget. Leave the pin LOW forever.
+
 **I²C:** `Wire` is the external D4/D5 header. The IMU sits on the internal bus,
 `Wire1` (pins 17/16). The Seeed library handles this itself with an internal
 `#define Wire Wire1`, so `LSM6DS3 imu(I2C_MODE, 0x6A)` is correct as written —
@@ -138,6 +151,7 @@ would also over-drive a 3 V coin motor.
 | **T2** | [t2_motor](t2_motor/) | motor | Three distinct patterns you can feel, matching the log |
 | **T3** | [t3_button_motor](t3_button_motor/) | motor + button | Buzz at 3 s, double-buzz at 5 s, timings match a stopwatch |
 | **T4** | [t4_imu](t4_imu/) | none | `IMU OK`, az ≈ 1.00 g flat, `mag` spikes when shaken |
+| **T6** | [t6_ble](t6_ble/) | none | `Nigehban-01` in nRF Connect, heartbeat notifies, writes echo back |
 
 **T1 before you wire anything.** It proves the core, board selection, port and
 upload path while there is nothing else to blame.
@@ -167,6 +181,35 @@ That inversion is the symptom worth remembering: pulses of 100–150 ms felt
 weaker than one long buzz, which means the motor is spinning up far too slowly
 and probably never reaches full speed.
 
+**Measured on this unit: 200 ms is too weak to feel reliably; ~300 ms is the
+floor.** A healthy coin ERM reaches usable amplitude in 50–80 ms, so this one is
+roughly 4× slow. That is the same slow-spin-up cause as the inversion above, now
+with a number on it.
+
+### Why this cannot be fixed by raising the timings
+
+The obvious response — make every pulse 300 ms — quietly destroys the haptic
+vocabulary. Every `feedback()` call ported from
+[`nigehban_band_esp32.ino`](../nigehban_band_esp32/nigehban_band_esp32.ino) sits
+under the floor:
+
+| Meaning | Current | At a 300 ms floor |
+|---|---|---|
+| `ack` from cloud | `feedback(1, 60, 60)` | 5× longer |
+| check-in ack ("I'm fine") | `feedback(1, 90, 90)` | 3× longer |
+| **SOS fired** | `feedback(4, 120, 80)` | 0.7 s → **1.8 s** |
+| High Alert on | `feedback(2, 180, 120)` | 0.6 s → **1.2 s** |
+
+Two things break. The patterns stop being *distinguishable* — at 300 ms per
+pulse with adaptation blunting anything longer, a 1-pulse ack and a 4-pulse SOS
+both read as "a long buzz happened." And the SOS confirmation arrives ~1.8 s
+after the tap, in the one situation where the wearer cannot wait and cannot
+look.
+
+So the 300 ms floor is not a tuning value to adopt. It is the measurement that
+says **fix the driver**, because the 100–150 ms design is correct and the
+hardware is what is failing to deliver it.
+
 **Leading hypothesis:** the module is built for 5 V logic. If its base resistor
 is the 5.1 kΩ part, a 3.3 V GPIO delivers ~0.5 mA of base current — enough to
 switch roughly 50 mA, not the 80–100 mA the motor draws. The transistor never
@@ -190,8 +233,11 @@ means full drive; meaningfully lower confirms the transistor isn't saturating.
 
 ## After T4 passes
 
-F1 is done and the three F2 unknowns — protocol, haptics, gestures — are all
-proven except the radio. The port then reuses `Button`, `Pattern`, `onGesture`
+Run **T6** — it is the last unknown. T1–T4 prove the board, motor, button and
+IMU; T6 proves the radio, and F1.2/F1.3 close with it.
+
+Once T6 passes, F1 is done and every F2 unknown — protocol, haptics, gestures,
+radio — is proven. The port then reuses `Button`, `Pattern`, `onGesture`
 and `handleCommand` **verbatim** from
 [`nigehban_band_esp32.ino`](../nigehban_band_esp32/nigehban_band_esp32.ino);
 only the `BLEDevice`/`BLEServer` layer is rewritten onto `BLEUart`. The protocol

@@ -181,6 +181,13 @@ From `packages/Seeeduino/hardware/nrf52/1.1.13/variants/Seeed_XIAO_nRF52840_Sens
 > **`EXECUTION_PLAN.md:512` will not compile.** It writes `PIN_VBAT_ENABLE`; the
 > real macro is `VBAT_ENABLE`. Fix when doing **F2.3**.
 
+> **`VBAT_ENABLE` must stay LOW — HIGH or high-Z permanently destroys P0.31.**
+> P0.14 is the bottom leg of the `BAT+ — 1M — P0.31 — 510k — P0.14` divider;
+> LOW is what keeps P0.31 divided. Float it and P0.31 rises toward `BAT+`
+> (~4.2 V charging) against a 3.6 V pin maximum. Do **not** gate it between
+> readings to save the 2.8 µA. Full note in
+> [README.md](README.md#verified-against-the-installed-core).
+
 **I²C:** `Wire` is the external D4/D5 header. The IMU is on the internal bus,
 `Wire1` (pins 17/16). The Seeed library remaps this itself, so
 `LSM6DS3 imu(I2C_MODE, 0x6A)` is correct with no bus argument.
