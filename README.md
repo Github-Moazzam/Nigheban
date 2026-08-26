@@ -183,6 +183,9 @@ nigehban-app/
   src/state.js              the client state machine, transitions as data
   src/theme.js  src/ui.js   the design system: tokens, type scale, component kit
   src/fonts.js              Outfit + Space Grotesk, loaded without blocking
+  src/alarm.js              one seam: native lock-screen alarm, or vibration
+  src/bgNotifications.js    the silent push that wakes a killed app's siren
+  modules/nigehban-alarm/   Kotlin: full-screen intent + siren until dismissed
   src/security.js           the four digits in front of disarming High Alert
   src/components/           CheckinBanner · HighAlertPanel · WatchStatusTile
                             FallCountdown · SosLiveView · SamaritanCall · PinSheet

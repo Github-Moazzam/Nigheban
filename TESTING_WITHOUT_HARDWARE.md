@@ -23,13 +23,16 @@ Worth being precise, because the honest answer is "less than it feels like".
 | Family alerting, takeover screen, stand-down | ✅ entirely | — |
 | Battery escalation | ✅ real phone battery | ADC divider calibration |
 | Push to a force-stopped app, foreground service | ✅ **working, observed** | — |
-| Lock-screen takeover of a killed app (matrix #6) | ❌ needs `@notifee/react-native` | — *not* hardware-blocked |
+| Lock-screen takeover of a killed app (matrix #6) | ◐ **built, needs one EAS build** | — *not* hardware-blocked |
 | BLE reconnect after the app is killed | ❌ | yes |
 | Motor feedback, power budget, enclosure | ❌ | yes |
 
 Two rows genuinely need the band. The lock-screen row is the one thing on this
-list that is neither done nor waiting on hardware — it is waiting on a
-dependency and about a day of work (N3.3/N3.4).
+list that is neither done nor waiting on hardware: N3.3/N3.4 were built on
+26 Aug 2026 as a local Expo module rather than the archived Notifee, and the
+only thing between them and a ✅ is `eas build` and ten seconds with the
+**TEST THE LOCK-SCREEN ALARM** button in Setup. There is no JDK on the machine
+this was written on, so the Kotlin has not yet been compiled — see §6.
 
 ---
 
@@ -251,6 +254,39 @@ Then keep going — every one of these works today:
 - Drop `ali`'s phone onto a cushion.
 - Unplug `ali`'s phone and let it drain past 20 %.
 
+### 4b. The lock-screen takeover, on one phone, in ten seconds
+
+Everything above runs in Expo Go. This one cannot: the alarm is a native
+module, so it needs a **development build** (`eas build -p android --profile
+development`). That is the same build BLE needs, so if you have tested a real
+band you already have it.
+
+Setup tab → scroll to the diagnostics panel. Two new rows:
+
+| Row | What green means |
+|---|---|
+| **Lock-screen takeover** | `full alarm` — the native module is in this binary. `vibration only` means Expo Go: the phone will buzz, but the screen will not light up. |
+| **Alarm on a killed app** | `listening` — the background notification task is registered, so a silent push can start the siren with the app terminated. |
+
+Then press **TEST THE LOCK-SCREEN ALARM** and immediately lock the phone. It
+should light up on its own, show Nigehban *over* the lock screen, and sound an
+alarm. It stops itself after ten seconds — a test alarm you have to dismiss is
+a test nobody runs twice.
+
+That button runs the same call an incoming severity-5 SOS runs, so passing it
+means matrix #6's mechanism works. The full row still wants the real thing:
+
+1. `ammi`'s phone: sign in, then **force-stop** Nigehban from Android settings.
+   Not swipe-away — force-stop, which is the case that has always been hard.
+2. Lock it and put it down.
+3. `ali`: BAND tab → double-tap.
+4. `ammi`'s phone should wake, take over the lock screen, and sound.
+
+If the notification appears but the screen stays dark, the silent push was
+dropped — usually Doze — and the visible push is doing its job as the fallback.
+That is a degraded pass, not a failure; the alert still arrives and tapping it
+still opens the right alert.
+
 ---
 
 ## 5. What to build next, in order
@@ -265,8 +301,11 @@ including a check-in escalating on its own deadline with no phone attached.
    the EAS project, the dev-client APK and the whole FCM setup all exist, and
    push reaches a force-stopped app. This item sat marked open long after it
    landed; the development plan's N1 and N3.1 entries now carry the evidence.
-   The one dependency it named that is still missing is
-   `@notifee/react-native`, which N3.3 needs.
+   ~~The one dependency it named that is still missing is
+   `@notifee/react-native`, which N3.3 needs.~~ **Notifee was archived on
+   7 Apr 2026 and never supported the New Architecture, so it was never going
+   to land.** N3.3/N3.4 were built instead as `modules/nigehban-alarm/`, a
+   local Expo module — no new dependency. The next `eas build` compiles it.
 2. **U2 — the client state machine.** `idle · checkin_pending · high_alert ·
    sos_live` as data. The server already emits every transition; the app is
    still inferring them from loose booleans.

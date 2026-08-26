@@ -21,6 +21,8 @@ import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
 import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
+import { registerBackgroundNotifications } from './src/bgNotifications';
+import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
   DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
   setupNotificationChannels, subscribeNotificationTaps,
@@ -98,6 +100,12 @@ function Main() {
   useEffect(() => {
     (async () => {
       await setupNotificationChannels();
+      // If a full-screen intent is what put this app on screen, the alert it
+      // was about is sitting in the launch intent. Read it before anything
+      // else can replace the intent, and hand it to the same routing the
+      // notification tap uses.
+      const launched = await consumeLaunchAlertId();
+      if (launched != null) setPendingAlertId(launched);
       const s = await loadSession();
       setSession(s);
       if (s) startBackgroundWatch();
@@ -132,8 +140,28 @@ function Main() {
   // pairing, the one most likely to be a real test, reached nothing. It also
   // re-runs on a token change, which is when a rotated push token gets filed.
   useEffect(() => {
-    if (session?.token) registerPushToken(session);
+    if (!session?.token) return;
+    registerPushToken(session);
+    // The silent push that fires the lock-screen alarm is delivered to a task,
+    // not to a listener, and an unregistered task is simply never run. Doing it
+    // here rather than at boot means it is also re-registered for whoever signs
+    // in next on a shared phone.
+    registerBackgroundNotifications();
   }, [session?.token, session?.url]);
+
+  // The one place the alarm is stopped.
+  //
+  // Every exit out of the takeover -- "I'M ON IT", "Dismiss", and the wearer
+  // standing the alert down from their own phone -- ends by clearing
+  // `incoming`, so hanging the stop off that rather than off each button is
+  // what makes it impossible to add a fourth exit that leaves a siren running.
+  //
+  // It also fires once on mount, which is deliberate: the alarm notification is
+  // ongoing and survives the process, so an app killed mid-siren would come
+  // back to a notification it no longer has any way to clear.
+  useEffect(() => {
+    if (!incoming) stopAlarm();
+  }, [incoming]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -314,8 +342,14 @@ function Main() {
       const a = m.alert;
       if (a.severity >= 4) {
         setIncoming(a);
-        Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
-        sendEmergencyAlarmNotification(a);
+        // N3.3/N3.4. On a dev or production build this is a real full-screen
+        // intent plus a looping siren, so a backgrounded app takes the lock
+        // screen over instead of waiting to be noticed. It returns false in
+        // Expo Go and on web, where the native module is not in the binary --
+        // there the old notification is still the best available signal.
+        presentAlarm(a).then((took) => {
+          if (!took) sendEmergencyAlarmNotification(a);
+        });
       } else {
         notify(`${a.user.name} — ${a.kind.replace('_', ' ')}`,
                a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
@@ -323,7 +357,7 @@ function Main() {
       bump();
     },
     resolved: (m) => {
-      setIncoming((cur) => (cur && cur.id === m.alert_id ? (Vibration.cancel(), null) : cur));
+      setIncoming((cur) => (cur && cur.id === m.alert_id ? null : cur));
       setToast(`${m.user.name} is safe — they stood the alert down`);
       bump();
     },
@@ -490,18 +524,20 @@ function Main() {
             </Text>
 
             <View style={st.takeBtns}>
+              {/* Opening the map does not close the takeover, so this is the one
+                  exit that has to stop the siren itself -- they have plainly
+                  seen it, and it must not follow them into Maps. */}
               {incoming.maps ? (
                 <Button title="SEE WHERE THEY ARE" filled big tone={C.red} icon="navigation"
-                        onPress={() => { Vibration.cancel(); Linking.openURL(incoming.maps); }} />
+                        onPress={() => { stopAlarm(); Linking.openURL(incoming.maps); }} />
               ) : null}
               <Button title="I'M ON IT" tone={C.green} filled icon="user-check"
                       onPress={async () => {
-                        Vibration.cancel();
                         try { await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' }); } catch { /* they are still told by the socket */ }
                         setIncoming(null); bump();
                       }} />
               <Button title="Dismiss" tone={C.dim}
-                      onPress={() => { Vibration.cancel(); setIncoming(null); }} />
+                      onPress={() => setIncoming(null)} />
             </View>
           </View>
         ) : null}
