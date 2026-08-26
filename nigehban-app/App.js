@@ -23,6 +23,7 @@ import { useHeartbeat, usePresence } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
 import {
   registerPushToken, sendEmergencyAlarmNotification, setupNotificationChannels,
+  subscribeNotificationTaps,
 } from './src/notifications';
 
 const TABS = [
@@ -84,6 +85,7 @@ function Main() {
   const [deliveredTo, setDeliveredTo] = useState(null);
   const [toast, setToast] = useState(null);
   const [fix, setFix] = useState(null);               // last position, from Home
+  const [pendingAlertId, setPendingAlertId] = useState(null); // tapped from a notification
 
   const { state, ctx, dispatch, is, watchMode } = useSafetyMachine();
   const insets = useEdgeInsets();
@@ -98,6 +100,27 @@ function Main() {
       setBooting(false);
     })();
   }, []);
+
+  // Tapping the push is how a killed app is opened at all, so the tap has to
+  // land on the alert rather than a bare Home screen. The listener can fire
+  // before `session` is ready (cold start), so it only records which alert
+  // was tapped; the effect below does the fetch once a session exists.
+  useEffect(() => subscribeNotificationTaps(setPendingAlertId), []);
+
+  useEffect(() => {
+    if (!pendingAlertId || !session) return;
+    (async () => {
+      try {
+        const list = await call(session, '/alerts?scope=incoming');
+        const alert = list.find((a) => String(a.id) === String(pendingAlertId));
+        if (alert && !alert.resolved_at) {
+          setIncoming(alert);
+          setTab('home');
+        }
+      } catch { /* the in-app takeover still works once the socket catches up */ }
+      setPendingAlertId(null);
+    })();
+  }, [pendingAlertId, session]);
 
   // Keyed on the session rather than done once at boot. Registering only on
   // mount meant somebody who had just signed in had no push token on the

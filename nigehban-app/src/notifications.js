@@ -189,6 +189,44 @@ export async function setupNotificationChannels() {
 }
 
 /**
+ * Route a tapped notification back to the alert it was about.
+ *
+ * The remote push the server sends to a killed app carries `alert_id`
+ * (`nigehban_server.py`'s `send_expo_push_notifications` calls), while the
+ * local notification this app schedules for itself while alive carries
+ * `alertId` (`sendEmergencyAlarmNotification` below) — both are read here so
+ * a tap routes the same way regardless of which path delivered it.
+ *
+ * `onAlertId` fires for a tap on a running app (the normal listener) and,
+ * separately, for the notification that cold-launched the app — Expo does
+ * not always replay the launch tap through the live listener, so that case
+ * is checked once explicitly.
+ */
+export function subscribeNotificationTaps(onAlertId) {
+  if (!Notifications || Platform.OS === 'web') return () => {};
+
+  const extract = (response) => {
+    const data = response?.notification?.request?.content?.data;
+    const id = data?.alertId ?? data?.alert_id;
+    if (id != null) onAlertId(id);
+  };
+
+  Notifications.getLastNotificationResponseAsync()
+    .then((response) => {
+      if (!response) return;
+      extract(response);
+      // Without this, the tap that cold-launched the app keeps being "the
+      // last response" and would reopen the same alert on every future
+      // launch, including ones that had nothing to do with a notification.
+      Notifications.clearLastNotificationResponseAsync?.().catch(() => {});
+    })
+    .catch(() => { /* best effort */ });
+
+  const sub = Notifications.addNotificationResponseReceivedListener(extract);
+  return () => sub.remove();
+}
+
+/**
  * Dispatch a high-priority Emergency Siren Notification for incoming Severity 5 SOS alerts.
  */
 export async function sendEmergencyAlarmNotification(alert) {
