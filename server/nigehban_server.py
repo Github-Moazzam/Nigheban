@@ -1112,6 +1112,23 @@ async def send_expo_push_notifications(uids, title, body, data=None):
               f" granted notifications?)")
         return
 
+    sev = (data or {}).get("severity", 0)
+
+    # How long this push is still worth delivering.
+    #
+    # Expo's default is four weeks, which for an emergency is not a default so
+    # much as a bug: a severity-5 push queued while a phone was in a tunnel can
+    # ring at 3 a.m. the next day, long after the wearer stood the alert down.
+    # A family member woken by a siren for an emergency that ended yesterday
+    # learns to distrust the siren, and that is the whole product.
+    #
+    # Five minutes for anything urgent -- long enough to survive a lift, a
+    # tunnel or a moment of Doze, short enough that nothing arrives describing
+    # a situation that has already moved on. It is deliberately not 0: "deliver
+    # this instant or discard" would throw away real alerts over a two-second
+    # network blip. An hour for the rest, which are informational.
+    ttl = 300 if sev >= 4 else 3600
+
     payloads = []
     sent_tokens = []
     for token in tokens:
@@ -1122,8 +1139,9 @@ async def send_expo_push_notifications(uids, title, body, data=None):
                 "body": body,
                 "sound": "default",
                 "priority": "high",
+                "ttl": ttl,
                 "data": data or {},
-                "channelId": "nigehban_emergency_alarm" if (data and data.get("severity", 0) >= 4) else "nigehban_default"
+                "channelId": "nigehban_emergency_alarm" if sev >= 4 else "nigehban_default"
             })
             sent_tokens.append(token)
 

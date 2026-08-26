@@ -19,11 +19,11 @@ import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
-import { useHeartbeat, usePresence } from './src/watch';
+import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
 import {
-  registerPushToken, sendEmergencyAlarmNotification, setupNotificationChannels,
-  subscribeNotificationTaps,
+  DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
+  setupNotificationChannels, subscribeNotificationTaps,
 } from './src/notifications';
 
 const TABS = [
@@ -68,7 +68,11 @@ async function notify(title, body) {
       if (!r.granted) return;
     }
     await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: true }, trigger: null,
+      content: { title, body, sound: true },
+      // Same reason as the emergency channel: setupNotificationChannels creates
+      // this one with the check-in vibration pattern, and the channel is picked
+      // by the trigger. `trigger: null` quietly used Android's own default.
+      trigger: { channelId: DEFAULT_CHANNEL_ID },
     });
   } catch { /* best effort */ }
 }
@@ -141,7 +145,13 @@ function Main() {
   const raise = useCallback(async (payload) => {
     if (!session) return null;
     try {
-      const body = { lat: fix?.lat, lon: fix?.lon, accuracy: fix?.acc, ...payload };
+      // `fix` is only fed while the Home tab is mounted and watching. An alert
+      // raised from anywhere else -- another tab, the band, a backgrounded app
+      // -- would otherwise go out with no position, so fall back to the same
+      // cached fix the heartbeat uses rather than send the family a map-less
+      // emergency.
+      const at = fix || await lastKnownFix();
+      const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
       const r = await call(session, '/alert', { method: 'POST', body });
       if (['sos', 'snatch', 'fall'].includes(payload.kind)) {
         dispatch('SOS_RAISED', { alert: r.alert });
@@ -242,6 +252,16 @@ function Main() {
       const live = ctxRef.current.activeSos;
       if (live) resolve(live.id);
       else ackCheckin(ctxRef.current.checkin);
+      return;
+    }
+
+    if (action.type === 'CHECKIN_EXPIRED') {
+      // The band gave up nagging. The server is the one escalating, so all
+      // this does is stop the wearer wondering: the buzzing stopped, and
+      // nothing on screen would otherwise say why.
+      dispatch('CHECKIN_EXPIRED');
+      setToast('The check-in window has passed — your family is being told. '
+               + 'Answering now still tells them you are fine.');
       return;
     }
 

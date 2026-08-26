@@ -9,6 +9,35 @@ try { Location = require('expo-location'); } catch { /* no position available */
 export const BEAT_MS = 60000;
 
 /**
+ * The last position this phone knows about, without waking the GPS.
+ *
+ * Alerts used to carry only the fix the Home screen was watching, which meant
+ * an SOS raised from any other tab -- or from the band while the app was
+ * backgrounded, which is the normal case -- went out with no coordinates at
+ * all. The family got "EMERGENCY" and no map link, which is most of the value
+ * gone. The heartbeat was already reading this exact cache every minute; the
+ * alert path just was not.
+ *
+ * Deliberately not a live `getCurrentPositionAsync`: that can block for tens of
+ * seconds waiting on a fix, and an SOS must leave the phone now. A slightly
+ * stale position beats a punctual empty one, and the heartbeat keeps it fresh
+ * while the watch is armed.
+ */
+export async function lastKnownFix() {
+  try {
+    const pos = Location ? await Location.getLastKnownPositionAsync() : null;
+    if (!pos?.coords) return null;
+    return {
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      acc: pos.coords.accuracy ?? null,
+    };
+  } catch {
+    return null;                 // permission denied, or no fix yet
+  }
+}
+
+/**
  * "I am still here", once a minute, while the watch is armed.
  *
  * The server's watchdog works on silence: three minutes without one of these,

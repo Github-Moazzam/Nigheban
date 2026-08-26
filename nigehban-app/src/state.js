@@ -111,6 +111,10 @@ const APPLY = {
 
 /** Events that describe the world rather than move through it. */
 const CONTEXT_ONLY = {
+  // The band's local nag ran out. It records that fact and nothing else --
+  // see `checkin_missed` in bandEventToAction for why it must not escalate,
+  // and must not close the question either.
+  CHECKIN_EXPIRED: (c) => (c.checkin ? { ...c, checkin: { ...c.checkin, expired: true } } : c),
   NEXT_BUZZ:  (c, a) => ({ ...c, nextBuzzAt: a.at ?? null }),
   BATTERY:    (c, a) => ({ ...c, battery: { level: a.level, low: a.low, goingDark: a.goingDark } }),
   RESPONDER:  (c, a) => (c.responders.some((r) => r.id === a.by.id)
@@ -147,6 +151,23 @@ export function bandEventToAction(ev) {
     case 'snatch':       return { type: 'SOS_RAISED' };
     case 'fall':         return { type: 'FALL_DETECTED', severity: 4, note: ev.peak ? `peak ${ev.peak}g` : '' };
     case 'checkin_ack':  return { type: 'CHECKIN_CLOSED' };
+
+    // The band's local nag timer expired. Two things this deliberately is not:
+    //
+    // It is not an escalation. The band only ever nags because the phone sent
+    // it a `checkin_req`, and the phone only sends that because the server
+    // opened a `checkins` row with a `due_at` -- so the sweeper is already
+    // going to raise `checkin_missed` on that row. Raising a second one from
+    // here would page the family twice for one silence, with the band's clock
+    // and the server's clock disagreeing about when. Deadlines belong to the
+    // server; this file's opening comment is the reason why.
+    //
+    // It is also not `CHECKIN_CLOSED`. The band's window can lapse a moment
+    // before the server's, and answering late still matters: it tells the
+    // family she is fine even after they have been told she went quiet. So the
+    // question stays open and answerable, and this only marks that time is up.
+    case 'checkin_missed': return { type: 'CHECKIN_EXPIRED' };
+
     case 'high_alert_on':  return { type: 'HIGH_ALERT_SET', on: true };
     case 'high_alert_off': return { type: 'HIGH_ALERT_SET', on: false };
     default:             return null;

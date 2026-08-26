@@ -22,11 +22,14 @@ Worth being precise, because the honest answer is "less than it feels like".
 | Server routing, consent, escalation, the sweeper | ✅ built and tested | — |
 | Family alerting, takeover screen, stand-down | ✅ entirely | — |
 | Battery escalation | ✅ real phone battery | ADC divider calibration |
-| Push, lock-screen alarm, foreground service | ✅ entirely | — |
+| Push to a force-stopped app, foreground service | ✅ **working, observed** | — |
+| Lock-screen takeover of a killed app (matrix #6) | ❌ needs `@notifee/react-native` | — *not* hardware-blocked |
 | BLE reconnect after the app is killed | ❌ | yes |
 | Motor feedback, power budget, enclosure | ❌ | yes |
 
-Two rows. Everything else on the acceptance matrix is reachable this week.
+Two rows genuinely need the band. The lock-screen row is the one thing on this
+list that is neither done nor waiting on hardware — it is waiting on a
+dependency and about a day of work (N3.3/N3.4).
 
 ---
 
@@ -78,9 +81,17 @@ map is going to become user-configurable in settings. That feature edits this
 array. Its counterpart in the `.ino` is one clearly marked block — keep the two
 in step, since the phone standing in for the band only works while they agree.
 
-Taps are grouped into a burst and only fire once you stop tapping
-(`CLICK_GAP_MS`, 420 ms) — exactly as the firmware does it, so tap deliberately
-rather than fast.
+**SOS fires on the second tap itself** — it never waits for the burst to close,
+so it cannot lose a race. `checkin_ack` is the one that waits out
+`TAP_WINDOW_MS` (1200 ms), because a false "I'm fine" is silent and final while
+a false SOS is embarrassing and stood down in seconds. Tap deliberately: two
+*slow* taps must still mean help, and that is exactly the case this asymmetry
+exists to get right.
+
+> Corrected 26 Aug 2026 — this paragraph described the **old** 420 ms
+> `CLICK_GAP_MS` burst rule, which `virtualBand.js` and the nRF52 sketch both
+> stopped using. The ESP32 sketch still uses it and still has the bug; see the
+> F2 note in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 **Wire log** at the bottom of the screen shows every line that would have
 crossed the BLE characteristic. `▸` is band → phone, `◂` is phone → band.
@@ -105,10 +116,60 @@ The phone's own battery feeds the `bat` field, so the 20 % and 5 % escalations
 can be tested by leaving a phone unplugged rather than by trusting a fake
 number. `BATTERY → 15%` forces it when you are in a hurry.
 
+### One thing the virtual band does not do yet
+
+The firmware nags once more when a check-in window lapses and then sends
+`checkin_missed` ([the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino),
+`gAwaitingAck` / `gAckDeadline`). `virtualBand.js` sets `awaitingAck` on a
+`checkin_req` but has **no deadline timer**, so it can never emit that event.
+
+That matters because the app now handles it — `CHECKIN_EXPIRED`, added 26 Aug
+2026 — and the phone-as-band cannot reach the handler. It is a real divergence
+from the `.ino`, not just a test gap; §2 above claims these two files agree.
+Porting the timer is about ten lines.
+
 ### When the band arrives
 
 Switch the source to **REAL BAND**. Nothing else changes — `bandLink.js` is the
 seam that makes both look identical to the rest of the app.
+
+---
+
+## 2b. The browser, for the fastest loop of all
+
+```bash
+cd nigehban-app
+npm run web
+```
+
+The server is on the same machine, so the address box takes `http://localhost:8000`
+— no tunnel needed. Reload is instant and the console is a real console.
+
+**What genuinely works on web:** auth, family and pairing, the whole server
+round-trip, the live socket, and the BAND tab with source **THIS PHONE** — the
+gesture engine, the wire log, the state machine. That is most of the product.
+
+**What does not, and why:**
+
+| | Reason |
+|---|---|
+| REAL BAND source | `react-native-ble-plx` is a native module; the require fails and `band.js` reports `simulated` |
+| Push, lock-screen alarm, notification taps | Guarded out explicitly — `Platform.OS === 'web'` in [notifications.js](nigehban-app/src/notifications.js) |
+| Foreground service | No native service to start ([bgService.js:56](nigehban-app/src/bgService.js#L56)) |
+| Fall detection | Needs `DeviceMotionEvent`; browsers expose it inconsistently and a laptop has no accelerometer at all. `FORCE FALL` still works |
+
+Two things are *easier* to test here than on a phone, and worth doing here first:
+
+- **The socket keep-alive (§14.3 of the dev plan).** DevTools → Network → **WS**
+  → the `/ws` row → **Messages**. You should see `{"t":"ping"}` out every 30 s
+  and `{"t":"pong"}` back. To exercise the timeout branch rather than the happy
+  path, comment out the server's `pong` reply in `ws_endpoint()`, restart, and
+  watch the header chip cycle **connected → offline → connected** on a ~40 s
+  period (30 s ping + 10 s grace).
+- **Position on alerts.** Load HOME first and *allow* the geolocation prompt —
+  that is what fills the cache `lastKnownFix()` reads. Then switch to BAND and
+  double-tap. The family member's takeover should show **SEE WHERE THEY ARE**.
+  Deny the prompt and it should not: that is correct, not a regression.
 
 ---
 
@@ -200,9 +261,12 @@ None of it is hardware-blocked.
 `.venv\Scripts\python.exe tests/test_consent_and_sweeper.py` against a running server to see both,
 including a check-in escalating on its own deadline with no phone attached.
 
-1. **N1 — the EAS dev build.** Now the longest pole on the board, and the one
-   thing the band's arrival is blocked on: Expo Go cannot load BLE, so a real
-   band cannot be tested at all until this exists.
+1. ~~**N1 — the EAS dev build.**~~ **Done — audited 26 Aug 2026.** The plugin,
+   the EAS project, the dev-client APK and the whole FCM setup all exist, and
+   push reaches a force-stopped app. This item sat marked open long after it
+   landed; the development plan's N1 and N3.1 entries now carry the evidence.
+   The one dependency it named that is still missing is
+   `@notifee/react-native`, which N3.3 needs.
 2. **U2 — the client state machine.** `idle · checkin_pending · high_alert ·
    sos_live` as data. The server already emits every transition; the app is
    still inferring them from loose booleans.
