@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { C, S, T, fmtCount } from '../theme';
 import { Button, Card, Chip, Label, ProgressBar } from '../ui';
 
@@ -76,3 +76,7 @@ function remaining(dueAt, window) {
   if (!dueAt) return window;
   return Math.max(0, Math.ceil(dueAt - Date.now() / 1000));
 }
+
+const s = StyleSheet.create({
+  head: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+});
