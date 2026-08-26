@@ -198,6 +198,23 @@ export async function call(session, path, { method = 'GET', body } = {}) {
   }
 }
 
+/**
+ * How often the phone proves the socket is still a socket, and how long the
+ * server has to prove it back.
+ *
+ * A carrier NAT drops an idle mobile connection without telling either end, so
+ * `onclose` never fires and `readyState` stays OPEN. The app goes on showing
+ * "connected" while every check-in buzz and every family alert lands in a pipe
+ * that ends nowhere -- the worst failure this product has, because it is silent
+ * and it looks exactly like nothing happening.
+ *
+ * TCP keep-alive is too slow to help (hours, and not configurable here), so the
+ * liveness check has to live at the application layer. The server already
+ * answers {"t":"ping"} with {"t":"pong"}; this is the other half.
+ */
+const PING_EVERY_MS = 30000;
+const PONG_GRACE_MS = 10000;
+
 /** Live socket to the server, with reconnect. Delivers alerts, stand-downs,
  *  acks and check-in requests as they happen. */
 export function useLive(session, handlers) {
@@ -212,6 +229,14 @@ export function useLive(session, handlers) {
     if (!session?.token) return;
     alive.current = true;
 
+    let pingTimer = null;
+    let pongTimer = null;
+
+    const stopBeat = () => {
+      clearInterval(pingTimer); pingTimer = null;
+      clearTimeout(pongTimer); pongTimer = null;
+    };
+
     const connect = () => {
       if (!alive.current) return;
       const target = wsUrl(session.url) + `/ws?token=${session.token}`;
@@ -219,14 +244,35 @@ export function useLive(session, handlers) {
       try { s = new WebSocket(target); } catch { retry.current = setTimeout(connect, 2500); return; }
       ws.current = s;
 
-      s.onopen = () => setOnline(true);
+      const startBeat = () => {
+        stopBeat();
+        pingTimer = setInterval(() => {
+          if (s.readyState !== 1) return;                 // 1 === OPEN
+          try { s.send(JSON.stringify({ t: 'ping' })); } catch { return; }
+          // A half-open socket accepts the write and never answers, so the
+          // missing pong -- not a send error -- is what exposes it. Closing
+          // here hands the existing onclose the reconnect it already knows
+          // how to do, rather than growing a second retry path.
+          clearTimeout(pongTimer);
+          pongTimer = setTimeout(() => {
+            try { s.close(); } catch { /* already gone */ }
+          }, PONG_GRACE_MS);
+        }, PING_EVERY_MS);
+      };
+
+      s.onopen = () => { setOnline(true); startBeat(); };
       s.onmessage = (e) => {
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
+        // Any frame at all proves the pipe is alive, so the deadline clears on
+        // traffic rather than only on the pong we asked for.
+        clearTimeout(pongTimer); pongTimer = null;
+        if (m.t === 'pong') return;
         const fn = hRef.current?.[m.t];
         if (fn) fn(m);
       };
       s.onclose = () => {
+        stopBeat();
         ws.current = null;
         setOnline(false);
         if (alive.current) retry.current = setTimeout(connect, 2500);
@@ -237,6 +283,7 @@ export function useLive(session, handlers) {
     connect();
     return () => {
       alive.current = false;
+      stopBeat();
       clearTimeout(retry.current);
       const s = ws.current;
       ws.current = null;

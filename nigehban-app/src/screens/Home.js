@@ -15,6 +15,7 @@ const BAND_LABEL = {
   connected: 'Connected', disconnected: 'Lost the band', simulated: 'Simulated',
   virtual: 'This phone is the band',
   'no-permission': 'Bluetooth denied',
+  'not-found': 'Band not found',
 };
 
 /**
@@ -79,7 +80,8 @@ export default function Home({
   const bandTone =
     band.status === 'connected' ? C.green
     : band.status === 'virtual' || band.simulated ? C.amber
-    : band.status === 'disconnected' || band.status === 'no-permission' ? C.red
+    : band.status === 'disconnected' || band.status === 'no-permission'
+      || band.status === 'not-found' ? C.red
     : C.dim;
 
   const batt = ctx.battery;

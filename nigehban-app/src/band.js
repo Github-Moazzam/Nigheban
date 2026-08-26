@@ -6,6 +6,14 @@ export const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // phone -> band
 export const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // band -> phone
 export const BAND_NAME = 'Nigehban-01';
 
+// How long to look before admitting the band is not there. A BLE scan has no
+// natural end: if the band is off, out of range, or already bonded to another
+// phone, startDeviceScan simply never calls back, and the UI sat on "scanning"
+// forever with nothing to press. Ten seconds is long enough for a band that is
+// advertising on a 1 s interval and short enough to be worth waiting through.
+const SCAN_TIMEOUT_MS = 10000;
+const RETRY_MS = 3000;
+
 // react-native-ble-plx is a native module. Expo Go cannot load it, so the app
 // falls back to a simulated band there -- that way login, family and alerts are
 // all testable today while the real dev build is still cooking.
@@ -81,6 +89,7 @@ export function useBand(onEvent) {
   // second case should retry on its own.
   const wantsConnection = useRef(false);
   const retryTimer = useRef(null);
+  const scanTimer = useRef(null);
 
   const simulated = !BleManager;
 
@@ -104,15 +113,44 @@ export function useBand(onEvent) {
 
     wantsConnection.current = true;
     clearTimeout(retryTimer.current);
+    clearTimeout(scanTimer.current);
 
     if (!mgr.current) mgr.current = new BleManager();
     setStatus('scanning');
 
+    // Every exit from the scan goes through here, so the timer can never
+    // outlive the scan it was guarding and fire over a live connection.
+    const endScan = () => {
+      clearTimeout(scanTimer.current);
+      scanTimer.current = null;
+      try { mgr.current?.stopDeviceScan(); } catch { /* already stopped */ }
+    };
+
+    const retrySoon = () => {
+      if (!wantsConnection.current) return;
+      clearTimeout(retryTimer.current);
+      retryTimer.current = setTimeout(() => connect(), RETRY_MS);
+    };
+
+    scanTimer.current = setTimeout(() => {
+      endScan();
+      setStatus('not-found');
+      retrySoon();
+    }, SCAN_TIMEOUT_MS);
+
     mgr.current.startDeviceScan(null, { allowDuplicates: false }, async (err, d) => {
-      if (err) { setStatus('error:' + (err.reason || err.message)); return; }
+      if (err) {
+        // Bluetooth off, permission revoked mid-scan, adapter reset: all of
+        // them land here, and all of them used to leave the hook with no scan
+        // running, no timer, and no way back except the user pressing connect.
+        endScan();
+        setStatus('error:' + (err.reason || err.message));
+        retrySoon();
+        return;
+      }
       if (!d || d.name !== BAND_NAME) return;
 
-      mgr.current.stopDeviceScan();
+      endScan();
       setStatus('connecting');
       try {
         let c = await d.connect({ requestMTU: 185 });
@@ -126,10 +164,7 @@ export function useBand(onEvent) {
         c.onDisconnected(() => {
           dev.current = null;
           setStatus('disconnected');
-          if (wantsConnection.current) {
-            clearTimeout(retryTimer.current);
-            retryTimer.current = setTimeout(() => connect(), 3000);
-          }
+          retrySoon();
         });
 
         c.monitorCharacteristicForService(NUS_SERVICE, NUS_TX, (e, ch) => {
@@ -143,10 +178,7 @@ export function useBand(onEvent) {
         setStatus('connected');
       } catch (e) {
         setStatus('error:' + (e.reason || e.message));
-        if (wantsConnection.current) {
-          clearTimeout(retryTimer.current);
-          retryTimer.current = setTimeout(() => connect(), 3000);
-        }
+        retrySoon();
       }
     });
   }, [simulated, handleLine]);
@@ -154,6 +186,8 @@ export function useBand(onEvent) {
   const disconnect = useCallback(async () => {
     wantsConnection.current = false;
     clearTimeout(retryTimer.current);
+    clearTimeout(scanTimer.current);
+    try { mgr.current?.stopDeviceScan(); } catch {}
     try { await dev.current?.cancelConnection(); } catch {}
     dev.current = null;
     setStatus(simulated ? 'simulated' : 'idle');
@@ -179,6 +213,7 @@ export function useBand(onEvent) {
   useEffect(() => () => {
     wantsConnection.current = false;
     clearTimeout(retryTimer.current);
+    clearTimeout(scanTimer.current);
     try { mgr.current?.destroy(); } catch {}
   }, []);
 

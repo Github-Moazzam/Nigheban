@@ -19,10 +19,13 @@ import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
-import { useHeartbeat, usePresence } from './src/watch';
+import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
 import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
+import { registerBackgroundNotifications } from './src/bgNotifications';
+import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
-  registerPushToken, sendEmergencyAlarmNotification, setupNotificationChannels,
+  DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
+  setupNotificationChannels, subscribeNotificationTaps,
 } from './src/notifications';
 
 const TABS = [
@@ -67,7 +70,11 @@ async function notify(title, body) {
       if (!r.granted) return;
     }
     await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: true }, trigger: null,
+      content: { title, body, sound: true },
+      // Same reason as the emergency channel: setupNotificationChannels creates
+      // this one with the check-in vibration pattern, and the channel is picked
+      // by the trigger. `trigger: null` quietly used Android's own default.
+      trigger: { channelId: DEFAULT_CHANNEL_ID },
     });
   } catch { /* best effort */ }
 }
@@ -84,6 +91,7 @@ function Main() {
   const [deliveredTo, setDeliveredTo] = useState(null);
   const [toast, setToast] = useState(null);
   const [fix, setFix] = useState(null);               // last position, from Home
+  const [pendingAlertId, setPendingAlertId] = useState(null); // tapped from a notification
 
   const { state, ctx, dispatch, is, watchMode } = useSafetyMachine();
   const insets = useEdgeInsets();
@@ -92,6 +100,12 @@ function Main() {
   useEffect(() => {
     (async () => {
       await setupNotificationChannels();
+      // If a full-screen intent is what put this app on screen, the alert it
+      // was about is sitting in the launch intent. Read it before anything
+      // else can replace the intent, and hand it to the same routing the
+      // notification tap uses.
+      const launched = await consumeLaunchAlertId();
+      if (launched != null) setPendingAlertId(launched);
       const s = await loadSession();
       setSession(s);
       if (s) startBackgroundWatch();
@@ -99,14 +113,55 @@ function Main() {
     })();
   }, []);
 
+  // Tapping the push is how a killed app is opened at all, so the tap has to
+  // land on the alert rather than a bare Home screen. The listener can fire
+  // before `session` is ready (cold start), so it only records which alert
+  // was tapped; the effect below does the fetch once a session exists.
+  useEffect(() => subscribeNotificationTaps(setPendingAlertId), []);
+
+  useEffect(() => {
+    if (!pendingAlertId || !session) return;
+    (async () => {
+      try {
+        const list = await call(session, '/alerts?scope=incoming');
+        const alert = list.find((a) => String(a.id) === String(pendingAlertId));
+        if (alert && !alert.resolved_at) {
+          setIncoming(alert);
+          setTab('home');
+        }
+      } catch { /* the in-app takeover still works once the socket catches up */ }
+      setPendingAlertId(null);
+    })();
+  }, [pendingAlertId, session]);
+
   // Keyed on the session rather than done once at boot. Registering only on
   // mount meant somebody who had just signed in had no push token on the
   // server until they next launched the app -- so the first alert after
   // pairing, the one most likely to be a real test, reached nothing. It also
   // re-runs on a token change, which is when a rotated push token gets filed.
   useEffect(() => {
-    if (session?.token) registerPushToken(session);
+    if (!session?.token) return;
+    registerPushToken(session);
+    // The silent push that fires the lock-screen alarm is delivered to a task,
+    // not to a listener, and an unregistered task is simply never run. Doing it
+    // here rather than at boot means it is also re-registered for whoever signs
+    // in next on a shared phone.
+    registerBackgroundNotifications();
   }, [session?.token, session?.url]);
+
+  // The one place the alarm is stopped.
+  //
+  // Every exit out of the takeover -- "I'M ON IT", "Dismiss", and the wearer
+  // standing the alert down from their own phone -- ends by clearing
+  // `incoming`, so hanging the stop off that rather than off each button is
+  // what makes it impossible to add a fourth exit that leaves a siren running.
+  //
+  // It also fires once on mount, which is deliberate: the alarm notification is
+  // ongoing and survives the process, so an app killed mid-siren would come
+  // back to a notification it no longer has any way to clear.
+  useEffect(() => {
+    if (!incoming) stopAlarm();
+  }, [incoming]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -118,7 +173,13 @@ function Main() {
   const raise = useCallback(async (payload) => {
     if (!session) return null;
     try {
-      const body = { lat: fix?.lat, lon: fix?.lon, accuracy: fix?.acc, ...payload };
+      // `fix` is only fed while the Home tab is mounted and watching. An alert
+      // raised from anywhere else -- another tab, the band, a backgrounded app
+      // -- would otherwise go out with no position, so fall back to the same
+      // cached fix the heartbeat uses rather than send the family a map-less
+      // emergency.
+      const at = fix || await lastKnownFix();
+      const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
       const r = await call(session, '/alert', { method: 'POST', body });
       if (['sos', 'snatch', 'fall'].includes(payload.kind)) {
         dispatch('SOS_RAISED', { alert: r.alert });
@@ -222,6 +283,16 @@ function Main() {
       return;
     }
 
+    if (action.type === 'CHECKIN_EXPIRED') {
+      // The band gave up nagging. The server is the one escalating, so all
+      // this does is stop the wearer wondering: the buzzing stopped, and
+      // nothing on screen would otherwise say why.
+      dispatch('CHECKIN_EXPIRED');
+      setToast('The check-in window has passed — your family is being told. '
+               + 'Answering now still tells them you are fine.');
+      return;
+    }
+
     if (action.type === 'HIGH_ALERT_SET') {
       // The band's hold-3s is only the switch; the mode itself is server-owned
       // so that it outlives this app being killed.
@@ -271,8 +342,14 @@ function Main() {
       const a = m.alert;
       if (a.severity >= 4) {
         setIncoming(a);
-        Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
-        sendEmergencyAlarmNotification(a);
+        // N3.3/N3.4. On a dev or production build this is a real full-screen
+        // intent plus a looping siren, so a backgrounded app takes the lock
+        // screen over instead of waiting to be noticed. It returns false in
+        // Expo Go and on web, where the native module is not in the binary --
+        // there the old notification is still the best available signal.
+        presentAlarm(a).then((took) => {
+          if (!took) sendEmergencyAlarmNotification(a);
+        });
       } else {
         notify(`${a.user.name} — ${a.kind.replace('_', ' ')}`,
                a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
@@ -280,7 +357,7 @@ function Main() {
       bump();
     },
     resolved: (m) => {
-      setIncoming((cur) => (cur && cur.id === m.alert_id ? (Vibration.cancel(), null) : cur));
+      setIncoming((cur) => (cur && cur.id === m.alert_id ? null : cur));
       setToast(`${m.user.name} is safe — they stood the alert down`);
       bump();
     },
@@ -447,18 +524,20 @@ function Main() {
             </Text>
 
             <View style={st.takeBtns}>
+              {/* Opening the map does not close the takeover, so this is the one
+                  exit that has to stop the siren itself -- they have plainly
+                  seen it, and it must not follow them into Maps. */}
               {incoming.maps ? (
                 <Button title="SEE WHERE THEY ARE" filled big tone={C.red} icon="navigation"
-                        onPress={() => { Vibration.cancel(); Linking.openURL(incoming.maps); }} />
+                        onPress={() => { stopAlarm(); Linking.openURL(incoming.maps); }} />
               ) : null}
               <Button title="I'M ON IT" tone={C.green} filled icon="user-check"
                       onPress={async () => {
-                        Vibration.cancel();
                         try { await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' }); } catch { /* they are still told by the socket */ }
                         setIncoming(null); bump();
                       }} />
               <Button title="Dismiss" tone={C.dim}
-                      onPress={() => { Vibration.cancel(); setIncoming(null); }} />
+                      onPress={() => setIncoming(null)} />
             </View>
           </View>
         ) : null}

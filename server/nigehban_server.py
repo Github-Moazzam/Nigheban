@@ -928,6 +928,19 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
     push_body = "Tap immediately to open Nigehban for location and emergency details."
     await send_expo_push_notifications(targets, push_title, push_body, {"alert_id": row["id"], "severity": sev})
 
+    # N3.3: the lock-screen takeover needs the app's own code to run, and on a
+    # killed app only a data-only push gets it there. Sent second and on top of
+    # the visible one above, never instead of it -- if the OS drops this in Doze
+    # the family still has a notification to tap, which is what the tap routing
+    # exists for. The payload carries what the headless task needs to build the
+    # alarm without a network round trip, since it may have none.
+    if sev >= 4:
+        await send_expo_push_notifications(
+            targets, None, None,
+            {"alert_id": row["id"], "severity": sev, "kind": kind,
+             "name": name, "maps": payload.get("maps")},
+            silent=True)
+
     if sev >= 5 and lat is not None and lon is not None:
         await ask_samaritans(row, uid, lat, lon)
 
@@ -1094,11 +1107,20 @@ def forget_push_tokens(tokens):
     print(f"  [expo push] forgot {len(tokens)} unregistered token(s)")
 
 
-async def send_expo_push_notifications(uids, title, body, data=None):
+async def send_expo_push_notifications(uids, title, body, data=None, silent=False):
     """Send Hardware Remote Push Notification via Expo Push Service API.
 
     Delivers notifications directly to Android system push framework even when
     the app is completely closed or killed.
+
+    `silent=True` sends a data-only push: no title, no body, nothing shown. It
+    exists for one reason, and it is the reason N3.3 works at all. Expo only
+    runs the app's background notification task on a terminated app for a push
+    carrying `data` and nothing else -- a push with a title is drawn by the
+    system and the app is never woken. So the task that fires the lock-screen
+    takeover can only be reached this way, and a severity-4-or-worse alert
+    therefore goes out twice: once visibly, so something appears even if the
+    silent one is dropped, and once silently, to start the siren.
     """
     tokens = push_tokens_for(uids)
     if not tokens:
@@ -1112,19 +1134,51 @@ async def send_expo_push_notifications(uids, title, body, data=None):
               f" granted notifications?)")
         return
 
+    sev = (data or {}).get("severity", 0)
+
+    # How long this push is still worth delivering.
+    #
+    # Expo's default is four weeks, which for an emergency is not a default so
+    # much as a bug: a severity-5 push queued while a phone was in a tunnel can
+    # ring at 3 a.m. the next day, long after the wearer stood the alert down.
+    # A family member woken by a siren for an emergency that ended yesterday
+    # learns to distrust the siren, and that is the whole product.
+    #
+    # Five minutes for anything urgent -- long enough to survive a lift, a
+    # tunnel or a moment of Doze, short enough that nothing arrives describing
+    # a situation that has already moved on. It is deliberately not 0: "deliver
+    # this instant or discard" would throw away real alerts over a two-second
+    # network blip. An hour for the rest, which are informational.
+    ttl = 300 if sev >= 4 else 3600
+
     payloads = []
     sent_tokens = []
     for token in tokens:
         if token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken["):
-            payloads.append({
-                "to": token,
-                "title": title,
-                "body": body,
-                "sound": "default",
-                "priority": "high",
-                "data": data or {},
-                "channelId": "nigehban_emergency_alarm" if (data and data.get("severity", 0) >= 4) else "nigehban_default"
-            })
+            if silent:
+                # No title, no body, no sound, no channel. Anything shown here
+                # would be a second visible notification for one emergency, and
+                # -- the part that actually breaks it -- a push carrying a title
+                # is handled by the system instead of being handed to the app,
+                # so the background task would never run.
+                payloads.append({
+                    "to": token,
+                    "priority": "high",
+                    "ttl": ttl,
+                    "data": data or {},
+                    "_contentAvailable": True,
+                })
+            else:
+                payloads.append({
+                    "to": token,
+                    "title": title,
+                    "body": body,
+                    "sound": "default",
+                    "priority": "high",
+                    "ttl": ttl,
+                    "data": data or {},
+                    "channelId": "nigehban_emergency_alarm" if sev >= 4 else "nigehban_default"
+                })
             sent_tokens.append(token)
 
     if not payloads:
@@ -1161,7 +1215,8 @@ async def send_expo_push_notifications(uids, title, body, data=None):
                 print(f"  [expo push ticket error] {token[:24]}... -> {status}: {detail}")
                 if isinstance(details, dict) and details.get("error") == "DeviceNotRegistered":
                     dead.append(token)
-            print(f"  [expo push] {ok}/{len(sent_tokens)} accepted by Expo")
+            kind = "silent" if silent else "visible"
+            print(f"  [expo push/{kind}] {ok}/{len(sent_tokens)} accepted by Expo")
         except Exception as e:
             print(f"  [expo push error] {e}")
 

@@ -121,6 +121,12 @@ npx expo start
 > what the QR code points at. The Nigehban server (port 8000, or your ngrok URL)
 > holds accounts and alerts, and is what the login screen wants.
 
+For a faster loop while working on anything that is not BLE, push or the
+foreground service, `npm run web` opens the same app in a browser — auth,
+family, the live socket and the virtual band all work there. See §2b of
+[TESTING_WITHOUT_HARDWARE.md](TESTING_WITHOUT_HARDWARE.md) for what does not,
+and why.
+
 ### 3. Bluetooth
 
 BLE is a native module, so **Expo Go cannot load it**. Without a development
@@ -177,6 +183,9 @@ nigehban-app/
   src/state.js              the client state machine, transitions as data
   src/theme.js  src/ui.js   the design system: tokens, type scale, component kit
   src/fonts.js              Outfit + Space Grotesk, loaded without blocking
+  src/alarm.js              one seam: native lock-screen alarm, or vibration
+  src/bgNotifications.js    the silent push that wakes a killed app's siren
+  modules/nigehban-alarm/   Kotlin: full-screen intent + siren until dismissed
   src/security.js           the four digits in front of disarming High Alert
   src/components/           CheckinBanner · HighAlertPanel · WatchStatusTile
                             FallCountdown · SosLiveView · SamaritanCall · PinSheet

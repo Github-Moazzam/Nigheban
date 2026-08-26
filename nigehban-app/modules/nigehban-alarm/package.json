@@ -1,0 +1,7 @@
+{
+  "name": "nigehban-alarm",
+  "version": "1.0.0",
+  "description": "Android full-screen-intent lock-screen takeover and looping siren (N3.3 / N3.4)",
+  "main": "index.js",
+  "private": true
+}

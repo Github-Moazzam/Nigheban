@@ -5,7 +5,9 @@ import {
 import {
   backgroundWatchDiagnostics, isBackgroundWatchRunning, startBackgroundWatch,
 } from '../bgService';
-import { pushDiagnostics, registerPushToken } from '../notifications';
+import { backgroundNotificationDiagnostics } from '../bgNotifications';
+import { alarmCapability, presentAlarm, stopAlarm } from '../alarm';
+import { DEFAULT_CHANNEL_ID, pushDiagnostics, registerPushToken } from '../notifications';
 import { C, S, T } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Label, Txt } from '../ui';
 
@@ -128,6 +130,8 @@ export default function Setup({ onDone, session }) {
   const [diag, setDiag] = useState({
     bgModules: null, bgRunning: null, bgError: null,
     pushToken: null, pushError: null, pushRegistered: false, testSent: false,
+    alarmLevel: null, alarmReason: null, alarmError: null, bgNotifRegistered: null,
+    alarmTesting: false,
   });
   const [diagBusy, setDiagBusy] = useState(false);
   const vendor = vendorKey();
@@ -150,6 +154,8 @@ export default function Setup({ onDone, session }) {
     const bg = backgroundWatchDiagnostics();
     const running = await isBackgroundWatchRunning();
     const push = pushDiagnostics();
+    const alarm = alarmCapability();
+    const bgNotif = backgroundNotificationDiagnostics();
     setDiag((d) => ({
       ...d,
       bgModules: bg.modulesLoaded,
@@ -158,6 +164,10 @@ export default function Setup({ onDone, session }) {
       pushToken: push.token,
       pushError: push.error,
       pushRegistered: push.registered,
+      alarmLevel: alarm.level,
+      alarmReason: alarm.reason,
+      alarmError: alarm.lastError || bgNotif.lastError,
+      bgNotifRegistered: bgNotif.registered,
     }));
   }, []);
 
@@ -187,12 +197,41 @@ export default function Setup({ onDone, session }) {
           title: 'Nigehban test notification',
           body: 'If you can see this, local alerts and sound work on this phone.',
           sound: true,
-          channelId: 'nigehban_default',
         },
-        trigger: null,
+        // The channel is chosen by the TRIGGER, not by the content -- a
+        // `channelId` in `content` is silently ignored, which made this button
+        // test Android's default channel rather than Nigehban's.
+        trigger: { channelId: DEFAULT_CHANNEL_ID },
       });
       setDiag((d) => ({ ...d, testSent: true }));
     } catch { /* the chip below stays "not sent" */ }
+    setDiagBusy(false);
+  };
+
+  /**
+   * Fire the real lock-screen alarm at yourself.
+   *
+   * N3.3 and N3.4 are the two features that cannot be checked by looking at the
+   * app, because the whole point of them happens while the app is not on
+   * screen. This runs the exact code path an incoming severity-5 SOS runs --
+   * same native call, same siren -- so it can be tested alone, on one phone,
+   * without arranging an emergency.
+   *
+   * Ten seconds, then it stops itself. A test alarm that has to be dismissed to
+   * stop is a test people avoid running.
+   */
+  const testLockScreenAlarm = async () => {
+    setDiagBusy(true);
+    setDiag((d) => ({ ...d, alarmTesting: true }));
+    await presentAlarm({
+      id: 'test', kind: 'sos', severity: 5, maps: null,
+      user: { name: 'Nigehban test' },
+    });
+    await refreshDiag();
+    setTimeout(async () => {
+      await stopAlarm();
+      setDiag((d) => ({ ...d, alarmTesting: false }));
+    }, 10000);
     setDiagBusy(false);
   };
 
@@ -377,6 +416,35 @@ export default function Setup({ onDone, session }) {
             {diag.pushError ? (
               <Text style={[T.meta, { color: C.faint }]}>{diag.pushError}</Text>
             ) : null}
+
+            <View style={s.diagRow}>
+              <Text style={[T.meta, { color: C.dim }]}>Lock-screen takeover</Text>
+              {/* "vibration" is not a failure and is not green either: it is
+                  what Expo Go can do, and somebody testing there should know
+                  the screen will not light up on the real thing's behalf. */}
+              {diag.alarmLevel === 'takeover' ? (
+                <Chip text="full alarm" tone={C.green} icon="check" />
+              ) : diag.alarmLevel === 'vibration' ? (
+                <Chip text="vibration only" tone={C.amber} icon="alert-triangle" />
+              ) : (
+                <Chip text="unavailable" tone={C.red} icon="x" />
+              )}
+            </View>
+            {diag.alarmReason ? (
+              <Text style={[T.meta, { color: C.faint }]}>{diag.alarmReason}</Text>
+            ) : null}
+
+            <View style={s.diagRow}>
+              <Text style={[T.meta, { color: C.dim }]}>Alarm on a killed app</Text>
+              {diag.bgNotifRegistered ? (
+                <Chip text="listening" tone={C.green} icon="check" />
+              ) : (
+                <Chip text="not registered" tone={C.amber} icon="alert-triangle" />
+              )}
+            </View>
+            {diag.alarmError ? (
+              <Text style={[T.meta, { color: C.faint }]}>{diag.alarmError}</Text>
+            ) : null}
           </View>
 
           <Divider />
@@ -387,6 +455,15 @@ export default function Setup({ onDone, session }) {
                   disabled={diagBusy || !session} onPress={runRegisterPush} />
           <Button title="SEND A TEST NOTIFICATION" icon="bell"
                   disabled={diagBusy} onPress={sendTestNotification} />
+          <Button title={diag.alarmTesting ? 'ALARM RUNNING — 10s' : 'TEST THE LOCK-SCREEN ALARM'}
+                  icon="alert-octagon" tone={C.red}
+                  disabled={diagBusy || diag.alarmTesting} onPress={testLockScreenAlarm} />
+          {diag.alarmTesting ? (
+            <Text style={[T.meta, { color: C.dim }]}>
+              Lock the phone now. It should light up on its own, show Nigehban
+              over the lock screen and sound an alarm until it stops itself.
+            </Text>
+          ) : null}
           {diag.testSent ? (
             <Text style={[T.meta, { color: C.green }]}>
               Sent. Pull down the notification shade — if it is not there, the

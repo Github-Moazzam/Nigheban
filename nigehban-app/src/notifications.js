@@ -16,6 +16,7 @@ try {
 }
 
 export const EMERGENCY_CHANNEL_ID = 'nigehban_emergency_alarm';
+export const DEFAULT_CHANNEL_ID = 'nigehban_default';
 
 const INSTALL_ID_KEY = 'nigehban.installId';
 
@@ -156,7 +157,7 @@ export async function setupNotificationChannels() {
       });
 
       // Configure default notification channel for check-ins
-      await Notifications.setNotificationChannelAsync('nigehban_default', {
+      await Notifications.setNotificationChannelAsync(DEFAULT_CHANNEL_ID, {
         name: 'General Safety Check-ins',
         importance: Notifications.AndroidImportance.DEFAULT,
         vibrationPattern: [0, 200, 100, 200],
@@ -186,6 +187,44 @@ export async function setupNotificationChannels() {
   } catch (e) {
     return false;
   }
+}
+
+/**
+ * Route a tapped notification back to the alert it was about.
+ *
+ * The remote push the server sends to a killed app carries `alert_id`
+ * (`nigehban_server.py`'s `send_expo_push_notifications` calls), while the
+ * local notification this app schedules for itself while alive carries
+ * `alertId` (`sendEmergencyAlarmNotification` below) — both are read here so
+ * a tap routes the same way regardless of which path delivered it.
+ *
+ * `onAlertId` fires for a tap on a running app (the normal listener) and,
+ * separately, for the notification that cold-launched the app — Expo does
+ * not always replay the launch tap through the live listener, so that case
+ * is checked once explicitly.
+ */
+export function subscribeNotificationTaps(onAlertId) {
+  if (!Notifications || Platform.OS === 'web') return () => {};
+
+  const extract = (response) => {
+    const data = response?.notification?.request?.content?.data;
+    const id = data?.alertId ?? data?.alert_id;
+    if (id != null) onAlertId(id);
+  };
+
+  Notifications.getLastNotificationResponseAsync()
+    .then((response) => {
+      if (!response) return;
+      extract(response);
+      // Without this, the tap that cold-launched the app keeps being "the
+      // last response" and would reopen the same alert on every future
+      // launch, including ones that had nothing to do with a notification.
+      Notifications.clearLastNotificationResponseAsync?.().catch(() => {});
+    })
+    .catch(() => { /* best effort */ });
+
+  const sub = Notifications.addNotificationResponseReceivedListener(extract);
+  return () => sub.remove();
 }
 
 /**
@@ -221,7 +260,16 @@ export async function sendEmergencyAlarmNotification(alert) {
           maps: alert.maps,
         },
       },
-      trigger: null, // Instant dispatch
+      // The MAX-importance, DND-bypassing channel is created above and then has
+      // to actually be *used*, or Android files this on the default channel and
+      // a severity-5 SOS arrives silently under Do Not Disturb — which is the
+      // one condition the channel exists for.
+      //
+      // In expo-notifications the channel is chosen by the TRIGGER, not by the
+      // content: `{ channelId }` is ChannelAwareTriggerInput, and it still means
+      // "deliver immediately". On iOS the parser resolves it to null, so this is
+      // the same instant dispatch `trigger: null` was.
+      trigger: { channelId: EMERGENCY_CHANNEL_ID },
     });
 
     return true;

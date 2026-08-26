@@ -394,15 +394,26 @@ to.
 | Receiving high-priority push | `expo-notifications` | **JS** |
 | Alarm-importance channel, DND bypass | `expo-notifications` | **JS** |
 | Opening OEM autostart screens | `expo-intent-launcher` | **JS** |
-| Full-screen intent over the lock screen | `@notifee/react-native` | **JS, via library** |
-| Restart the service after reboot | Notifee, or a small receiver | thin native |
+| Full-screen intent over the lock screen | ~~`@notifee/react-native`~~ `modules/nigehban-alarm/` | **thin native, ours** |
+| Restart the service after reboot | ~~Notifee, or~~ a small receiver | thin native |
 | Verify `isIgnoringBatteryOptimizations()` | small native call | thin native |
 
-**Add `@notifee/react-native` in Phase 0.** It provides full-screen intents,
-custom channels and foreground services from JavaScript, and it is what collapses
-the remaining native surface to almost nothing. M2 needs someone comfortable with
-Android *concepts* — services, channels, Doze, the manifest — not someone who
-writes Kotlin.
+~~**Add `@notifee/react-native` in Phase 0.**~~ **Superseded 26 Aug 2026.**
+Invertase archived Notifee on 7 Apr 2026 and it never supported the New
+Architecture, which Expo 57 / RN 0.86 requires — so the plan's one "via
+library" row had no library behind it. Full-screen intents and the looping
+siren are now ~200 lines of Kotlin in
+[`nigehban-app/modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/),
+a local Expo module that autolinks out of `modules/` with no config entry.
+
+This does move M2's bar: the role now needs someone who can *read* Kotlin, not
+only someone comfortable with Android concepts. It is a small, bounded file and
+the trade was deliberate — the alternative was putting the emergency siren
+behind a five-month-old community fork with a single maintainer.
+
+> A local module under `modules/` is **not** subject to the `/android` trap
+> below. It is source, it is committed, and `expo prebuild --clean` picks it up
+> through autolinking rather than wiping it.
 
 > **The trap that costs a day.** `/android` is gitignored (line 41 of
 > `nigehban-app/.gitignore`) because it is generated output. Hand-edit

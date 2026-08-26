@@ -24,9 +24,9 @@ Audited against the working tree, not against intentions.
 | Workstream | Built | Missing |
 |---|---|---|
 | **UI** | Auth · Home · Band · Family · Alerts · Setup; client state machine; check-in countdown, High Alert with PIN disarm, fall countdown, battery/going-dark, SOS live view, watch-status tile, Samaritan respond; one design system (Outfit + Space Grotesk, semantic tokens, `ui.js` kit, no emoji) | Changing the server address after sign-in — it is still only on the Auth screen |
-| **Backend** | `server/nigehban_server.py` — 22 endpoints + `/ws`, SQLite, 11 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens, `/presence` + `/samaritan` | Qwen scoring, WhatsApp fan-out, token expiry |
-| **Android** | `app.json` with BLE/location/notification perms; `eas.json` with 3 profiles | `plugins/` does not exist · no `@notifee/react-native` · no `expo-battery` · no foreground service · no boot receiver · no OEM deep links |
-| **Firmware** | `nigehban_band_esp32/` — full gesture map, protocol, feedback patterns; `HAS_IMU 0` | `nigehban_band_nrf52/` does not exist · no IMU · no real battery ADC · motor circuit unbuilt |
+| **Backend** | `server/nigehban_server.py` — 24 endpoints + `/ws`, SQLite, 11 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens, `/presence` + `/samaritan`, push TTL | Qwen scoring, WhatsApp fan-out, token expiry |
+| **Android** | `app.json` with BLE/location/notification perms **and 9 more added by `plugins/withNigehbanAndroid.js`**; `eas.json` with 3 profiles; `expo-battery`, `expo-task-manager`, `expo-dev-client`; **FCM wired** (`google-services.json`, project `nigheban-d126d`); foreground service; OEM deep links in Setup.js; **`modules/nigehban-alarm/` — full-screen intent + looping siren, built in-house** | boot receiver · WorkManager watchdog |
+| **Firmware** | `nigehban_band_esp32/` (432 lines) **and `nigehban_band_nrf52/` (591 lines)** — full gesture map, protocol, feedback patterns, battery ADC code; bench sketches `t1`–`t6` all passed | `HAS_IMU 0` on both · battery divider uncalibrated · motor circuit unbuilt · **ESP32 still has the slow-tap bug** (see F2) |
 | **Deployment** | `scripts/dev-tunnel.ps1` / `.sh` — server + HTTPS tunnel, self-verifying; CORS on the server | No Dockerfile, no compose, no Caddyfile, no Alibaba account |
 | **Glue** | `nigehban_hub.py` — Guardian logic in Python | Superseded by the server's sweeper; kept as the firmware test rig |
 
@@ -38,6 +38,17 @@ the labelled fallback it always should have been.
 The band is no longer the blocker either. V1 makes the phone speak the band's
 protocol, so only two rows of the acceptance matrix — BLE reconnect after the
 app is killed, and the physical motor/power budget — actually need hardware.
+
+**Audited against the tree again on 26 Aug 2026, and the table above was wrong
+in the app's favour on almost every Android and firmware row.** `plugins/`,
+`expo-battery`, the nRF52 sketch and the whole FCM setup all existed while the
+plan said they did not; N1 and N3.1 were marked open and are done. The lesson is
+in §10 already — a milestone is done when it is *observed* — and the same rule
+has to apply to marking one open. Corrections are in the N1, N3.1, F2 and §11
+entries.
+
+A review pass the same day found eight defects that all present as working
+software — see §14.
 
 ---
 
@@ -87,6 +98,7 @@ The one-line base-URL swap in Phase 4 only exists if this lands on Day 1.
 - [x] U1.2 — The subnet sweep is now labelled "FIND MY LAPTOP ON THIS WI-FI" and reads as the fallback it is.
 - [x] U1.3 — The Auth address box takes a tunnel URL and `probe()`s it before saving. This is where the ngrok URL goes each morning and the cloud hostname goes on Day 4.
 - [x] U1.4 — `TUNNEL_HEADERS` on every request and on `probe()`. Verified load-bearing: without it a browser-UA client gets ngrok's HTML interstitial instead of JSON.
+- [x] U1.5 — **Socket keep-alive.** 26 Aug 2026 — `useLive()` never pinged, though the server has always answered `{"t":"ping"}` with `{"t":"pong"}`. A carrier NAT drops an idle mobile connection without telling either end: `onclose` never fires, `readyState` stays OPEN, and the header goes on showing **connected** while every check-in buzz and every family alert lands in a pipe that ends nowhere. That is the worst failure mode this product has, because it is silent and looks exactly like nothing happening. Now a 30 s ping with a 10 s pong deadline; a missed pong closes the socket so the existing `onclose` does the reconnect it already knew how to do. Any inbound frame clears the deadline, not just the pong.
 
 **Blocks:** every screen that talks to a real server, and D3.
 **Done when:** both phones on **mobile data** reach the laptop server through ngrok, and swapping to a different URL needs no rebuild.
@@ -115,6 +127,7 @@ the tunnel, with no band in the building. **Observed.**
 
 - [x] U2.1 — [state.js](nigehban-app/src/state.js): `idle · high_alert · checkin_pending · fall_pending · sos_live`, with the legal transitions written as a table. A fifth state was needed: `fall_pending` is the countdown, and it is the one place a deadline is legitimately client-owned, because no server row exists to own it until the alert does.
 - [x] U2.2 — `bandEventToAction()` maps every band event, and each socket handler in [App.js](nigehban-app/App.js) dispatches exactly one action. An event that is illegal in the current state is dropped rather than applied — a `buzz_now` arriving behind a live SOS can no longer demote it to a check-in.
+- [x] U2.4 — `checkin_missed` is no longer silently dropped. 26 Aug 2026 — the band's local nag expiring now dispatches `CHECKIN_EXPIRED`, a context-only event that tells the wearer time is up **without** escalating (the sweeper already owns that deadline; a second alert would page the family twice for one silence, on two disagreeing clocks) and **without** closing the question (answering late still tells the family she is fine). See §14.
 - [x] U2.3 — Driven from the BAND tab, which produces real gestures.
 
 **Design rule:** the phone is an actuator, never a timekeeper. This machine
@@ -128,6 +141,7 @@ reflects server-owned state; it must not own a deadline.
 Built against **mocked** WS messages first, wired to B2 when it lands.
 
 - [x] U3.1 — **Check-in countdown** — a sheet on arrival, a persistent banner once that is dismissed, both counting to the server's `due_at`. The deadline had to be put on the wire first: `checkin_req` and `buzz_now` carried only `window`, so a message that arrived late started a fresh ninety seconds.
+  - **Crash fixed 26 Aug 2026.** [CheckinBanner.js](nigehban-app/src/components/CheckinBanner.js) referenced `s.head` but never defined `s` — no `StyleSheet.create`, no import. Every render threw `ReferenceError`, and with no error boundary in the tree React unmounted the whole screen: pressing **ask for a check-in** blanked the family member's app. It had been unreachable-by-luck until the ask-sheet path started rendering it.
 - [x] U3.2 — **High Alert panel** — armed in one tap, disarmed behind four digits ([PinSheet.js](nigehban-app/src/components/PinSheet.js), keystore-backed). Arming never asks; that asymmetry is the feature. The next buzz is shown to the minute, because the interval is randomised precisely so that it cannot be timed.
 - [x] U3.3 — **Fall countdown** — [FallCountdown.js](nigehban-app/src/components/FallCountdown.js): 30 s at severity 4, 15 s at severity 5, vibrating through each of the last five seconds. "I'm fine" writes a `near_miss`, which the server records and tells nobody.
 - [x] U3.4 — **Battery states** — one alert per threshold crossing, latched and re-armed on charge: `low_battery` at 20 %, `going_dark` at 5 % (matrix #13, #14). The wearer sees a banner saying what her family was told.
@@ -140,6 +154,7 @@ Built against **mocked** WS messages first, wired to B2 when it lands.
 - [x] U4.1 — **Invite flow** — send · pending · accept · decline, in [Family.js](nigehban-app/src/screens/Family.js).
 - [x] U4.2 — **Watch-status tile** — [WatchStatusTile.js](nigehban-app/src/components/WatchStatusTile.js) reads `GET /watch/{member_id}` and turns amber at the same 180 s the server uses, so the screen and the sweeper never disagree in front of a user (matrix #19).
 - [x] U4.3 — **Alert takeover hardening** — map link, "I'm on it" posting to `/alert/{id}/ack`, and the stand-down echo clearing the takeover on every family phone.
+  - **Alerts were going out with no position. Fixed 26 Aug 2026.** `raise()` read only the `fix` the Home screen feeds it, and Home only feeds it while that tab is mounted — so an SOS raised from the BAND tab, or from the band while the app was backgrounded (the normal case), carried no coordinates at all. The family got *EMERGENCY* and no map link, which is most of the value gone. It now falls back to `lastKnownFix()` in [watch.js](nigehban-app/src/watch.js) — the same cache the heartbeat has been reading every minute all along. Deliberately not a live GPS read: `getCurrentPositionAsync` can block for tens of seconds and an SOS has to leave the phone now.
 - [x] U4.4 — **Good Samaritan respond** — [SamaritanCall.js](nigehban-app/src/components/SamaritanCall.js), on top of B3.3 and B3.4 below. Before "I'm going" there is no name and the pin is snapped to a 300 m grid; saying yes releases the name and the exact position, and puts the responder's own name on the alert.
 
 **Done when:** matrix rows 1, 2, 7, 19, 20 pass on two phones.
@@ -226,6 +241,7 @@ family member's request does.
 
 ### B4 · Hardening · Owner M3 · Phase 5 · ~2 h
 
+- [x] B4.0 — **Push TTL.** 26 Aug 2026 — `send_expo_push_notifications()` sent no `ttl`, so every push inherited Expo's four-week default. A severity-5 push queued while a phone was in a tunnel could ring at 3 a.m. the next day, long after the wearer stood the alert down — and a family member woken by a siren for an emergency that ended yesterday learns to distrust the siren, which is the whole product. Now **300 s for severity ≥ 4**, 3600 s for the rest. Deliberately not `0`: "deliver this instant or discard" throws away real alerts over a two-second blip.
 - [ ] B4.1 — Rate limits on every write endpoint.
 - [ ] B4.2 — Structured logging keyed by alert id, so a failed demo is diagnosable in 30 seconds.
 - [ ] B4.3 — Redis/Tair for WS fan-out across workers — *only if more than one worker ships*.
@@ -244,13 +260,15 @@ Everything here is JavaScript (exec plan §7.0). Nobody writes Kotlin.
 
 ### N1 · Config plugin + dev build · Owner M2 · Phase 0 · ~3 h
 
-- [ ] N1.1 — Create `plugins/withNigehbanAndroid.js` from the exec plan §7.1 listing; register it in `app.json`.
-- [ ] N1.2 — Add `@notifee/react-native` and `expo-battery`.
-- [ ] N1.3 — Queue the first EAS dev build **in hour one** — it is the long pole on J1.
-- [ ] N1.4 — Drop `usesCleartextTraffic` once the cloud has TLS (D2), not before.
+> **Audited 26 Aug 2026 — this milestone was marked open and is substantially
+> done.** The checkboxes below had not been updated since the plan was written.
 
-**Blocks:** J1. The real band cannot talk to the app without this — Expo Go can never load `react-native-ble-plx`.
-**Done when:** the dev-build APK is installed on two phones and the manifest carries all ten permissions.
+- [x] N1.1 — `plugins/withNigehbanAndroid.js` exists and is registered at [app.json:76](nigehban-app/app.json#L76). It adds nine manifest permissions: the four `FOREGROUND_SERVICE*` variants, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `USE_FULL_SCREEN_INTENT`, `WAKE_LOCK`, `ACCESS_BACKGROUND_LOCATION` — on top of the nine in `app.json`.
+- [x] N1.2 — `expo-battery` **is** installed (`~57.0.2`), along with `expo-task-manager` and `expo-dev-client`. ~~`@notifee/react-native` is genuinely still missing.~~ **Closed 26 Aug 2026 by removing the requirement, not by meeting it:** Notifee was archived on 7 Apr 2026 and never supported the New Architecture, so it could not have been installed here at all. What it was needed for is now [`modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/) — see N3.3. **No new dependency was added.**
+- [x] N1.3 — Done. `extra.eas.projectId` is set, the `development` profile builds an APK, and the proof it is installed is behavioural: **push reaches a force-stopped app**, which Expo Go on Android cannot do at all since SDK 53.
+- [ ] N1.4 — Drop `usesCleartextTraffic` once the cloud has TLS (D2), not before. Still correctly open — [app.json:54](nigehban-app/app.json#L54).
+
+**Blocks:** ~~J1~~ — unblocked. **Done when:** ~~the dev-build APK is installed on two phones and the manifest carries all ten permissions.~~ Observed; the manifest carries eighteen.
 
 ### N2 · Foreground service · Owner M2 · Phase 2 · ~8 h
 
@@ -258,6 +276,7 @@ The hardest single task on the board.
 
 - [x] N2.1 — `Location.startLocationUpdatesAsync(WATCH_TASK, …)` with the `foregroundService` block from exec plan §7. Shipped once already, but silently dead: `expo-task-manager` was never in `package.json`, so `bgService.js`'s `require()` failed and `startBackgroundWatch()` always returned `false` with no error surfaced anywhere. Fixed 2026-08-25 — dependency installed, failures now logged and visible in Setup's diagnostics panel (step 5).
 - [x] N2.2 — BLE reconnect loop that survives the app being swiped from Recents (matrix #10, #12). Fixed 2026-08-25 — `band.js`'s `onDisconnected` previously just set status to `disconnected` and stopped; an unexpected drop now retries `connect()` after 3 s, distinguished from a deliberate `disconnect()` via a `wantsConnection` ref so the retry doesn't fight the user's own button. Depends on N2.1 actually keeping the JS runtime alive to retry from.
+  - **Scan had no timeout. Fixed 26 Aug 2026.** A BLE scan has no natural end: if the band is off, out of range, or already bonded elsewhere, `startDeviceScan` simply never calls back, so the UI sat on *Searching* forever with nothing to press and no retry. Now capped at 10 s → a `not-found` status that Home renders as **"Band not found"**, then the same retry path. The scan-**error** branch (Bluetooth switched off mid-scan, permission revoked, adapter reset) had no retry either and left the hook dead; all three exits now route through one `retrySoon()`, and `disconnect()`/unmount stop the scan.
 - [ ] N2.3 — Boot receiver → service restarts and reconnects in under 60 s (matrix #11).
 - [ ] N2.4 — WorkManager watchdog: is the service alive, is BLE connected, is the socket up. **Watchdog only** — never a timer; the 15-minute floor makes it useless as one.
 - [x] N2.5 — `isIgnoringBatteryOptimizations()` surfaced in the UI — Setup.js step 4, "BATTERY: SET TO UNRESTRICTED".
@@ -266,14 +285,25 @@ The hardest single task on the board.
 
 ### N3 · Push + alarm · Owner M2 · Phase 2 · ~4 h
 
-- [ ] N3.1 — FCM project; high-priority push tested with curl before the app consumes it. **Server side is ready** — `send_expo_push_notifications()` now logs every Expo ticket's status instead of discarding the response — but the FCM (V1) project itself has never been created, so every push ticket will read `InvalidCredentials`/`DeviceNotRegistered` until that's done. External, one-time steps:
+- [x] N3.1 — **Done, audited 26 Aug 2026.** This entry said the FCM project "has never been created". It has: `nigehban-app/google-services.json` is a real Firebase config for project **`nigheban-d126d`**, package `com.nigehban.app`, referenced from [app.json:22](nigehban-app/app.json#L22); the service-account key is gitignored by pattern (`*firebase-adminsdk*.json`) with the reasoning written into `.gitignore`. Landed across `a537bd9` → `57b8350`. **Confirmed working end to end: a push arrives at a force-stopped app.** The one-time steps below are kept as the runbook for a second Firebase project or a credential rotation, not as outstanding work:
   1. console.firebase.google.com → create a project → add an Android app with package `com.nigehban.app` → download `google-services.json` into `nigehban-app/`.
   2. Add `"android": { "googleServicesFile": "./google-services.json" }` to `nigehban-app/app.json`.
   3. `eas credentials` → Android → push notifications → upload the Firebase service account key (Project settings → Service accounts → Generate new private key, in the Firebase console).
   4. Rebuild (`eas build -p android --profile development`), sign in, let it register a push token, then `curl -H "Content-Type: application/json" -d '{"to":"<token from server/nigehban.db devices table>","title":"test","body":"hi"}' https://exp.host/--/api/v2/push/send` and check the terminal running `nigehban_server.py` — the server logs the same ticket status now, so a failed send shows the reason without touching the phone again.
 - [ ] N3.2 — Alarm-importance channel with DND bypass, via `expo-notifications`. Channel itself exists (`notifications.js`), untestable end-to-end until N3.1 lands.
-- [ ] N3.3 — Full-screen intent over the lock screen via Notifee (matrix #6 — fires with the family app **killed**).
-- [ ] N3.4 — Siren + vibration until dismissed.
+  - **The channel was created and then never used. Fixed 26 Aug 2026.** `sendEmergencyAlarmNotification()` built the MAX-importance, DND-bypassing channel and then dispatched with `trigger: null`, which files the notification on Android's *default* channel — so a severity-5 SOS would have arrived silently under Do Not Disturb, the one condition the channel exists for. In expo-notifications the channel is chosen by the **trigger**, not the content (`ChannelAwareTriggerInput`; `NotificationContentInput` has no `channelId` field), so this is `trigger: { channelId: EMERGENCY_CHANNEL_ID }`. On iOS the parser resolves it to `null`, i.e. the same instant dispatch as before. App.js's `notify()` had the identical bug against `nigehban_default` and got the same fix.
+- [◐] N3.3 — Full-screen intent over the lock screen (matrix #6 — fires with the family app **killed**). ~~via Notifee~~ — **built in-house, 26 Aug 2026.**
+  - **Notifee is dead, and the plan could not have known.** Invertase archived [invertase/notifee](https://github.com/invertase/notifee) on **7 Apr 2026**; the last publish was `9.1.8` in December 2024, and it never supported the New Architecture — which Expo 57 / RN 0.86 is, exclusively. So the one dependency N1.2 was still waiting on was never going to arrive. `expo-notifications@57.0.12` has no full-screen-intent API either; the shipped `.d.ts` files were grepped before concluding that.
+  - `react-native-notify-kit` — a community fork, same public API, New Arch, ~34.8k downloads/week — was the obvious substitute and was **deliberately not taken**. It is five months old and has one unpaid maintainer, and Nigehban needs two of Notifee's fifty-odd APIs. Putting the emergency siren behind a dependency that has already died once under this project is a worse risk than owning ninety lines.
+  - **What was built:** [`modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/), a local Expo module, autolinked from `modules/` with no config entry (verified with `expo-modules-autolinking search -p android`). `presentAlarm()` posts a `CATEGORY_CALL` notification with `setFullScreenIntent(pi, true)` on its own silent `IMPORTANCE_HIGH` channel; `stopAlarm()` tears it down; `consumeLaunchAlertId()` reads the alert out of the launching intent so a cold start knows why it woke.
+  - **The permission was already there and was not enough.** `USE_FULL_SCREEN_INTENT` buys the right to *fire* the intent; what happens next is the launched activity's business. Without `android:showWhenLocked` and `android:turnScreenOn` on MainActivity, Android brings the app up *behind* the lock screen with the display off — an SOS that fired perfectly and is waiting under a black screen. Both are now set by `withNigehbanAndroid.js`, verified via `expo config --type introspect`.
+  - **The killed-app half needs a second push.** `presentAlarm` needs JS running, and the case the feature exists for is the one where it is not. Only a **data-only** push starts a headless runtime on a terminated Android app — a push with a title is drawn by the system and the app is never woken. So `emit_alert` now sends severity ≥ 4 **twice**: the visible push, unchanged, plus a silent one carrying `kind`/`name`/`maps`, which `src/bgNotifications.js` turns into the alarm. Sent in addition, never instead: Doze can still drop the silent one, and then the visible notification and its tap routing are what is left. Payload shapes verified against the real send path.
+  - **Not yet observed on hardware.** There is no JDK or Android SDK on this machine, so the Kotlin has been written and read but not compiled — that happens on the next EAS build. Setup → **TEST THE LOCK-SCREEN ALARM** runs the exact production path on one phone in ten seconds, which is how this gets closed.
+  - **Tap routing landed 26 Aug 2026, ahead of the full-screen intent.** There was no `addNotificationResponseReceivedListener` anywhere in the tree, so tapping an SOS push cold-launched the app to the Home tab with no idea an alert was involved — the push arrived correctly and then dead-ended. `subscribeNotificationTaps()` in [notifications.js](nigehban-app/src/notifications.js) now reads `alertId`/`alert_id` (the local and remote paths spell it differently), also checks `getLastNotificationResponseAsync()` for the tap that *launched* the app, and clears it so a later unrelated launch does not replay the same alert. App.js holds the id until a session exists, then fetches `/alerts?scope=incoming` and drives the existing takeover modal. Still needs N3.1 before the push it routes can actually be delivered.
+- [◐] N3.4 — Siren + vibration until dismissed. **Built 26 Aug 2026, same module.**
+  - A notification sound plays once, from the channel, at whatever volume Android picks. This owns a `MediaPlayer` on `STREAM_ALARM` with `isLooping = true` instead, plus `VibrationEffect.createWaveform(pattern, 0)` — repeat index 0, i.e. forever. The alarm stream is also the answer to Do Not Disturb: `setBypassDnd(true)` on a channel is silently ignored without Notification Policy Access, which almost no app has, whereas `USAGE_ALARM` audio is exempt by default.
+  - The stream volume is raised to maximum and restored on stop. If the process dies mid-alarm it stays up — the right direction to fail in here, and cheaper than the machinery to guarantee otherwise.
+  - **"Until dismissed" is enforced in one place.** `App.js` stops the alarm from an effect keyed on `incoming` going null, not from each button, so a fourth exit cannot be added later that leaves a siren running. The map button is the single explicit call, because it deliberately does *not* close the takeover.
 
 **Done when:** matrix rows 5 and 6 pass on three phones.
 
@@ -293,12 +323,24 @@ The hardest single task on the board.
 - [x] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need. LSM6DS3 block present but `#if HAS_IMU 0` until F3; both paths compile.
 - [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](firmware/README.md).
 
-> **Tap timing changed during F2.1 and `virtualBand.js` has not caught up.** The
-> band originally waited for a tap burst to close before classifying it, so two
-> *slow* taps became two `checkin_ack`s — the family told "I'm fine" by someone
-> calling for help. The band now fires `sos` on the second tap itself and makes
-> `checkin_ack` wait `TAP_WINDOW_MS` (1200 ms). `virtualBand.js:26` still has
-> the old 420 ms burst logic and therefore still has the bug.
+> **Tap timing changed during F2.1.** The band originally waited for a tap burst
+> to close before classifying it, so two *slow* taps became two `checkin_ack`s —
+> the family told "I'm fine" by someone calling for help. The fix fires `sos` on
+> the second tap itself and makes `checkin_ack` wait `TAP_WINDOW_MS` (1200 ms).
+>
+> **Corrected 26 Aug 2026 — this note said `virtualBand.js` had not caught up.
+> It has**, and had already: `TAP_WINDOW_MS = 1200` with SOS on the second tap
+> at [virtualBand.js:271](nigehban-app/src/virtualBand.js#L271). The stale note
+> was claiming a live safety bug in the file the whole no-hardware test plan
+> runs on.
+>
+> **The `.ino` that has *not* caught up is the ESP32 one.**
+> [nigehban_band_esp32.ino:184](nigehban_band_esp32/nigehban_band_esp32.ino#L184)
+> still finalises on `CLICK_GAP_MS` (420 ms) and never fires SOS on the second
+> tap, so it still has the original bug. That is the sketch **F5.1 designates as
+> the spare band for demo day** — a spare carrying a known false-"I'm fine"
+> failure is worse than no spare, because it will be trusted. Either port the
+> six lines from the nRF52 sketch or strike F5.1.
 
 **Done when:** the Phase 1 gate — a button press on the nRF52840 raises an SOS visible on a second phone over the internet, both phones on mobile data.
 
@@ -449,15 +491,16 @@ and the board should say so.
 | B1 Consent + schema | M3 | 0 | 4 h | ☑ done |
 | B2 The sweeper | M3 | 2 | 5 h | ☑ done |
 | B3 Feature endpoints | M3 | 3 | 6 h | ◐ B3.1–B3.4 done; Qwen and WhatsApp open |
-| B4 Hardening | M3 | 5 | 2 h | ☐ |
-| N1 Config plugin + dev build | M2 | 0 | 3 h | ☐ |
-| N2 Foreground service | M2 | 2 | 8 h | ☐ |
-| N3 Push + alarm | M2 | 2 | 4 h | ☐ |
-| F1 Board bring-up | M4 | 0 | 3 h | ☐ |
-| F2 Port the gesture layer | M4 | 0–1 | 5 h | ☐ |
-| F3 IMU / fall | M4 | 2 | 5 h | ☐ |
+| B4 Hardening | M3 | 5 | 2 h | ◐ B4.0 push TTL done; rest open |
+| R1 Silent-failure pass (§14) | M1/M2/M3 | — | 4 h | ◐ 8 fixed, 3 verified |
+| N1 Config plugin + dev build | M2 | 0 | 3 h | ◐ N1.1/N1.2/N1.3 done; N1.4 waits on D2 |
+| N2 Foreground service | M2 | 2 | 8 h | ◐ N2.1/N2.2/N2.5 done; boot receiver + watchdog open |
+| N3 Push + alarm | M2 | 2 | 4 h | ◐ N3.1 observed; N3.2 fixed §14; N3.3/N3.4 **built, await one EAS build** |
+| F1 Board bring-up | M4 | 0 | 3 h | ☑ done |
+| F2 Port the gesture layer | M4 | 0–1 | 5 h | ◐ F2.1/F2.2 done; battery uncalibrated |
+| F3 IMU / fall | M4 | 2 | 5 h | ☐ `HAS_IMU 0` on both sketches |
 | F4 Hardware build | M4 | 0–2 | 4 h | ☐ |
-| F5 Spare band | M4 | 5 | 0.5 h | ☐ |
+| F5 Spare band | M4 | 5 | 0.5 h | ☐ blocked — ESP32 carries the slow-tap bug |
 | D0 Account paperwork | M3 | 0 | 5 m | ☐ |
 | D1 Pipeline spike | M3 | 2 | 0.5 h | ☐ |
 | D2 Lift and shift | M3 | 4 | 4 h | ☐ |
@@ -619,3 +662,58 @@ invalidates the previous session — the cheapest "I lost my phone" there is.
   database; it does nothing about a stolen phone. B4.
 - **CORS is still `*`**, which is defensible for a tunnelled dev box holding
   test accounts and indefensible the moment D2 puts this on a real host.
+
+---
+
+## 14. Resolved — the silent-failure pass, 26 Aug 2026
+
+Eight defects, found by review rather than by a test failing. They are grouped
+here because they share a shape worth naming: **every one of them looks like
+working software.** Nothing throws, nothing logs, the UI says the right thing —
+and the alert does not arrive. In a product whose entire promise is *someone
+will know*, that class of bug outranks any unbuilt feature.
+
+| # | Where | What it looked like | What was happening |
+|---|---|---|---|
+| 1 | [CheckinBanner.js](nigehban-app/src/components/CheckinBanner.js) | The family member's screen closed itself | `s.head` with no `s` — a `ReferenceError` every render, and no error boundary, so React unmounted the tree |
+| 2 | [notifications.js](nigehban-app/src/notifications.js) | Push arrives, tap does nothing useful | No response listener anywhere; every tap cold-launched to Home |
+| 3 | [api.js](nigehban-app/src/api.js) | Header says **connected** | NAT-dropped socket, half-open for minutes, no ping to notice |
+| 4 | [band.js](nigehban-app/src/band.js) | Stuck on **Searching** | BLE scan with no timeout, and a scan-error branch with no retry |
+| 5 | [App.js](nigehban-app/App.js) | *EMERGENCY* with no map link | `raise()` read a fix only the Home tab feeds |
+| 6 | [state.js](nigehban-app/src/state.js) | Band stops buzzing, screen says nothing | `checkin_missed` fell through to `default: return null` |
+| 7 | [nigehban_server.py](server/nigehban_server.py) | Siren at 3 a.m. for yesterday | No `ttl`, so Expo's four-week default applied |
+| 8 | [notifications.js](nigehban-app/src/notifications.js) | Silent SOS under Do Not Disturb | The DND-bypass channel was created and then never used |
+
+Two of these were re-diagnosed rather than fixed as first written, and both
+corrections matter more than the fixes:
+
+**#8 — the channel is set by the trigger, not the content.** The obvious patch
+is `channelId` in the notification content. `NotificationContentInput` has no
+such field in expo-notifications 57; `ChannelAwareTriggerInput` is a *trigger*,
+and it still means immediate delivery. Patching the content would have compiled,
+shipped, and left the SOS exactly as silent as before.
+
+**#6 — the band's `checkin_missed` must not escalate.** It reads like a dropped
+alert. It is not: the band only nags because the phone sent `checkin_req`, and
+the phone only sends that because the server opened a `checkins` row with a
+`due_at` — so B2.2's sweeper is already raising `checkin_missed` on that row.
+Escalating from the band as well would page the family **twice for one silence**,
+with the band's clock and the server's clock disagreeing about when. The real
+defect was the opposite one: `emit_alert()` fans out to `family_of(uid)` only, so
+the *wearer* was told nothing at all — her band simply stopped buzzing. It now
+dispatches `CHECKIN_EXPIRED`, which says time is up and deliberately leaves the
+question open, because answering late still tells the family she is fine.
+
+This is §10.1 in practice — *observed, not reasoned about*. Every fix here was
+reasoned about, so:
+
+**Verified on web:** #1, #3, #5.
+**Verified on device:** #2 — tapping a push on a force-stopped app now opens the alert.
+**Testable today, not yet run:** #4, #7, #8. The dev build and FCM both already
+exist (see the N1/N3.1 audit notes), so nothing blocks these — they need one
+sitting with one Android phone, roughly half an hour for all three.
+**Not verifiable at all yet:** #6 — see the note under §12, `virtualBand.js`
+never implements the band's nag timeout, so the phone-as-band cannot produce the
+event. Porting those ~10 lines from
+[the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino) closes both the
+test gap and a real firmware/JS divergence.
