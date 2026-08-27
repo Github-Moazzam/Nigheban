@@ -34,8 +34,8 @@ configurable base URL, so moving between them is one setting.
 
 | | |
 |---|---|
-| **Target band** | Seeed Studio XIAO nRF52840 **Sense** — BLE 5.0, on-board LSM6DS3TR-C IMU and PDM mic, BQ25101 LiPo charger |
-| **Stand-in band** | `nigehban_band_esp32/` — an ESP32 sketch speaking the identical protocol, kept as a spare demo unit |
+| **The band** | Seeed Studio XIAO nRF52840 **Sense** — BLE 5.0, on-board LSM6DS3TR-C IMU and PDM mic, BQ25101 LiPo charger |
+| **Stand-in** | `nigehban-app/src/virtualBand.js` — the phone runs the band's own gesture engine, so no hardware is needed to build or test |
 | **Peripherals** | one tactile button, a coin vibration motor behind an NPN or MOSFET driver, a 250–400 mAh LiPo |
 
 > **The motor never connects straight to a GPIO pin.** A coin ERM pulls 60–100 mA
@@ -56,8 +56,8 @@ configurable base URL, so moving between them is one setting.
 | every 10 s | `hb` | Heartbeat: battery and link state, never an alert |
 
 The band↔phone protocol is newline-delimited JSON over the Nordic UART Service
-and is **frozen** — it is identical on the ESP32 and the nRF52840, which is what
-lets firmware and app work be done in parallel.
+and is **frozen** — the firmware and the virtual band on the phone emit byte-identical
+events, which is what lets firmware and app work be done in parallel.
 
 ---
 
@@ -191,7 +191,8 @@ nigehban-app/
                             FallCountdown · SosLiveView · SamaritanCall · PinSheet
   src/screens/              Auth · Home · Band · Family · Alerts · Setup
 tests/                      consent + sweeper + samaritan, end to end, no phone needed
-nigehban_band_esp32/        stand-in firmware (Arduino)
+nigehban_band_nrf52/        the band firmware (Arduino)
+firmware/t1..t6/            bench bring-up sketches, one unknown each
 scripts/dev-tunnel.*        server + public HTTPS tunnel, self-verifying
 nigehban_hub.py             laptop-side Guardian — check-in timer, disconnect
                             grace, escalation ladder, Qwen risk engine

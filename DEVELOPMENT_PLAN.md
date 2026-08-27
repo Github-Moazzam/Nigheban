@@ -26,7 +26,7 @@ Audited against the working tree, not against intentions.
 | **UI** | Auth · Home · Band · Family · Alerts · Setup; client state machine; check-in countdown, High Alert with PIN disarm, fall countdown, battery/going-dark, SOS live view, watch-status tile, Samaritan respond; one design system (Outfit + Space Grotesk, semantic tokens, `ui.js` kit, no emoji) | Changing the server address after sign-in — it is still only on the Auth screen |
 | **Backend** | `server/nigehban_server.py` — 24 endpoints + `/ws`, SQLite, 11 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens, `/presence` + `/samaritan`, push TTL | Qwen scoring, WhatsApp fan-out, token expiry |
 | **Android** | `app.json` with BLE/location/notification perms **and 9 more added by `plugins/withNigehbanAndroid.js`**; `eas.json` with 3 profiles; `expo-battery`, `expo-task-manager`, `expo-dev-client`; **FCM wired** (`google-services.json`, project `nigheban-d126d`); foreground service; OEM deep links in Setup.js; **`modules/nigehban-alarm/` — full-screen intent + looping siren, built in-house** | boot receiver · WorkManager watchdog |
-| **Firmware** | `nigehban_band_esp32/` (432 lines) **and `nigehban_band_nrf52/` (591 lines)** — full gesture map, protocol, feedback patterns, battery ADC code; bench sketches `t1`–`t6` all passed | `HAS_IMU 0` on both · battery divider uncalibrated · motor circuit unbuilt · **ESP32 still has the slow-tap bug** (see F2) |
+| **Firmware** | `nigehban_band_nrf52/` (591 lines) — full gesture map, protocol, feedback patterns, battery ADC code; bench sketches `t1`–`t6` all passed | `HAS_IMU 0` · battery divider uncalibrated · motor circuit unbuilt · haptic drive strength unresolved (firmware/README.md) |
 | **Deployment** | `scripts/dev-tunnel.ps1` / `.sh` — server + HTTPS tunnel, self-verifying; CORS on the server | No Dockerfile, no compose, no Caddyfile, no Alibaba account |
 | **Glue** | `nigehban_hub.py` — Guardian logic in Python | Superseded by the server's sweeper; kept as the firmware test rig |
 
@@ -319,7 +319,7 @@ The hardest single task on the board.
 
 ### F2 · Port the gesture layer · Owner M4 · Phase 0–1 · ~5 h
 
-- [x] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from [the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino) onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap. All gestures and commands verified against nRF Connect.
+- [x] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from the ESP32 prototype onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap. All gestures and commands verified against nRF Connect. **The prototype sketch was deleted from the tree on 27 Aug 2026** — the nRF52 sketch is now the only firmware, and `git show 70c5176:nigehban_band_esp32/nigehban_band_esp32.ino` is the record.
 - [x] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need. LSM6DS3 block present but `#if HAS_IMU 0` until F3; both paths compile.
 - [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](firmware/README.md).
 
@@ -334,13 +334,14 @@ The hardest single task on the board.
 > was claiming a live safety bug in the file the whole no-hardware test plan
 > runs on.
 >
-> **The `.ino` that has *not* caught up is the ESP32 one.**
-> [nigehban_band_esp32.ino:184](nigehban_band_esp32/nigehban_band_esp32.ino#L184)
-> still finalises on `CLICK_GAP_MS` (420 ms) and never fires SOS on the second
-> tap, so it still has the original bug. That is the sketch **F5.1 designates as
-> the spare band for demo day** — a spare carrying a known false-"I'm fine"
-> failure is worse than no spare, because it will be trusted. Either port the
-> six lines from the nRF52 sketch or strike F5.1.
+> **Closed 27 Aug 2026.** The one file that never caught up was the ESP32
+> prototype, which still finalised on `CLICK_GAP_MS` (420 ms) and never fired
+> SOS on the second tap. It was also the sketch F5.1 designated as the spare
+> band — a spare carrying a known false-"I'm fine" failure is worse than no
+> spare, because it will be trusted. The choice was port the six lines or
+> strike F5.1; **the board was retired instead, which strikes F5.1.** Both
+> surviving implementations — the nRF52 sketch and `virtualBand.js` — use
+> `TAP_WINDOW_MS`, so the tree no longer contains the bug anywhere.
 
 **Done when:** the Phase 1 gate — a button press on the nRF52840 raises an SOS visible on a second phone over the internet, both phones on mobile data.
 
@@ -358,9 +359,16 @@ The hardest single task on the board.
 
 > *If the band disconnects whenever it buzzes, the 100 µF cap is what's missing.*
 
-### F5 · Spare band · Owner M4 · Phase 5 · ~30 min
+### F5 · Spare band · Owner M4 · Phase 5 · ~30 min — ✗ **struck 27 Aug 2026**
 
-- [ ] F5.1 — Keep the ESP32 flashed with the final gesture map and charged. A second working band on demo day normally costs a day of building; you already have one.
+- [x] ~~F5.1 — Keep the ESP32 flashed with the final gesture map and charged.~~ **Struck.** The ESP32 was retired from the project and its sketch deleted from the tree, so the free spare is gone. It was already blocked (see the tap-timing note under F2), and shipping a spare with a known false-"I'm fine" failure was never an option.
+
+> **Consequence, stated plainly: there is no spare band for demo day.** A dead
+> or bricked XIAO now costs the live hardware demo, and the fallback is the
+> virtual band plus the Q2.3 video. If a second XIAO is within budget, buying
+> one is the cheapest insurance on the board — the firmware flashes onto it
+> unchanged. Otherwise Q3.2's "dead band" contingency drill stops being a
+> formality and becomes the actual plan.
 
 ---
 
@@ -500,7 +508,7 @@ and the board should say so.
 | F2 Port the gesture layer | M4 | 0–1 | 5 h | ◐ F2.1/F2.2 done; battery uncalibrated |
 | F3 IMU / fall | M4 | 2 | 5 h | ☐ `HAS_IMU 0` on both sketches |
 | F4 Hardware build | M4 | 0–2 | 4 h | ☐ |
-| F5 Spare band | M4 | 5 | 0.5 h | ☐ blocked — ESP32 carries the slow-tap bug |
+| F5 Spare band | M4 | 5 | — | ✗ struck 27 Aug — ESP32 retired, no spare exists |
 | D0 Account paperwork | M3 | 0 | 5 m | ☐ |
 | D1 Pipeline spike | M3 | 2 | 0.5 h | ☐ |
 | D2 Lift and shift | M3 | 4 | 4 h | ☐ |
@@ -530,7 +538,8 @@ exec plan.** All three files now agree.
 | every 10 s | `hb` | heartbeat, never an alert |
 
 Changed in lockstep:
-[nigehban_band_esp32.ino](nigehban_band_esp32/nigehban_band_esp32.ino) ·
+the ESP32 prototype (since retired) ·
+[nigehban_band_nrf52.ino](nigehban_band_nrf52/nigehban_band_nrf52.ino) ·
 [virtualBand.js](nigehban-app/src/virtualBand.js) ·
 [bandLink.js](nigehban-app/src/bandLink.js) ·
 [band.js](nigehban-app/src/band.js) ·
@@ -715,5 +724,5 @@ sitting with one Android phone, roughly half an hour for all three.
 **Not verifiable at all yet:** #6 — see the note under §12, `virtualBand.js`
 never implements the band's nag timeout, so the phone-as-band cannot produce the
 event. Porting those ~10 lines from
-[the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino) closes both the
-test gap and a real firmware/JS divergence.
+[nigehban_band_nrf52.ino:577](nigehban_band_nrf52/nigehban_band_nrf52.ino#L577)
+closes both the test gap and a real firmware/JS divergence.

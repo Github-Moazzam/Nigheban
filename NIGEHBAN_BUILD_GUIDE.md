@@ -1,5 +1,24 @@
 # Nigehban — Prototype to Product Build Guide
 
+> ## Historical — superseded
+>
+> This is the original Day-0 guide, written when the band was an ESP32 on a
+> breadboard and the brain was a Python script on a laptop. **That migration is
+> finished.** The band is a XIAO nRF52840 Sense, the brain is
+> `server/nigehban_server.py`, and the ESP32 was retired on 27 Aug 2026 — its
+> sketch is gone from the tree and `firmware/nigehban_band_esp32.ino` referenced
+> below no longer exists.
+>
+> **Current plans:** [EXECUTION_PLAN.md](EXECUTION_PLAN.md) ·
+> [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) ·
+> [firmware/README.md](firmware/README.md) for the bench work.
+>
+> **Still current in here, and not ESP32-specific:** §8 Alibaba Cloud wiring ·
+> §9 BOM and enclosure build order · §10's judge Q&A prep. Kept for those.
+>
+> Everything else is a record of how the project started, not instructions to
+> follow. Do not flash anything on the strength of this file.
+
 **From an ESP32 and two buttons on your desk today, to a wristband + Android app + Alibaba Cloud backend.**
 
 ---
@@ -85,10 +104,14 @@ MPU6050 (optional): VCC→3V3  GND→GND  SDA→GPIO21  SCL→GPIO22
 
 ### 2.3 Flash the band
 
+> **Obsolete — the ESP32 and its sketch are gone.** To flash the real band, use
+> [firmware/arduino_setup.md](firmware/arduino_setup.md) (Seeed nRF52 core) and
+> `nigehban_band_nrf52/`. The steps below are the historical ESP32 procedure.
+
 1. Arduino IDE → **File ▸ Preferences ▸ Additional Board URLs**:
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
 2. **Tools ▸ Board ▸ ESP32 Dev Module** (or ESP32C3 Dev Module)
-3. Open `firmware/nigehban_band_esp32.ino`, adjust the pin `#define`s, Upload.
+3. Open the ESP32 sketch, adjust the pin `#define`s, Upload.
 4. Open **Serial Monitor at 115200**. Press buttons. You should see JSON lines:
    ```json
    {"t":"evt","e":"checkin_ack","seq":3,"ms":18422,"bat":100,"armed":0,"btn":1,"g":"click","n":1}
@@ -466,7 +489,7 @@ Hard rule: **Day 5 is not a build day.** Anything unfinished by end of Day 4 bec
 
 | File | What it is |
 |---|---|
-| `firmware/nigehban_band_esp32.ino` | ESP32 band firmware: BLE NUS, gesture engine, optional MPU6050 fall detection |
+| ~~`firmware/nigehban_band_esp32.ino`~~ | ESP32 band firmware — **deleted 27 Aug 2026**; superseded by `nigehban_band_nrf52/` |
 | `hub/nigehban_hub.py` | Laptop hub: BLE client + full guardian logic + dispatch + Qwen |
 | `hub/config.json` | Your settings — contacts, timings, API keys |
 | `hub/requirements.txt` | `bleak`, `requests` |

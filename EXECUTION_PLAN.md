@@ -39,7 +39,7 @@ Samaritan · Alibaba Cloud deployment · Android background survival.
 |---|---|
 | "Band firmware — working, unchanged" | Accurate for what it is. The ESP32 sketch is a **deliberate stand-in for early testing** — it says so in its own header, and it speaks the frozen protocol so the app never changes when the hardware does. That was the right call. The planning point is only that *porting* it to the XIAO is **a full day of work the old plan did not budget**. The board is in hand, so it starts Day 1. |
 | "Fall detection: `fall` event exists" | `HAS_IMU 0` — compiled out, never run. The code path targets an external **MPU6050 you do not need**: the XIAO Sense has an LSM6DS3TR-C on board. Delete that path rather than porting it. |
-| — | The ESP32 band is **already your spare**. A second working band on demo day normally costs a day of building; you have one for free, so keep it flashed with the final gesture map and charged. |
+| — | ~~The ESP32 band is **already your spare**.~~ **Retired 27 Aug 2026** — the board was dropped and its sketch deleted, so there is no spare band. See F5 in DEVELOPMENT_PLAN.md for what that costs and the two ways to cover it. |
 | "Guardian logic — working in Python" | True, and **stranded**. `nigehban_hub.py` is not wired into the app or the server. |
 | — | `POST /family` links two accounts **without the other person's consent**. Safety bug in a product for people avoiding stalkers. Fix in Phase 0. |
 
@@ -547,7 +547,7 @@ void send(const String &json) {                 // replaces gTx->notify()
 }
 
 void loop() {
-  buttonTick(&gBtn);      // KEEP from the ESP32 sketch, unchanged
+  buttonTick(&gBtn);      // KEEP from the prototype, unchanged
   feedbackTick();         // KEEP — non-blocking pattern player
   imuTick();              // NEW — fall state machine
   while (bleuart.available()) { /* accumulate to '\n' -> handleCommand() */ }
@@ -878,8 +878,8 @@ Nigheban/
 │       ├── api.js              REST + reconnecting WS  [+ configurable base URL]
 │       ├── band.js             BLE (NUS) + the simulated band that unblocks M1
 │       └── screens/            Auth · Home · Family · Alerts
-├── nigehban_band_nrf52/        [Phase 0] the real firmware
-├── nigehban_band_esp32/        stand-in — keep it as a spare demo band
+├── nigehban_band_nrf52/        the band firmware — the only firmware
+├── firmware/                   bench bring-up sketches t1–t6, one unknown each
 ├── nigehban_hub.py             Guardian logic — the source for the server sweeper
 └── config.json                 hub settings (DashScope keys go here)
 ```

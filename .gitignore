@@ -65,10 +65,12 @@ env/
 .pytest_cache/
 
 # ------------------------------------------------------------------- Arduino
-nigehban_band_esp32/build/
-nigehban_band_esp32/*.bin
-nigehban_band_esp32/*.elf
-nigehban_band_esp32/*.map
+nigehban_band_nrf52/build/
+nigehban_band_nrf52/*.bin
+nigehban_band_nrf52/*.elf
+nigehban_band_nrf52/*.map
+nigehban_band_nrf52/*.uf2
+firmware/*/build/
 
 # ------------------------------------------------------------- editors and OS
 .DS_Store

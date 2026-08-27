@@ -38,8 +38,8 @@ this was written on, so the Kotlin has not yet been compiled — see §6.
 
 ## 2. The phone as the band
 
-`nigehban-app/src/virtualBand.js` is a JavaScript port of
-`nigehban_band_esp32/nigehban_band_esp32.ino` — the same button engine, the
+`nigehban-app/src/virtualBand.js` is a JavaScript port of the band firmware,
+`nigehban_band_nrf52/nigehban_band_nrf52.ino` — the same button engine, the
 same gesture map, the same event JSON, the same command handler. Only the radio
 is simulated.
 
@@ -93,7 +93,8 @@ exists to get right.
 
 > Corrected 26 Aug 2026 — this paragraph described the **old** 420 ms
 > `CLICK_GAP_MS` burst rule, which `virtualBand.js` and the nRF52 sketch both
-> stopped using. The ESP32 sketch still uses it and still has the bug; see the
+> stopped using. The only file that still carried it was the ESP32 prototype,
+> retired on 27 Aug 2026; the rule is now gone from the tree entirely. See the
 > F2 note in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 **Wire log** at the bottom of the screen shows every line that would have
@@ -122,7 +123,7 @@ number. `BATTERY → 15%` forces it when you are in a hurry.
 ### One thing the virtual band does not do yet
 
 The firmware nags once more when a check-in window lapses and then sends
-`checkin_missed` ([the ESP32 sketch](nigehban_band_esp32/nigehban_band_esp32.ino),
+`checkin_missed` ([nigehban_band_nrf52.ino:577](nigehban_band_nrf52/nigehban_band_nrf52.ino#L577),
 `gAwaitingAck` / `gAckDeadline`). `virtualBand.js` sets `awaitingAck` on a
 `checkin_req` but has **no deadline timer**, so it can never emit that event.
 

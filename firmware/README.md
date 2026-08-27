@@ -189,8 +189,8 @@ with a number on it.
 ### Why this cannot be fixed by raising the timings
 
 The obvious response — make every pulse 300 ms — quietly destroys the haptic
-vocabulary. Every `feedback()` call ported from
-[`nigehban_band_esp32.ino`](../nigehban_band_esp32/nigehban_band_esp32.ino) sits
+vocabulary. Every `feedback()` call in
+[`nigehban_band_nrf52.ino`](../nigehban_band_nrf52/nigehban_band_nrf52.ino) sits
 under the floor:
 
 | Meaning | Current | At a 300 ms floor |
@@ -237,12 +237,13 @@ Run **T6** — it is the last unknown. T1–T4 prove the board, motor, button an
 IMU; T6 proves the radio, and F1.2/F1.3 close with it.
 
 Once T6 passes, F1 is done and every F2 unknown — protocol, haptics, gestures,
-radio — is proven. The port then reuses `Button`, `Pattern`, `onGesture`
-and `handleCommand` **verbatim** from
-[`nigehban_band_esp32.ino`](../nigehban_band_esp32/nigehban_band_esp32.ino);
-only the `BLEDevice`/`BLEServer` layer is rewritten onto `BLEUart`. The protocol
-is frozen, so the app must not notice the swap.
+radio — is proven. **T6 passed and that port has since landed:**
+[`nigehban_band_nrf52.ino`](../nigehban_band_nrf52/nigehban_band_nrf52.ino)
+reuses `Button`, `Pattern`, `onGesture` and `handleCommand` verbatim from the
+ESP32 prototype with only the `BLEDevice`/`BLEServer` layer rewritten onto
+`BLEUart`. The protocol was frozen, so the app never noticed the swap — and the
+prototype has now been retired from the tree.
 
 Note these bench sketches use blocking `delay()` in `buzz()`. The shipping
 firmware must not — use the non-blocking `feedback()` / `feedbackTick()` pattern
-player already written in the ESP32 sketch (`F4.3`: never `delay()` in `loop()`).
+player in the nRF52 sketch (`F4.3`: never `delay()` in `loop()`).

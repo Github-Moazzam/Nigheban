@@ -1,9 +1,11 @@
 /**
  * VIRTUAL BAND — the phone pretending to be the wristband.
  *
- * This is not a set of debug buttons. It is a JavaScript port of
- * `nigehban_band_esp32/nigehban_band_esp32.ino`: the same button engine, the
- * same gesture map, the same event JSON, the same command handler. The rest of
+ * This is not a set of debug buttons. It is a JavaScript port of the band
+ * firmware, `nigehban_band_nrf52/nigehban_band_nrf52.ino`: the same button
+ * engine, the same gesture map, the same event JSON, the same command handler.
+ * (The port was originally taken from the ESP32 prototype, retired 27 Aug 2026;
+ * the two sketches shared this logic verbatim.) The rest of
  * the app cannot tell the difference between this and a real band over BLE,
  * because it receives byte-identical lines either way.
  *

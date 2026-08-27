@@ -24,8 +24,8 @@
    Pass = serial log and the buzzes agree with your stopwatch.
 
    NOTE: buzz() blocks with delay(). Fine for a bench test; the shipping
-   firmware uses the non-blocking pattern player already written in
-   nigehban_band_esp32.ino (see feedback() / feedbackTick()).
+   firmware uses the non-blocking pattern player in
+   nigehban_band_nrf52.ino (see feedback() / feedbackTick()).
    ========================================================================= */
 
 #include <Adafruit_TinyUSB.h>   // required for `Serial` to link on this core

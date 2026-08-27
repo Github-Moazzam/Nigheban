@@ -1,10 +1,11 @@
 /* ============================================================================
    NIGEHBAN BAND — XIAO nRF52840 SENSE FIRMWARE
    ----------------------------------------------------------------------------
-   The real band. Speaks the EXACT protocol the ESP32 prototype speaks, so the
-   phone app does not change when you swap hardware. That is the whole point of
-   this file: EXECUTION_PLAN.md section 5 is frozen, and the app must not be
-   able to tell which board answered.
+   The band. This is the only firmware in the tree -- the ESP32 prototype it was
+   ported from was retired on 27 Aug 2026. It speaks the EXACT protocol that
+   prototype spoke, and the one `virtualBand.js` speaks on the phone, so the app
+   cannot tell which of them answered. That is the whole point of this file:
+   EXECUTION_PLAN.md section 5 is frozen.
 
    Transport : BLE, Nordic UART Service — newline-delimited JSON, via BLEUart
    Board     : Seeed XIAO nRF52840 **Sense**  (Seeeduino:nrf52:xiaonRF52840Sense)
@@ -20,17 +21,19 @@
    WHAT CAME OVER VERBATIM (F2.1)
 
    `Pattern` / `feedback()` / `feedbackTick()`, `Button` / `buttonTick()`,
-   `onGesture()`, `jsonStr()` / `jsonInt()` / `handleCommand()` are unchanged
-   from nigehban_band_esp32.ino. They were already correct and already agreed
-   with the app; re-deriving them would only introduce drift.
+   `onGesture()`, `jsonStr()` / `jsonInt()` / `handleCommand()` came over
+   unchanged from the ESP32 prototype. They were already correct and already
+   agreed with the app; re-deriving them would only introduce drift.
+   The prototype is gone from the tree; `git show 70c5176:nigehban_band_esp32/
+   nigehban_band_esp32.ino` is the record if the provenance is ever in question.
 
    WHAT CHANGED, AND WHY
 
      BLE layer      BLEDevice/BLEServer/BLE2902 -> BLEUart. Bluefruit ships NUS
                     as one object, so the three-characteristic dance is gone.
-     Button B       Deleted. The shipped band has one button, and the ESP32
-                    gesture map already put everything on button 1 -- so this
-                    removes a line, not a feature.
+     Button B       Deleted. The shipped band has one button, and the gesture
+                    map already put everything on button 1 -- so this removes
+                    a line, not a feature.
      IMU            MPU6050 path deleted (F2.2). The Sense has an LSM6DS3TR-C
                     on board at 0x6A; external-IMU code is work spent on
                     hardware we do not have.
@@ -66,8 +69,8 @@
 
 #define HAS_IMU         0       // flip to 1 in F3, with the LSM6DS3 library
 
-// Gesture timing (ms) — identical to the ESP32 build and to the app's
-// DEFAULT_GESTURES. Changing one without the others silently breaks the demo.
+// Gesture timing (ms) — must stay identical to DEFAULT_GESTURES in the app's
+// virtualBand.js. Changing one without the other silently breaks the demo.
 #define DEBOUNCE_MS     35
 // How long a lone tap waits to see whether a second one is coming. This is NOT
 // a cosmetic timeout -- see "THE SLOW-TAP FAILURE" below. It only ever delays
@@ -103,7 +106,7 @@ void ledWrite(bool on) { digitalWrite(LED_BUILTIN, on ? LOW : HIGH); }
 
 // ------------------------------------------------------- FEEDBACK ENGINE ---
 // Non-blocking buzz/blink pattern player. Never use delay() in loop() (F4.3).
-// Verbatim from the ESP32 build except for the LED polarity.
+// Verbatim from the ESP32 prototype except for the LED polarity.
 struct Pattern {
   uint8_t  pulsesLeft = 0;
   uint16_t onMs = 0, offMs = 0;
@@ -211,7 +214,7 @@ void sendEvent(const char *type, const String &extra = "") {
 }
 
 // ------------------------------------------------------- BUTTON ENGINE ---
-// Verbatim from the ESP32 build. Button B is gone; the shipped band has one
+// Verbatim from the ESP32 prototype. Button B is gone; the shipped band has one
 // button and the gesture map already lived on button 1.
 struct Button {
   uint8_t  pin;
@@ -226,7 +229,7 @@ struct Button {
   bool     holdFired1 = false;
   bool     holdFired2 = false;
 
-  // The ESP32 build brace-initialised this struct. That core compiles to a
+  // The ESP32 prototype brace-initialised this struct. That core compiled to a
   // newer C++ standard; this one is gnu++11, where the default member
   // initialisers above stop Button being an aggregate and `Button b{pin, id}`
   // will not compile. Same two fields, set the only way this core allows.
@@ -296,7 +299,8 @@ void buttonTick(Button &b) {
 
 // -------------------------------------------------------- GESTURE MAP ---
 // This is the ONLY place hardware meets meaning, and it must stay identical to
-// DEFAULT_GESTURES in nigehban-app/src/virtualBand.js AND to the ESP32 build.
+// DEFAULT_GESTURES in nigehban-app/src/virtualBand.js -- the two implementations
+// of this map that remain.
 //
 // Follows EXECUTION_PLAN.md section 5, the frozen contract:
 //
@@ -428,8 +432,8 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 }
 
 // ------------------------------------------------------------- IMU (F3) ---
-// Deliberately compiled out until F3. The MPU6050 path from the ESP32 build is
-// gone for good (F2.2) -- this is the on-board LSM6DS3TR-C at 0x6A.
+// Deliberately compiled out until F3. The MPU6050 path from the ESP32 prototype
+// is gone for good (F2.2) -- this is the on-board LSM6DS3TR-C at 0x6A.
 #if HAS_IMU
 #include "LSM6DS3.h"
 LSM6DS3 imu(I2C_MODE, 0x6A);     // the Seeed lib remaps to Wire1 internally
