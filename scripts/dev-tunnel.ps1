@@ -102,9 +102,12 @@ if (-not (Test-Path $py)) {
 }
 Write-Step "python: $py"
 
-& $py -c "import fastapi, uvicorn" 2>$null
+# Every module the server imports at the top, not just the web ones. A partial
+# check is worse than none: the script sails past it, opens a window, and the
+# server dies in it on an import you were never told about.
+& $py -c "import fastapi, uvicorn, psycopg, dotenv" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Bad 'FastAPI is not installed for that interpreter. Run this first:'
+    Write-Bad 'The server dependencies are not installed for that interpreter. Run this first:'
     Write-Host "      $py -m pip install -r requirements.txt" -ForegroundColor Yellow
     exit 1
 }

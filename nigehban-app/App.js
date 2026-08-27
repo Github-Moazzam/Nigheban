@@ -5,7 +5,7 @@ import {
   Vibration, View,
 } from 'react-native';
 import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
-import { useBandLink } from './src/bandLink';
+import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
 import SamaritanCall from './src/components/SamaritanCall';
@@ -344,6 +344,17 @@ function Main() {
   }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert]);
 
   const band = useBandLink(onBandEvent);
+
+  // The BLE link lives in this app's Android process, so when the process dies
+  // the GATT connection dies with it and the band drops back to advertising --
+  // the blinking light. The foreground service is the only thing that keeps the
+  // process alive once the app is off screen or swiped out of Recents, so it
+  // has to be up whenever a real band is the chosen radio, not only once
+  // somebody is signed in. Starting it twice is a no-op (bgService checks).
+  useEffect(() => {
+    if (band.mode !== MODES.BLE) return;
+    startBackgroundWatch();
+  }, [band.mode]);
 
   // ---- U3.4 battery: one alert per threshold crossing --------------------
   const battLatch = useRef({ low: false, dark: false });

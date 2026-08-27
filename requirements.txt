@@ -5,6 +5,8 @@ requests>=2.31.0
 # Local server (server/nigehban_server.py)
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+psycopg[binary]>=3.1.0
+python-dotenv>=1.0.0
 
 # Needed by nigehban_bridge.py and tests/test_sockets.py
 websockets>=12.0

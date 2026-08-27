@@ -50,8 +50,13 @@ export function useBandLink(onEvent) {
     try { await AsyncStorage.setItem(MODE_KEY, m); } catch { /* non-fatal */ }
   }, []);
 
-  const ble = useBand(onEvent);
   const virtualActive = mode === MODES.VIRTUAL;
+
+  // `autoLink` is what lets a band that was linked before come back on its own
+  // after the app is closed and reopened. It has to wait for the stored mode:
+  // BLE is not the default, so before the read lands every launch would look
+  // like virtual mode and the auto-relink would never fire.
+  const ble = useBand(onEvent, { autoLink: modeLoaded && !virtualActive });
 
   // The virtual band hands us the same newline JSON the BLE characteristic
   // carries, so it goes through the same parse and the same state updates.
