@@ -1,9 +1,10 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Linking, Modal, Pressable, StyleSheet, Text, Vibration, View,
+  ActivityIndicator, AppState, Linking, Modal, Pressable, StyleSheet, Text,
+  Vibration, View,
 } from 'react-native';
-import { call, clearSession, loadSession, useLive } from './src/api';
+import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
 import { useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
@@ -16,6 +17,8 @@ import Family from './src/screens/Family';
 import Home from './src/screens/Home';
 import Setup from './src/screens/Setup';
 import UserShell from './src/screens/UserShell';
+import DisarmPad from './src/screens/user/DisarmPad';
+import { U } from './src/screens/user/kit';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
@@ -112,6 +115,45 @@ function Main() {
       if (s) startBackgroundWatch();
       setBooting(false);
     })();
+  }, []);
+
+  // The role lives on the server row, never on the phone.
+  //
+  // It is read once at sign-in and then cached alongside the token, so an
+  // account promoted to admin in the database would otherwise keep the
+  // end-user shell until somebody thought to sign out and back in. Re-read it
+  // on every launch, and write the answer back so the next cold start is
+  // already right even with no network.
+  const [roleTick, setRoleTick] = useState(0);
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const who = await call(session, '/me');
+        // Only an explicit role is allowed to change anything. A server that
+        // does not send the field at all -- an older build, or one that has
+        // not been restarted since this endpoint learned to return it -- is
+        // saying nothing about the role, not saying "user", and treating the
+        // two the same demotes an admin one tick after they sign in.
+        const role = typeof who?.role === 'string' ? who.role : null;
+        if (cancelled || !role || role === session.role) return;
+        const next = { ...session, role };
+        setSession(next);
+        await saveSession(next);
+      } catch { /* offline: the cached role stands */ }
+    })();
+    return () => { cancelled = true; };
+  }, [session?.token, session?.url, session?.role, roleTick]);
+
+  // Coming back to the app counts as a launch for this purpose. Somebody
+  // changing a role in the database and then reaching for the phone should not
+  // have to kill it first to see the difference.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') setRoleTick((n) => n + 1);
+    });
+    return () => sub.remove();
   }, []);
 
   // Tapping the push is how a killed app is opened at all, so the tap has to
@@ -419,6 +461,18 @@ function Main() {
     setIncoming(null);
   };
 
+  // The two ways out of the fall window. Both shells offer them; only the
+  // asking differs, so the consequences are defined once here.
+  const cancelFall = useCallback(() => {
+    dispatch('FALL_CANCELLED');
+    raise({ kind: 'near_miss', source: 'band', note: ctx.fall?.note || '' });
+    setToast('Cancelled — noted for you only, nobody was told');
+  }, [dispatch, raise, ctx.fall]);
+
+  const escalateFall = useCallback(() => {
+    raise({ kind: 'fall', source: 'band', note: ctx.fall?.note || '' });
+  }, [raise, ctx.fall]);
+
   const respondAsSamaritan = useCallback(async (alertId) => {
     const r = await call(session, `/samaritan/${alertId}/respond`, { method: 'POST' });
     return r.alert;
@@ -442,37 +496,40 @@ function Main() {
   }
 
   // ---- role-based routing ------------------------------------------------
-  // Admins see the full dev UI (all 5 tabs). Regular users see the clean
-  // end-user shell — built in Phase 2, placeholder for now.
-  if (session.role !== 'admin') {
-    return (
-      <View style={[st.flex, { paddingTop: insets.top }]}>
-        <StatusBar style="light" />
-        <UserShell 
-          session={session} 
+  // Admins get the full console: five tabs, the band wire log, diagnostics.
+  // Every other account gets the two-tab end-user shell.
+  //
+  // Only the *shell* forks. Everything below it -- the takeover, the check-in
+  // sheet, the Samaritan call, the fall window -- is the safety machine, and
+  // it is rendered for both roles. A user who could not see an incoming
+  // family emergency would be the more dangerous kind of clean UI.
+  const isAdmin = session.role === 'admin';
+
+  return (
+    // The two roles do not share a ground colour: the console keeps the cool
+    // near-black of the design system, the user shell sits on charcoal. This
+    // is the root behind the status bar, so it has to fork here or the top
+    // strip stays the wrong shade.
+    <View style={[st.flex, { paddingTop: insets.top }, !isAdmin && { backgroundColor: U.bg }]}>
+      <StatusBar style="light" />
+
+      {!isAdmin ? (
+        <UserShell
+          session={session}
           band={band}
           ctx={ctx}
           deliveredTo={deliveredTo}
           serverOnline={serverOnline}
-          fix={fix}
           onRaise={raise}
           onResolve={resolve}
           refreshKey={refreshKey}
           onAckCheckin={ackCheckin}
-          onSignOut={() => {
-            dispatch('RESET');
-            setSession(null);
-            setIncoming(null);
-          }} 
+          onToggleHighAlert={toggleHighAlert}
+          onFix={setFix}
+          onSignOut={signOut}
         />
-      </View>
-    );
-  }
-
-  return (
-    <View style={[st.flex, { paddingTop: insets.top }]}>
-      <StatusBar style="light" />
-
+      ) : (
+      <>
       <View style={st.header}>
         <View>
           <Text style={st.brand}>NIGEHBAN</Text>
@@ -501,14 +558,6 @@ function Main() {
         {tab === 'setup' && <Setup session={session} />}
       </View>
 
-      {toast ? (
-        <Pressable onPress={() => setToast(null)} accessibilityRole="alert"
-                   style={[st.toast, { bottom: 88 + insets.bottom }]}>
-          <Icon name="info" size={15} color={C.dim} />
-          <Text style={st.toastText}>{toast}</Text>
-        </Pressable>
-      ) : null}
-
       <View style={[st.tabbar, { paddingBottom: 8 + insets.bottom }]}>
         {TABS.map(([k, label, icon]) => {
           const on = tab === k;
@@ -522,17 +571,34 @@ function Main() {
           );
         })}
       </View>
+      </>
+      )}
 
-      {/* ---- a fall, and the seconds to say it was nothing ---- */}
-      <FallCountdown
-        fall={is('fall_pending') ? ctx.fall : null}
-        onCancel={() => {
-          dispatch('FALL_CANCELLED');
-          raise({ kind: 'near_miss', source: 'band', note: ctx.fall?.note || '' });
-          setToast('Cancelled — noted for you only, nobody was told');
-        }}
-        onEscalate={() => raise({ kind: 'fall', source: 'band', note: ctx.fall?.note || '' })}
-      />
+      {toast ? (
+        <Pressable onPress={() => setToast(null)} accessibilityRole="alert"
+                   style={[st.toast, { bottom: 88 + insets.bottom }]}>
+          <Icon name="info" size={15} color={C.dim} />
+          <Text style={st.toastText}>{toast}</Text>
+        </Pressable>
+      ) : null}
+
+      {/* ---- a fall, and the seconds to say it was nothing ----
+          Same window, same two outcomes, two ways of asking. The console
+          takes a button; the wearer's phone takes four digits, so that a
+          pocket -- or somebody else's hand -- cannot cancel her alarm. */}
+      {isAdmin ? (
+        <FallCountdown
+          fall={is('fall_pending') ? ctx.fall : null}
+          onCancel={cancelFall}
+          onEscalate={escalateFall}
+        />
+      ) : (
+        <DisarmPad
+          fall={is('fall_pending') ? ctx.fall : null}
+          onCancel={cancelFall}
+          onEscalate={escalateFall}
+        />
+      )}
 
       {/* ---- somebody in the family is in trouble ---- */}
       <Modal visible={!!incoming} animationType="fade" onRequestClose={() => setIncoming(null)}>
