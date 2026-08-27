@@ -89,7 +89,7 @@ export default function Auth({ initialUrl, onDone }) {
         throw new Error('That address answered, but not like the Nigehban server. '
                       + 'Check the port — the server is on 8000, Metro is on 8081.');
       }
-      const session = { url: clean, token: r.token, user_id: r.user_id, name: r.name };
+      const session = { url: clean, token: r.token, user_id: r.user_id, name: r.name, role: r.role || 'user' };
       await saveSession(session);
       await saveServerUrl(clean);
       onDone(session);

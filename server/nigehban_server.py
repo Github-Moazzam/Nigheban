@@ -98,6 +98,7 @@ def init_db():
             pw_hash    TEXT NOT NULL,
             name       TEXT NOT NULL,
             token      TEXT NOT NULL,
+            role       TEXT NOT NULL DEFAULT 'user',  -- admin | user
             created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS links (
@@ -244,6 +245,12 @@ def migrate(c):
                 c.execute("UPDATE users SET token_hash=?, token='' WHERE id=?",
                           (tok_hash(r["token"]), r["id"]))
     c.execute("CREATE INDEX IF NOT EXISTS idx_users_token ON users(token_hash)")
+
+    # Role-based UI: existing dev accounts become admin, new accounts default
+    # to 'user' via the column default. Admin is assigned manually only.
+    if "role" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+        c.execute("UPDATE users SET role = 'admin'")
 
 
 # ---------------------------------------------------------------- auth ---
@@ -520,7 +527,7 @@ def register(b: RegisterIn, req: Request):
                   (uid, uname, hash_pw(b.password), b.name.strip(), time.time(),
                    tok_hash(tok)))
         c.commit()
-    return {"user_id": uid, "token": tok, "name": b.name.strip(), "username": uname}
+    return {"user_id": uid, "token": tok, "name": b.name.strip(), "username": uname, "role": "user"}
 
 
 @app.post("/login")
@@ -544,7 +551,7 @@ def login(b: LoginIn, req: Request):
         c.execute("UPDATE users SET token_hash=?, token='' WHERE id=?",
                   (tok_hash(tok), u["id"]))
         c.commit()
-    return {"user_id": u["id"], "token": tok, "name": u["name"], "username": u["username"]}
+    return {"user_id": u["id"], "token": tok, "name": u["name"], "username": u["username"], "role": u["role"]}
 
 
 @app.get("/me")

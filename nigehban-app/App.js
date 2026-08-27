@@ -15,6 +15,7 @@ import Band from './src/screens/Band';
 import Family from './src/screens/Family';
 import Home from './src/screens/Home';
 import Setup from './src/screens/Setup';
+import UserShell from './src/screens/UserShell';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
@@ -437,6 +438,34 @@ function Main() {
         <StatusBar style="light" />
         <Auth onDone={setSession} />
       </>
+    );
+  }
+
+  // ---- role-based routing ------------------------------------------------
+  // Admins see the full dev UI (all 5 tabs). Regular users see the clean
+  // end-user shell — built in Phase 2, placeholder for now.
+  if (session.role !== 'admin') {
+    return (
+      <View style={[st.flex, { paddingTop: insets.top }]}>
+        <StatusBar style="light" />
+        <UserShell 
+          session={session} 
+          band={band}
+          ctx={ctx}
+          deliveredTo={deliveredTo}
+          serverOnline={serverOnline}
+          fix={fix}
+          onRaise={raise}
+          onResolve={resolve}
+          refreshKey={refreshKey}
+          onAckCheckin={ackCheckin}
+          onSignOut={() => {
+            dispatch('RESET');
+            setSession(null);
+            setIncoming(null);
+          }} 
+        />
+      </View>
     );
   }
 
