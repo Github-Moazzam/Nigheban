@@ -1,4 +1,4 @@
-﻿<#
+<#
     NIGEHBAN -- DEV TUNNEL
 
     Brings up the local server and a public HTTPS tunnel to it, then prints the
@@ -166,7 +166,7 @@ if ($url) {
     if ($Domain) {
         # --url is the current flag. Older CLIs spell it --domain; if the tunnel
         # never appears, the failure message below names the alternative.
-        $ngrokArgs += "--url=$Domain"
+        $ngrokArgs += "--domain=$Domain"
         Write-Step "opening the tunnel on $Domain"
     } else {
         Write-Step 'opening the tunnel (random address -- see -Domain)'
