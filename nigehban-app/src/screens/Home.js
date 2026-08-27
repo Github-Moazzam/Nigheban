@@ -165,8 +165,11 @@ export default function Home({
       <Card>
         <View style={s.row}>
           <Txt variant="h2">Wristband</Txt>
+          {/* Feather has no `bluetooth-off`, so every render of a band that was
+              not connected logged a warning -- and while the link was failing
+              that was most of them. `slash` is the set's own "not available". */}
           <Chip text={BAND_LABEL[band.status] || band.status} tone={bandTone}
-                icon={band.status === 'connected' ? 'bluetooth' : 'bluetooth-off'} />
+                icon={band.status === 'connected' ? 'bluetooth' : 'slash'} />
         </View>
 
         <View style={s.stats}>

@@ -146,7 +146,15 @@ Install the resulting APK on the ward's phone. The app detects which environment
 it is in and switches on its own.
 
 > The band accepts one BLE connection at a time. Close `nigehban_hub.py` before
-> the phone will find it.
+> the phone will find it. The same applies to nRF Connect, and to the app's own
+> previous run — a connected band is not advertising, so nothing else can see
+> it. If a scan finds nothing, reset the band first.
+
+> **On Android 12+, grant location and switch Location Services on**, or the
+> scan returns nothing at all. `BLUETOOTH_SCAN` is declared without
+> `neverForLocation`, so the OS treats scanning as location-capable and delivers
+> zero results until both are satisfied — with no error and no callback. The app
+> asks for the permission; it cannot flip the system toggle for you.
 
 ---
 
@@ -237,6 +245,11 @@ to anything.
   and the family's screen shows the watch's own health so a silent failure is
   visible before an emergency rather than during one.
 - **Tokens do not expire.** Fine for a demo, not for deployment.
+- **An SOS currently needs the server.** The app dispatches `SOS_RAISED` only
+  after `POST /alert` succeeds, and unsent alerts are not queued — so with no
+  connectivity the alert is lost rather than delayed. The band-side link is
+  fixed and working; this is the next thing to build. See the bring-up section
+  in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ---
 
