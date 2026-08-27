@@ -60,7 +60,7 @@
 #include <bluefruit.h>
 
 // ---------------------------------------------------------------- CONFIG ---
-#define DEVICE_NAME     "Nigehban-01"
+#define DEVICE_NAME     "Nigehban-02"
 
 #define PIN_BTN         D2
 #define PIN_MOTOR       D1
@@ -197,7 +197,48 @@ void send(const String &json) {
   Serial.println(json);                       // always mirror to USB serial
   if (!gConnected) return;
   String line = json + "\n";
-  bleuart.write(line.c_str(), line.length());
+
+  // BLEUart::write() splits the line into MTU-sized notifications and stops at
+  // the first one the SoftDevice refuses -- its notification queue is only a
+  // few packets deep -- then discards the remainder without reporting it. At
+  // the default 23-byte MTU an 86-byte heartbeat needs five packets, so the
+  // phone was getting the first 23 bytes of every line and never the newline
+  // that terminates it: the app buffered fragments forever and parsed nothing.
+  //
+  // So push until the whole line is gone, giving the radio a moment to drain
+  // whenever the queue backs up. delay() on this core yields to the scheduler,
+  // which is exactly what lets the SoftDevice empty it. Bounded at 200 ms so a
+  // link dropping mid-line can never stall loop().
+  // Send in explicit MTU-sized pieces, retrying only the piece that failed.
+  //
+  // Handing the whole line to BLEUart::write() does not work. It chunks the
+  // line internally at MTU-3, and when the SoftDevice's notification pool runs
+  // dry mid-line it abandons the rest and returns false -- keeping no record
+  // of how far it got (BLECharacteristic::notify, the `if (!getHvnPacket())
+  // return false` inside its while loop). That is the original bug: the phone
+  // got the first 23 bytes of every 86-byte line and never the newline that
+  // terminates it. It also makes the obvious fix wrong, because retrying the
+  // whole line re-sends bytes that already went out and corrupts the stream.
+  //
+  // Keeping the offset here is what makes a retry safe: every write is at most
+  // one notification, so it either goes out whole or not at all.
+  const uint8_t *p = (const uint8_t *) line.c_str();
+  size_t left = line.length();
+
+  // 20 is the worst case (MTU 23). The MTU is negotiated by the phone, so it
+  // is only known once connected -- use whatever we actually got.
+  uint16_t chunk = 20;
+  BLEConnection *c = Bluefruit.Connection(Bluefruit.connHandle());
+  if (c && c->getMtu() > 23) chunk = c->getMtu() - 3;
+
+  // Bounded so a link dying mid-line can never stall loop(). delay() on this
+  // core yields to the scheduler, which is what lets the pool refill.
+  uint32_t deadline = millis() + 200;
+  while (left && gConnected && millis() < deadline) {
+    uint16_t n = (left < chunk) ? (uint16_t) left : chunk;
+    if (bleuart.write(p, n)) { p += n; left -= n; }
+    else delay(2);                            // pool empty -- let it drain
+  }
 }
 
 void sendEvent(const char *type, const String &extra = "") {
@@ -423,6 +464,13 @@ void connect_callback(uint16_t conn_handle) {
   // the 1-2 week budget depends on (F4.3). Units of 1.25 ms -> 30-60 ms.
   BLEConnection *c = Bluefruit.Connection(conn_handle);
   if (c) c->requestConnectionParameter(24, 48);
+
+  // The negotiated MTU, on the wire, at the one moment it is knowable. 23 means
+  // lines will be chunked and this build is missing configPrphBandwidth; 247
+  // means any line fits in a single notification. It doubles as proof of which
+  // firmware is actually running after a flash.
+  Serial.println("{\"t\":\"log\",\"msg\":\"link up\",\"mtu\":"
+                 + String(c ? c->getMtu() : 0) + "}");
 }
 
 void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
@@ -501,6 +549,21 @@ void setup() {
   batteryBegin();
   gBattery = batteryPercent(batteryMilliVolts());
 
+  // MUST come before begin() -- it sizes the SoftDevice's connection config,
+  // which is fixed once the stack is up.
+  //
+  // Two defaults were breaking every notification this band sent. The MTU
+  // defaults to 23, so an 86-byte heartbeat had to go out as five separate
+  // notifications; and the notification TX queue defaults to a depth of ONE,
+  // so the second of those five was refused, BLEUart::write() gave up at the
+  // first refusal, and the remaining ~63 bytes were dropped without a word.
+  // The phone received `{"t":"evt","e":"hb",` and never the newline that ends
+  // the line, so it buffered fragments forever and parsed nothing.
+  //
+  // BANDWIDTH_MAX raises both: a 247-byte MTU, which fits any line this
+  // firmware sends in a single packet, and a deeper queue for when it cannot.
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+
   Bluefruit.begin();
   Bluefruit.setName(DEVICE_NAME);
   Bluefruit.setTxPower(4);
@@ -513,7 +576,7 @@ void setup() {
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(bleuart);
   // The name goes in the scan response: the 128-bit NUS UUID costs 18 of the
-  // advertising packet's 31 bytes and "Nigehban-01" will not fit alongside it.
+  // advertising packet's 31 bytes and DEVICE_NAME will not fit alongside it.
   Bluefruit.ScanResponse.addName();
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);   // 20 ms fast / 152.5 ms slow

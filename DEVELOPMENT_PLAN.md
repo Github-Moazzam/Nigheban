@@ -315,13 +315,15 @@ The hardest single task on the board.
 
 - [x] F1.1 — Install **Seeed nRF52 Boards** (Adafruit Bluefruit core, *not* the mbed variant). `Seeeduino:nrf52@1.1.13` + `Seeed Arduino LSM6DS3`; all bench sketches compile.
 - [x] F1.2 — Blink, then advertise as `Nigehban-01`; verify in **nRF Connect** — no Nigehban app needed, so this waits on nobody. Passed via [t6_ble](firmware/t6_ble/).
-- [x] F1.3 — `BLEUart` up. It is literally the Nordic UART Service the app already speaks. Notify and write both verified round-trip in nRF Connect.
+- [x] F1.3 — `BLEUart` up. It is literally the Nordic UART Service the app already speaks. Notify and write both verified round-trip in nRF Connect. **This verification was not sufficient — see F1.4.** nRF Connect shows bytes arriving on TX, which looks like a pass; it does not show that the line was cut off at 23 of 86 bytes, because there is no line framing in a hex dump. The truncation survived until the app tried to parse a newline that never came.
+- [x] F1.4 — **First end-to-end link to the Nigehban app. 27 Aug 2026.** Five independent faults, each of which alone was enough to produce "connected, no data". Detailed in §"Bring-up: five silent faults" below.
 
 ### F2 · Port the gesture layer · Owner M4 · Phase 0–1 · ~5 h
 
 - [x] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from the ESP32 prototype onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap. All gestures and commands verified against nRF Connect. **The prototype sketch was deleted from the tree on 27 Aug 2026** — the nRF52 sketch is now the only firmware, and `git show 70c5176:nigehban_band_esp32/nigehban_band_esp32.ino` is the record.
 - [x] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need. LSM6DS3 block present but `#if HAS_IMU 0` until F3; both paths compile.
 - [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](firmware/README.md).
+  - **It is also unstable, not merely uncalibrated. Found 27 Aug 2026, not fixed.** Consecutive heartbeats alternate between two settled values — `mv:4085`/93% and `mv:3699`/39% — on one board, on one continuous `seq`. The divider's source impedance (1M ∥ 510k ≈ 338k) is far too high for the SAADC's default acquisition window, so the sample capacitor never fully charges and each conversion is dragged toward the previous one. Averaging 8 back-to-back reads in `batteryMilliVolts()` does not help: every sample is equally under-settled. Fix is a longer acquisition time, or a median-of-N with a gap between samples — a median rejects the alternating outlier, a mean does not. **This is a safety path, not cosmetics:** [App.js:307-324](nigehban-app/App.js#L307-L324) raises `low_battery` and `going_dark` from this number, so as it stands the band will page the family about a flat battery that is not flat.
 
 > **Tap timing changed during F2.1.** The band originally waited for a tap burst
 > to close before classifying it, so two *slow* taps became two `checkin_ack`s —
@@ -692,6 +694,107 @@ will know*, that class of bug outranks any unbuilt feature.
 | 6 | [state.js](nigehban-app/src/state.js) | Band stops buzzing, screen says nothing | `checkin_missed` fell through to `default: return null` |
 | 7 | [nigehban_server.py](server/nigehban_server.py) | Siren at 3 a.m. for yesterday | No `ttl`, so Expo's four-week default applied |
 | 8 | [notifications.js](nigehban-app/src/notifications.js) | Silent SOS under Do Not Disturb | The DND-bypass channel was created and then never used |
+| 9 | [band.js](nigehban-app/src/band.js) | **Connected**, battery blank forever | Notify subscribe errors and write errors were both caught and dropped, so a dead data path reported as a live link |
+| 10 | [nigehban_band_nrf52.ino](nigehban_band_nrf52/nigehban_band_nrf52.ino) | nRF Connect shows bytes on TX | `notify()` sent 23 of every 86 bytes and abandoned the rest; a hex dump has no line framing, so it looked like a pass |
+
+Rows 9 and 10 are the same lesson as the other eight, learned again on hardware:
+**verifying a transport is not verifying a message.** nRF Connect proved bytes
+moved. It could not prove a line arrived, and a line is the unit the protocol
+is actually made of.
+
+---
+
+### Bring-up: five silent faults · 27 Aug 2026
+
+First real link between the nRF52 band and the app. Five independent faults,
+each sufficient on its own to produce *connected, no data* — which is why
+fixing any one of them changed nothing visible, and why this took as long as it
+did. Listed in the order they had to be peeled off:
+
+1. **Name mismatch.** Firmware renamed to `Nigehban-02`; the app matched the
+   string `Nigehban-01` exactly and discarded every advertisement. Now matched
+   by NUS service UUID — which rides in the advertising packet, unlike the name,
+   which rides in the scan response and is often `null` on the first report —
+   with the name demoted to a `Nigehban-` prefix hint.
+2. **Android 12 scan permission.** `BLUETOOTH_SCAN` is declared without
+   `neverForLocation` (the ble-plx plugin defaults that flag off), so the OS
+   requires `ACCESS_FINE_LOCATION` *and* Location Services before it will
+   deliver a single scan result. The app requested neither on API 31+. The scan
+   started, reported no error, and returned nothing. nRF Connect worked because
+   it asks for location.
+3. **MTU request at connect.** `connect({ requestMTU: 185 })` killed the notify
+   subscription outright — zero callbacks, no error. Deferred until after the
+   subscription is live, where a failure is cosmetic.
+4. **Truncated lines.** The one that mattered.
+   `BLECharacteristic::notify()` chunks at `MTU-3` and, when the SoftDevice's
+   notification pool runs dry mid-line, abandons the remainder and returns
+   `false` **keeping no record of how far it got**. At the default MTU of 23 an
+   86-byte heartbeat needs five packets and the pool is one deep, so the phone
+   received `{"t":"evt","e":"hb",` and never the newline that ends the line.
+   `send()` now chunks explicitly and retries **only the failed piece** —
+   retrying the whole line re-sends bytes that already went out and corrupts
+   the stream, which is a worse bug wearing the same clothes.
+5. **A connect race.** The band advertises every 20 ms, so several scan
+   callbacks for it were delivered before the first `await d.connect()` reached
+   native, and each started its own connection. Concurrent connects on Android
+   rebuild the GATT under the subscription the previous one registered.
+   `stopDeviceScan()` does not help — it stops future callbacks, not those
+   already in flight — so the guard is set synchronously before any `await`.
+
+Two things made this diagnosable at all, and both are worth keeping:
+
+- **A data watchdog.** *Connected* is a claim about the radio, not the data. If
+  no bytes arrive within 25 s — two and a half heartbeats — the link is
+  recycled and the reason is recorded. It is fed on **raw bytes, not parsed
+  lines**: a band whose lines arrive truncated is a real fault, but it is not a
+  dead subscription, and tearing the link down every 25 s only hid the problem.
+- **`lastError` on the Band screen.** Every failure above was silent by
+  construction. Nothing here was fixable until the radio's own error text
+  reached a human.
+
+Also fixed in passing: `bluetooth-off` is not a Feather icon, so every render of
+a non-connected band logged a warning — which, while the link was failing, was
+most of them.
+
+**Not a product bug but worth knowing:** a Metro reload restarts the JS without
+closing the native BLE connection, leaving the band linked to a context that no
+longer exists — so it stops advertising and the next scan cannot find it. The
+teardown now cancels the connection before destroying the manager. The same
+thing happens to a real user whose app is killed and relaunched.
+
+#### Verified working after this
+
+Band → phone (double-press → `sos` → the app raises it) and the link surviving
+on its own. Battery percentage and *Last heard* populate from the 10 s
+heartbeat.
+
+#### Open, in the order I would take them
+
+1. **SOS must not need the server.** *Found the hard way: the in-app SOS button
+   was also dead, and the cause was ngrok being off.* [App.js:173-199](nigehban-app/App.js#L173-L199)
+   dispatches `SOS_RAISED` **only after** `POST /alert` succeeds, and there is
+   no queue — `useLive` retries its socket, alerts retry nothing. So the exact
+   scenario the product exists for (bad signal, dead zone, server hiccup) gives
+   no takeover, no siren, no record, and a toast that vanishes. Fix: dispatch
+   locally *first*, persist unsent alerts, flush on reconnect, and render
+   delivery state honestly — "sent to 3" versus "not delivered yet, retrying",
+   which today look identical because neither renders.
+2. **Battery ADC** — F2.3 above. Safety path: false lows page the family.
+3. **`registerPushToken` fails** (`404`, then `fetch canceled`). This phone
+   registers no push token, so it receives nobody else's alerts. Own alerts
+   still fan out; incoming ones do not arrive.
+4. **`Custom sound 'default' not found`** — thrown on every launch. On the alarm
+   path, so it bears on whether an SOS actually makes a noise.
+5. **[nigehban_hub.py:460](nigehban_hub.py#L460) has bug #1, unfixed.** Exact
+   `d.name == "Nigehban-01"` against a band now named `Nigehban-02`. The laptop
+   bridge cannot find the band for precisely the reason the app could not.
+6. **MTU stays 23** — the central drives negotiation and Android had already
+   closed its one exchange window by the time the app asks.
+   `configPrphBandwidth(BANDWIDTH_MAX)` raises what the band will *accept*, to
+   247. Correct chunking makes 23 merely inefficient (5 packets per line, not
+   1), so this is an optimisation, not a fault. Moving `requestMTU` back into
+   `connect()` is the obvious lever and is exactly what broke the subscription
+   in fault 3 — do not pull it without a way to see the error.
 
 Two of these were re-diagnosed rather than fixed as first written, and both
 corrections matter more than the fixes:

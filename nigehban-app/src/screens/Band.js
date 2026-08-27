@@ -59,7 +59,7 @@ export default function Band({ band, serverOnline }) {
             ? 'This phone is running the band firmware in JavaScript — the same '
               + 'gesture engine, the same event JSON. The server cannot tell the '
               + 'difference, so everything downstream of the band is under test.'
-            : 'Scanning for a physical Nigehban-01 over Bluetooth. Switch back to '
+            : 'Scanning for a physical Nigehban band over Bluetooth. Switch back to '
               + 'This phone if you have no band with you.'}
         </Text>
       </Card>
@@ -222,6 +222,10 @@ export default function Band({ band, serverOnline }) {
         <Card>
           <Txt variant="h2">Bluetooth</Txt>
           <Stat label="Link" icon="bluetooth" value={band.status} />
+          {/* "Connected" alone has been lying: the link comes up and the data
+              path fails separately. Whatever the radio actually said belongs
+              on screen, not swallowed in a catch. */}
+          {band.lastError ? <Text style={s.note}>{band.lastError}</Text> : null}
           {band.status === 'connected' ? (
             <View style={s.btnRow}>
               <View style={s.cell}>
