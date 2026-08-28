@@ -49,10 +49,11 @@ expo-env.d.ts
 *.jsbundle
 *.hbc
 
-# Regenerated from app.json by `expo prebuild` -- committing it means your
-# plugin and permission changes silently stop applying.
-android/
-ios/
+# The generated native folders are ignored by nigehban-app/.gitignore, where
+# `/android` and `/ios` are anchored to the app directory. Do not re-add them
+# here unanchored: `android/` matches at any depth, which silently swallowed
+# modules/nigehban-alarm/android/ -- handwritten Kotlin, not generated output --
+# and it never reached git or the EAS upload, so it was never compiled in.
 
 # -------------------------------------------------------------------- Python
 __pycache__/

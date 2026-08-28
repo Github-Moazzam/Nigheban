@@ -1,0 +1,24 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'com.nigehban.alarm'
+version = '1.0.0'
+
+android {
+  namespace 'com.nigehban.alarm'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  lint {
+    // A lint failure here would fail an emergency-alarm build for a style
+    // opinion. The guard in plugins/withNativeModuleGuard.js is what protects
+    // this module from shipping broken; lint is not.
+    abortOnError false
+  }
+}
+
+// androidx.core (NotificationCompat, NotificationManagerCompat) arrives on the
+// compile classpath through expo-modules-core, which exposes it with `api`.
+// It is deliberately not re-declared here: pinning a second version is how the
+// androidx graph starts resolving differently from the rest of the app.

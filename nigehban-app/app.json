@@ -74,6 +74,7 @@
         }
       ],
       "./plugins/withNigehbanAndroid",
+      "./plugins/withNativeModuleGuard",
       "expo-font",
       "expo-secure-store",
       "expo-task-manager",
