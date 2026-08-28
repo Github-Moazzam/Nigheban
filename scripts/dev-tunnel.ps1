@@ -105,9 +105,23 @@ Write-Step "python: $py"
 # Every module the server imports at the top, not just the web ones. A partial
 # check is worse than none: the script sails past it, opens a window, and the
 # server dies in it on an import you were never told about.
-& $py -c "import fastapi, uvicorn, psycopg, dotenv" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Bad 'The server dependencies are not installed for that interpreter. Run this first:'
+#
+# Checked one at a time so the message can name what is actually missing, and
+# with $ErrorActionPreference relaxed for the duration: Windows PowerShell wraps
+# a native command's stderr in ErrorRecords when it is redirected, which under
+# 'Stop' would kill the script on Python's traceback -- i.e. the check would
+# crash instead of printing the install line three lines below.
+$missing = @()
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+foreach ($m in @('fastapi', 'uvicorn', 'psycopg', 'dotenv')) {
+    & $py -c "import $m" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { $missing += $m }
+}
+$ErrorActionPreference = $prevEap
+
+if ($missing.Count -gt 0) {
+    Write-Bad "That interpreter is missing: $($missing -join ', '). Run this first:"
     Write-Host "      $py -m pip install -r requirements.txt" -ForegroundColor Yellow
     exit 1
 }
