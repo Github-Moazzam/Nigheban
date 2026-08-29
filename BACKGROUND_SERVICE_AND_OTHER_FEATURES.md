@@ -154,10 +154,30 @@ different things:
 
 Yes, the nRF52 measures its own battery — it always did. The divider on
 `VBAT_ENABLE` (P0.14) is read on `PIN_VBAT` (P0.31) at 12-bit, averaged over 8
-samples, and sent as `"bat"` in every event. **Caveat:** `VBAT_DIVIDER_COMP` is
-`2.961F` and marked `// VERIFY` in the firmware, so the trend is right but the
-absolute percentage is uncalibrated until someone measures it against a known
-voltage.
+samples, and sent as `"bat"` in every event.
+
+**Do not trust that number yet.** It is not merely uncalibrated — it is
+*unstable*. [DEVELOPMENT_PLAN F2.3](DEVELOPMENT_PLAN.md) records consecutive
+heartbeats alternating between `mv:4085`/**93%** and `mv:3699`/**39%**, on one
+board, on one continuous `seq`. The divider's source impedance (~338k) is far
+too high for the SAADC's default acquisition window, so each conversion is
+dragged toward the previous one, and averaging 8 back-to-back reads does not
+help because every sample is equally under-settled. `VBAT_DIVIDER_COMP` is
+*also* an uncalibrated guess (`2.961F`, marked `// VERIFY`), but that is the
+smaller problem.
+
+Two consequences:
+
+- The split above is what contains this. `going_dark` and `low_battery` now
+  come from the phone's OS-reported battery, which is reliable; only the
+  severity-1 `band_battery` rides the unstable reading. Before the split, this
+  ADC could raise a severity-3 "phone about to die".
+- `band_battery` requires **three consecutive** readings below the threshold
+  (`BAND_LOW_STREAK` in `App.js`), because an alternating signal never produces
+  two in a row. No hysteresis band survives a 54-point swing. That is a
+  workaround; the fix is F2.3 in firmware — a longer acquisition time, or a
+  median-of-N with a gap between samples. A median rejects the alternating
+  outlier; a mean does not.
 
 ### Where they show up
 
@@ -381,6 +401,11 @@ Tick these on a real device. Nothing in §2 or §3 is proven until they are.
       the wearer sees the critical toast.
 - [ ] Band below 20% → family gets **"Band battery low"**, *not* a phone
       warning. **This is the one that proves the original bug is dead.**
+      Needs three consecutive low readings (~3 minutes), and with the ADC in
+      its current state it may fire *never* — which is a pass, not a failure.
+      To exercise the alert path itself rather than the ADC, pin the level with
+      the firmware's own command: `{"c":"bat","v":10}` sets `gBatteryForced`
+      so the reading stops alternating.
 - [ ] Virtual mode → band battery reads `—` / absent, and **only one** battery
       alert fires, not two.
 - [ ] Charge back above threshold, drop below again → the alert fires a second
