@@ -54,6 +54,11 @@ expo-env.d.ts
 # here unanchored: `android/` matches at any depth, which silently swallowed
 # modules/nigehban-alarm/android/ -- handwritten Kotlin, not generated output --
 # and it never reached git or the EAS upload, so it was never compiled in.
+#
+# What DOES need ignoring is that module's Gradle output -- machine-specific
+# dex/jar/Kotlin incremental caches. Anchored to modules/*/android/build/ so it
+# can only ever match the build directory, never the src/ tree beside it.
+nigehban-app/modules/*/android/build/
 
 # -------------------------------------------------------------------- Python
 __pycache__/
