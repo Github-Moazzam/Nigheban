@@ -63,23 +63,53 @@ export function backgroundNotificationDiagnostics() {
  * the known shapes are tried rather than one being assumed.
  */
 function extractAlert(payload) {
-  const d = payload?.data?.notification?.data
-    ?? payload?.notification?.data
-    ?? payload?.data
-    ?? payload
-    ?? {};
+  const candidates = [];
 
-  const id = d.alert_id ?? d.alertId;
-  if (id == null) return null;
+  // The shape that matters, and the one this originally missed.
+  //
+  // For a *headless* background notification -- the killed-app case this whole
+  // file exists for -- expo-notifications' own `NotificationTaskPayload` says
+  // `notification` is null and the data payload arrives as a JSON **string** in
+  // `data.dataString`. Nothing in the SDK parses it for us. Android's
+  // NotificationSerializer writes it that way for anything sent through the
+  // Expo push service, because the FCM message's `body` key holds the data as
+  // JSON rather than as fields.
+  for (const s of [
+    payload?.data?.dataString,
+    payload?.notification?.request?.content?.dataString,
+  ]) {
+    if (typeof s === 'string') {
+      try { candidates.push(JSON.parse(s)); } catch { /* not JSON after all */ }
+    }
+  }
 
-  const severity = Number(d.severity ?? 0);
-  return {
-    id,
-    severity,
-    kind: d.kind || 'sos',
-    maps: d.maps || null,
-    user: { name: d.name || d.user_name || 'Family member' },
-  };
+  // The already-running shapes, where the data survives as an object.
+  candidates.push(
+    payload?.notification?.request?.content?.data,
+    payload?.data?.notification?.request?.content?.data,
+    payload?.data?.notification?.data,
+    payload?.notification?.data,
+    payload?.data,
+    payload,
+  );
+
+  // Every candidate is tried for an alert id rather than the first non-null one
+  // being taken and trusted. That is the difference between this and the
+  // version it replaces: `payload.data` is *always* truthy, so a chain of `??`
+  // stopped there and reported "no alert" for every push a closed app ever got.
+  for (const d of candidates) {
+    if (!d || typeof d !== 'object') continue;
+    const id = d.alert_id ?? d.alertId;
+    if (id == null) continue;
+    return {
+      id,
+      severity: Number(d.severity ?? 0),
+      kind: d.kind || 'sos',
+      maps: d.maps || null,
+      user: { name: d.name || d.user_name || 'Family member' },
+    };
+  }
+  return null;
 }
 
 /**
