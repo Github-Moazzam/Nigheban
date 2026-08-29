@@ -5,6 +5,7 @@ import {
   Vibration, View,
 } from 'react-native';
 import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
+import { enqueue, flushQueue, clearQueue } from './src/alertQueue';
 import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
@@ -111,6 +112,7 @@ function Main() {
   const [askSheet, setAskSheet] = useState(null);     // the check-in question
   const [samaritan, setSamaritan] = useState(null);   // a stranger nearby
   const [deliveredTo, setDeliveredTo] = useState(null);
+  const [deliveryStatus, setDeliveryStatus] = useState(null); // null | 'queued' | 'sending' | 'delivered'
   const [toast, setToast] = useState(null);
   const [fix, setFix] = useState(null);               // last position, from Home
   const [pendingAlertId, setPendingAlertId] = useState(null); // tapped from a notification
@@ -254,19 +256,40 @@ function Main() {
   // ---- raising and standing down -----------------------------------------
   const raise = useCallback(async (payload) => {
     if (!session) return null;
+
+    // Capture the GPS fix at the moment the button is pressed — Point A.
+    // This is where the emergency happened, not wherever the phone drifts
+    // to while waiting for signal.
+    const at = fix || await lastKnownFix();
+    const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
+    const isEmergency = ['sos', 'snatch', 'fall'].includes(payload.kind);
+
+    // LOCAL-FIRST: fire the state machine and vibrate immediately, before
+    // the network call. The user must know their button press registered,
+    // and the SOS screen must appear even with no connectivity at all.
+    if (isEmergency) {
+      const localAlert = {
+        id: `pending-${Date.now()}`,
+        kind: payload.kind,
+        source: payload.source || 'app',
+        created_at: Date.now() / 1000,
+        lat: at?.lat, lon: at?.lon,
+        _local: true,  // marker: not yet confirmed by the server
+      };
+      dispatch('SOS_RAISED', { alert: localAlert });
+      setDeliveredTo(null);
+      setDeliveryStatus('queued');
+      Vibration.vibrate([0, 300, 120, 300]);
+    }
+
+    // Now try the network call.
     try {
-      // `fix` is only fed while the Home tab is mounted and watching. An alert
-      // raised from anywhere else -- another tab, the band, a backgrounded app
-      // -- would otherwise go out with no position, so fall back to the same
-      // cached fix the heartbeat uses rather than send the family a map-less
-      // emergency.
-      const at = fix || await lastKnownFix();
-      const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
       const r = await call(session, '/alert', { method: 'POST', body });
-      if (['sos', 'snatch', 'fall'].includes(payload.kind)) {
+      if (isEmergency) {
+        // Replace the local placeholder with the real server alert.
         dispatch('SOS_RAISED', { alert: r.alert });
         setDeliveredTo(r.delivered_to);
-        Vibration.vibrate([0, 300, 120, 300]);
+        setDeliveryStatus('delivered');
       }
       if (payload.kind !== 'near_miss') {
         setToast(r.delivered_to
@@ -276,16 +299,34 @@ function Main() {
       bump();
       return r.alert;
     } catch (e) {
-      setToast(e.message);
+      if (isEmergency) {
+        // Network failed — queue for retry. The SOS screen is already live
+        // from the local-first dispatch above.
+        await enqueue(body);
+        setDeliveryStatus('queued');
+        setToast('No signal — your alert is saved and will send automatically when connection returns');
+      } else {
+        setToast(e.message);
+      }
       return null;
     }
   }, [session, fix, dispatch, bump]);
 
   const resolve = useCallback(async (id) => {
     try {
+      if (!id || String(id).startsWith('pending-') || String(id).startsWith('local-')) {
+        await clearQueue();
+        dispatch('SOS_CLEARED');
+        setDeliveredTo(null);
+        setDeliveryStatus(null);
+        setToast('Cancelled — alert was not sent yet');
+        bump();
+        return;
+      }
       await call(session, `/alert/${id}/resolve`, { method: 'POST' });
       dispatch('SOS_CLEARED');
       setDeliveredTo(null);
+      setDeliveryStatus(null);
       setToast('Stood down — your family has been told');
       bump();
     } catch (e) {
@@ -585,12 +626,43 @@ function Main() {
     family_added: (m) => { setToast(`${m.user.name} is now in your family`); bump(); },
   });
 
+  // ---- offline queue: flush on reconnect ----------------------------------
+  // When the WebSocket comes back online after being down, try to deliver any
+  // alerts that were queued while offline. The serverOnline flag is driven by
+  // useLive's onopen/onclose, so this fires on the natural reconnect.
+  const prevOnline = useRef(false);
+  useEffect(() => {
+    if (serverOnline && !prevOnline.current && session) {
+      // Just reconnected. Flush the queue.
+      (async () => {
+        const { delivered } = await flushQueue(session);
+        if (delivered.length > 0) {
+          const last = delivered[delivered.length - 1];
+          const count = last.response?.delivered_to;
+          // Replace the local placeholder with the real server alert.
+          if (last.response?.alert) {
+            dispatch('SOS_RAISED', { alert: last.response.alert });
+          }
+          setDeliveredTo(count ?? null);
+          setDeliveryStatus('delivered');
+          setToast(count
+            ? `Your alert has been delivered to ${count} family member${count === 1 ? '' : 's'}`
+            : 'Your alert has been sent to the server');
+          bump();
+        }
+      })();
+    }
+    prevOnline.current = serverOnline;
+  }, [serverOnline, session, dispatch, bump]);
+
   const signOut = async () => {
     await stopBackgroundWatch();
     await clearSession();
+    await clearQueue();
     dispatch('RESET');
     setSession(null);
     setIncoming(null);
+    setDeliveryStatus(null);
   };
 
   // The two ways out of the fall window. Both shells offer them; only the
@@ -651,6 +723,7 @@ function Main() {
           band={band}
           ctx={ctx}
           deliveredTo={deliveredTo}
+          deliveryStatus={deliveryStatus}
           serverOnline={serverOnline}
           onRaise={raise}
           onResolve={resolve}
@@ -678,7 +751,7 @@ function Main() {
       <View style={st.flex}>
         {tab === 'home' && (
           <Home session={session} band={band} ctx={ctx}
-                deliveredTo={deliveredTo} onRaise={raise} onResolve={resolve}
+                deliveredTo={deliveredTo} deliveryStatus={deliveryStatus} onRaise={raise} onResolve={resolve}
                 serverOnline={serverOnline} onOpenBand={() => setTab('band')}
                 onOpenSetup={() => setTab('setup')}
                 onAckCheckin={ackCheckin} onToggleHighAlert={toggleHighAlert}

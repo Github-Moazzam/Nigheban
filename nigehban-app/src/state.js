@@ -60,6 +60,7 @@ const TRANSITIONS = {
     HIGH_ALERT_SET: null,
   },
   sos_live: {
+    SOS_RAISED:     'sos_live',          // update activeSos with real server alert
     SOS_CLEARED:    'rest',
     CHECKIN_ASKED:  null,
     FALL_DETECTED:  null,                // already the worst case

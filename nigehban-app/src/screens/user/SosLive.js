@@ -10,6 +10,12 @@ const LEDE = {
   snatch: 'Your family has been alerted',
 };
 
+const LEDE_QUEUED = {
+  sos: 'Waiting for connection',
+  fall: 'Waiting for connection',
+  snatch: 'Waiting for connection',
+};
+
 /**
  * What the wearer sees while her own alert is live.
  *
@@ -17,8 +23,13 @@ const LEDE = {
  * the names of the people who answered are the body of the screen and the
  * delivery count is a footnote. Standing down is a real button and one tap
  * away, but it is not the loudest thing here.
+ *
+ * OFFLINE QUEUE: when deliveryStatus is 'queued', the screen shows an amber
+ * banner explaining that the alert is saved locally. The user is never told
+ * their family was alerted when they have not been — that lie could cost a life.
  */
-export default function SosLive({ alert, deliveredTo, responders = [], onStandDown }) {
+export default function SosLive({ alert, deliveredTo, deliveryStatus, responders = [], onStandDown }) {
+  const isQueued = deliveryStatus === 'queued';
   const [, force] = useState(0);
   useEffect(() => {
     const id = setInterval(() => force((n) => n + 1), 1000);
@@ -29,6 +40,10 @@ export default function SosLive({ alert, deliveredTo, responders = [], onStandDo
     ? Math.max(0, Math.floor(Date.now() / 1000 - alert.created_at))
     : 0;
 
+  const lede = isQueued
+    ? (LEDE_QUEUED[alert?.kind] || LEDE_QUEUED.sos)
+    : (LEDE[alert?.kind] || LEDE.sos);
+
   return (
     <ScrollView style={s.root} contentContainerStyle={s.content}>
       <View style={s.badge}>
@@ -37,16 +52,38 @@ export default function SosLive({ alert, deliveredTo, responders = [], onStandDo
         <Text style={[T.label, { color: U.red }]}>{fmtCount(elapsed)}</Text>
       </View>
 
-      <Txt variant="h1" color={U.text} style={s.title}>{LEDE[alert?.kind] || LEDE.sos}</Txt>
+      <Txt variant="h1" color={U.text} style={s.title}>{lede}</Txt>
+
+      {/* ---- offline banner ---- */}
+      {isQueued && (
+        <View style={s.offlineBanner}>
+          <Icon name="wifi-off" size={18} color={U.amber} />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={[T.bodyMed, { color: U.amber }]}>
+              Alert saved on this device
+            </Text>
+            <Text style={[T.meta, { color: U.dim }]}>
+              It will be sent to your family the moment signal returns. Stay where help can reach you.
+            </Text>
+          </View>
+        </View>
+      )}
+
       <Text style={[T.meta, s.sub]}>
-        {deliveredTo == null
-          ? 'Sending…'
-          : `Sent to ${deliveredTo} ${deliveredTo === 1 ? 'person' : 'people'}`}
+        {isQueued
+          ? 'Not yet — waiting for signal'
+          : deliveredTo == null
+            ? 'Sending…'
+            : `Sent to ${deliveredTo} ${deliveredTo === 1 ? 'person' : 'people'}`}
       </Text>
 
       <View style={s.panel}>
         <Text style={[T.label, { color: U.faint }]}>
-          {responders.length ? 'ON THEIR WAY' : 'WAITING FOR AN ANSWER'}
+          {responders.length
+            ? 'ON THEIR WAY'
+            : isQueued
+              ? 'NOBODY HAS BEEN REACHED YET'
+              : 'WAITING FOR AN ANSWER'}
         </Text>
         {responders.length ? (
           responders.map((r) => (
@@ -58,7 +95,9 @@ export default function SosLive({ alert, deliveredTo, responders = [], onStandDo
           ))
         ) : (
           <Text style={[T.meta, { color: U.dim }]}>
-            Their phones are ringing.
+            {isQueued
+              ? 'Your family will be alerted as soon as your phone finds signal. The alert is safe — it cannot be lost.'
+              : 'Their phones are ringing.'}
           </Text>
         )}
       </View>
@@ -99,5 +138,13 @@ const s = StyleSheet.create({
   standDown: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: S.sm,
     minHeight: 52, borderRadius: RU.inner, backgroundColor: U.mint, marginTop: S.lg,
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: S.sm,
+    backgroundColor: U.amberSoft,
+    borderRadius: RU.inner,
+    padding: S.md,
   },
 });

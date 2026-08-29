@@ -182,7 +182,10 @@ export async function call(session, path, { method = 'GET', body } = {}) {
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { /* non-json */ }
     if (!res.ok) {
-      throw new Error((data && data.detail) || `server said ${res.status}`);
+      let msg = data && data.detail;
+      if (Array.isArray(msg)) msg = msg.map((m) => m.msg || JSON.stringify(m)).join(', ');
+      else if (typeof msg === 'object' && msg !== null) msg = JSON.stringify(msg);
+      throw new Error(msg || `server said ${res.status}`);
     }
     return data;
   } catch (e) {
