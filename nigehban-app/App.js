@@ -52,6 +52,23 @@ const TAKEOVER_TITLE = {
 const BATT_LOW = 20;
 const BATT_DARK = 5;
 
+// Hysteresis on the re-arm, so a level sitting exactly on a threshold cannot
+// page the family twice. Mirrors virtualBand.js, which has always had it.
+const BATT_REARM = 3;
+
+// The band's reading needs more than hysteresis. DEVELOPMENT_PLAN F2.3 records
+// consecutive heartbeats alternating between 93% and 39% on one board, on one
+// continuous `seq`: the divider's source impedance (~338k) is far too high for
+// the SAADC's default acquisition window, so each conversion is dragged toward
+// the previous one, and averaging 8 back-to-back reads does not help because
+// every sample is equally under-settled.
+//
+// No hysteresis band survives a 54-point swing. Requiring N consecutive
+// readings on the same side does -- an alternating signal never produces two
+// in a row. This is a workaround for a firmware defect, not a fix; the fix is
+// F2.3 (longer acquisition time, or median-of-N with a gap between samples).
+const BAND_LOW_STREAK = 3;
+
 // Local notifications are best-effort: Expo Go on Android has limits, and a
 // demo cannot hinge on the notification shade. The in-app takeover below is
 // the real signal; a notification is a bonus when the app is backgrounded.
@@ -444,7 +461,7 @@ function Main() {
     } else if (low && !battLatch.current.phoneLow) {
       battLatch.current.phoneLow = true;
       raise({ kind: 'low_battery', source: 'app', note: `phone ${Math.round(level)}%` });
-    } else if (!low) {
+    } else if (level > BATT_LOW + BATT_REARM) {
       battLatch.current.phoneLow = false;
       battLatch.current.phoneDark = false;     // charged: arm it again
     }
@@ -454,16 +471,27 @@ function Main() {
   // The band's own cell. Only in BLE mode: in virtual mode `band.battery` is
   // this same phone read through expo-battery, so raising it here would page
   // the family twice for one battery.
+  //
+  // Debounced over consecutive readings rather than latched on one, because
+  // this number is known to alternate -- see BAND_LOW_STREAK above. A single
+  // reading below the threshold means nothing here.
+  const bandLowStreak = useRef(0);
   useEffect(() => {
     if (band.mode !== MODES.BLE) return;
     const level = band.battery;
     if (level == null) return;
 
-    if (level <= BATT_LOW && !battLatch.current.bandLow) {
-      battLatch.current.bandLow = true;
-      raise({ kind: 'band_battery', source: 'app', note: `band ${Math.round(level)}%` });
-    } else if (level > BATT_LOW) {
-      battLatch.current.bandLow = false;       // charged: arm it again
+    if (level <= BATT_LOW) {
+      bandLowStreak.current += 1;
+      if (bandLowStreak.current >= BAND_LOW_STREAK && !battLatch.current.bandLow) {
+        battLatch.current.bandLow = true;
+        raise({ kind: 'band_battery', source: 'app', note: `band ${Math.round(level)}%` });
+      }
+    } else {
+      bandLowStreak.current = 0;
+      if (level > BATT_LOW + BATT_REARM) {
+        battLatch.current.bandLow = false;     // charged: arm it again
+      }
     }
   }, [band.battery, band.mode, raise]);
 
