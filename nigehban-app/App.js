@@ -23,8 +23,9 @@ import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
-import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
-import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
+import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/watch';
+import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
+import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
 import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
@@ -50,6 +51,23 @@ const TAKEOVER_TITLE = {
 // says the phone is about to stop being a safety device at all.
 const BATT_LOW = 20;
 const BATT_DARK = 5;
+
+// Hysteresis on the re-arm, so a level sitting exactly on a threshold cannot
+// page the family twice. Mirrors virtualBand.js, which has always had it.
+const BATT_REARM = 3;
+
+// The band's reading needs more than hysteresis. DEVELOPMENT_PLAN F2.3 records
+// consecutive heartbeats alternating between 93% and 39% on one board, on one
+// continuous `seq`: the divider's source impedance (~338k) is far too high for
+// the SAADC's default acquisition window, so each conversion is dragged toward
+// the previous one, and averaging 8 back-to-back reads does not help because
+// every sample is equally under-settled.
+//
+// No hysteresis band survives a 54-point swing. Requiring N consecutive
+// readings on the same side does -- an alternating signal never produces two
+// in a row. This is a workaround for a firmware defect, not a fix; the fix is
+// F2.3 (longer acquisition time, or median-of-N with a gap between samples).
+const BAND_LOW_STREAK = 3;
 
 // Local notifications are best-effort: Expo Go on Android has limits, and a
 // demo cannot hinge on the notification shade. The in-app takeover below is
@@ -112,7 +130,9 @@ function Main() {
       if (launched != null) setPendingAlertId(launched);
       const s = await loadSession();
       setSession(s);
-      if (s) startBackgroundWatch();
+      // The foreground service is no longer started here. Signing in is not
+      // by itself a reason to hold a process alive; holding a band link or
+      // being armed is. The effect below owns that and runs on this launch.
       setBooting(false);
     })();
   }, []);
@@ -364,37 +384,116 @@ function Main() {
 
   const band = useBandLink(onBandEvent);
 
-  // The BLE link lives in this app's Android process, so when the process dies
-  // the GATT connection dies with it and the band drops back to advertising --
-  // the blinking light. The foreground service is the only thing that keeps the
-  // process alive once the app is off screen or swiped out of Recents, so it
-  // has to be up whenever a real band is the chosen radio, not only once
-  // somebody is signed in. Starting it twice is a no-op (bgService checks).
+  // Two separate things need this app's Android process alive, and the service
+  // is the only thing that keeps it alive once the app is off screen or swiped
+  // out of Recents. Either one on its own is enough to justify it:
+  //
+  //   1. A linked band. The GATT link belongs to the process, so when the
+  //      process dies the band drops back to advertising -- the blinking light.
+  //   2. Being armed at all. useHeartbeat only beats while mode != 'idle', and
+  //      the server's watchdog pages the whole family with watch_lost after
+  //      BEAT_LOST_S of silence in exactly that state. Kill the process of an
+  //      armed phone and it reports its own wearer missing. That applies to
+  //      virtual mode especially, where the phone *is* the band and there is no
+  //      stored band id to find.
+  //
+  // Condition 2 is why this cannot simply ask "does this phone want a band".
+  //
+  // What must *not* be used is the live connection. A band out of range is
+  // exactly when band.js's retry loop needs the process alive; stopping the
+  // service there would kill the thing doing the reconnecting. band.status is
+  // in the dependency list as a trigger only -- it changes at both moments the
+  // stored flag does (connected when the id is written, idle when DISCONNECT
+  // clears it), which re-runs the read without band.js having to know the
+  // service exists at all.
   useEffect(() => {
-    if (band.mode !== MODES.BLE) return;
-    startBackgroundWatch();
-  }, [band.mode]);
+    // Before the stored mode loads every launch looks like virtual mode -- the
+    // same trap bandLink.js's autoLink had. Acting on that default would stop
+    // the service for a moment on every launch of a band-wearer's phone.
+    if (!band.modeLoaded) return undefined;
 
-  // ---- U3.4 battery: one alert per threshold crossing --------------------
-  const battLatch = useRef({ low: false, dark: false });
+    let cancelled = false;
+    (async () => {
+      // Armed is decisive on its own and needs no storage read, so it is
+      // answered first: there is no band state that makes it safe to let an
+      // armed phone's process die.
+      if (watchMode !== 'idle') { syncBackgroundWatch(!!session); return; }
+
+      // Idle from here. Only a band the user still wants keeps the service up;
+      // DISCONNECT clears that id, and virtual mode has none to begin with.
+      if (band.mode !== MODES.BLE) { syncBackgroundWatch(false); return; }
+
+      const wanted = await wantsBand();
+      if (cancelled) return;
+      // null means the read failed. Passed through so syncBackgroundWatch
+      // leaves the service alone rather than tearing down a live link over it.
+      syncBackgroundWatch(wanted === null ? null : (!!session && wanted));
+    })();
+    return () => { cancelled = true; };
+  }, [session, band.status, band.mode, band.modeLoaded, watchMode]);
+
+  // ---- U3.4 battery: one alert per threshold crossing, per device --------
+  //
+  // Two cells, watched separately. They used to be one number: `band.battery`
+  // was raised as `going_dark` and shown to the family as "phone about to
+  // die", so in BLE mode a wearer at 4% band and 90% phone paged his family
+  // about the wrong device -- and a wearer whose phone was genuinely dying
+  // said nothing at all, because the phone's own battery was never read.
+  //
+  // The distinction is not cosmetic. A flat band means the safety device is
+  // off the air while the phone can still be reached by push; a flat phone
+  // means every path to the family is about to close, including that push.
+  // Hence going_dark at severity 3 against band_battery at 1.
+  const phoneBatt = usePhoneBattery();
+  const battLatch = useRef({ phoneLow: false, phoneDark: false, bandLow: false });
+
   useEffect(() => {
-    const level = band.battery;
-    if (level == null) return;
+    const level = phoneBatt;
+    if (level == null) return;                 // unknown is not the same as empty
     const low = level <= BATT_LOW;
     const dark = level <= BATT_DARK;
 
-    if (dark && !battLatch.current.dark) {
-      battLatch.current = { low: true, dark: true };
-      raise({ kind: 'going_dark', source: 'app', note: `${Math.round(level)}%` });
-      setToast('Battery critical — your family has been told where you were');
-    } else if (low && !battLatch.current.low) {
-      battLatch.current.low = true;
-      raise({ kind: 'low_battery', source: 'app', note: `${Math.round(level)}%` });
-    } else if (!low) {
-      battLatch.current = { low: false, dark: false };   // charged: arm it again
+    if (dark && !battLatch.current.phoneDark) {
+      battLatch.current.phoneLow = true;
+      battLatch.current.phoneDark = true;
+      raise({ kind: 'going_dark', source: 'app', note: `phone ${Math.round(level)}%` });
+      setToast('Phone battery critical — your family has been told where you were');
+    } else if (low && !battLatch.current.phoneLow) {
+      battLatch.current.phoneLow = true;
+      raise({ kind: 'low_battery', source: 'app', note: `phone ${Math.round(level)}%` });
+    } else if (level > BATT_LOW + BATT_REARM) {
+      battLatch.current.phoneLow = false;
+      battLatch.current.phoneDark = false;     // charged: arm it again
     }
     dispatch('BATTERY', { level, low, goingDark: dark });
-  }, [band.battery, raise, dispatch]);
+  }, [phoneBatt, raise, dispatch]);
+
+  // The band's own cell. Only in BLE mode: in virtual mode `band.battery` is
+  // this same phone read through expo-battery, so raising it here would page
+  // the family twice for one battery.
+  //
+  // Debounced over consecutive readings rather than latched on one, because
+  // this number is known to alternate -- see BAND_LOW_STREAK above. A single
+  // reading below the threshold means nothing here.
+  const bandLowStreak = useRef(0);
+  useEffect(() => {
+    if (band.mode !== MODES.BLE) return;
+    const level = band.battery;
+    if (level == null) return;
+
+    if (level <= BATT_LOW) {
+      bandLowStreak.current += 1;
+      if (bandLowStreak.current >= BAND_LOW_STREAK && !battLatch.current.bandLow) {
+        battLatch.current.bandLow = true;
+        raise({ kind: 'band_battery', source: 'app', note: `band ${Math.round(level)}%` });
+      }
+    } else {
+      bandLowStreak.current = 0;
+      if (level > BATT_LOW + BATT_REARM) {
+        battLatch.current.bandLow = false;     // charged: arm it again
+      }
+    }
+  }, [band.battery, band.mode, raise]);
 
   // The server's watchdog listens for silence, so the phone speaks while
   // anything is armed. N2's foreground service is what keeps this going once
@@ -402,7 +501,10 @@ function Main() {
   useHeartbeat(session, {
     mode: watchMode,
     bandLink: band.status === 'connected' || band.status === 'virtual',
-    batt: band.battery,
+    // Never substituted for one another. In virtual mode there is no second
+    // cell, so bandBatt is null rather than a copy of the phone's reading.
+    bandBatt: band.mode === MODES.BLE ? band.battery : null,
+    phoneBatt,
   });
 
   // Presence is what makes the Good Samaritan fan-out possible at all: it is

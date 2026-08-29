@@ -134,7 +134,13 @@ create table if not exists public.watch_state (
     next_buzz_at  timestamptz,
     last_beat     timestamptz,
     band_link     boolean not null default false,
+    -- Two batteries, and they fail independently: a flat band means the safety
+    -- device is off the air, a flat phone means every path to the family is
+    -- about to close. band_batt is null in virtual mode, where there is no
+    -- band. See migrations/002_band_battery.sql -- phone_batt held band
+    -- battery before that migration.
     phone_batt    smallint,
+    band_batt     smallint,
     last_lat      double precision,
     last_lon      double precision,
     lost_notified boolean not null default false

@@ -76,6 +76,27 @@ async function forgetBand() {
   try { await AsyncStorage.removeItem(LINK_KEY); } catch { /* non-fatal */ }
 }
 
+/**
+ * Does this phone want a band? `true` / `false` / `null`, where null means
+ * "could not tell" -- the same three-way convention alarm.js uses.
+ *
+ * The Android foreground service exists to hold the BLE link alive, so its
+ * start/stop decision is this same standing instruction. But it cannot reuse
+ * recallBand(): that swallows a read error into null, which is right for the
+ * connect path (nothing to go straight at, fall back to the scan) and actively
+ * dangerous here -- a transient AsyncStorage failure would read as "no band",
+ * stop the service, kill the process, and drop a live link. A caller that
+ * would tear something down has to be able to tell "no" from "don't know", so
+ * this reports the difference instead of guessing on the caller's behalf.
+ */
+export async function wantsBand() {
+  try {
+    return !!(await AsyncStorage.getItem(LINK_KEY));
+  } catch {
+    return null;
+  }
+}
+
 function b64decode(s) {
   if (typeof global.atob === 'function') return global.atob(s);
   const tbl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
