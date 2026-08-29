@@ -284,7 +284,8 @@ CREATE TABLE watch_state (
     next_buzz_at REAL,
     last_beat    REAL,
     band_link    INTEGER DEFAULT 0,
-    phone_batt   INTEGER
+    phone_batt   INTEGER,                -- the PHONE's own cell
+    band_batt    INTEGER                 -- the wristband's; NULL in virtual mode
 );
 
 CREATE TABLE presence (                 -- Good Samaritan
@@ -301,7 +302,7 @@ CREATE INDEX idx_presence_geo ON presence(geohash6, updated_at);
 | Method | Path | Purpose | |
 |---|---|---|---|
 | `POST` | `/device` | register install id + push token | ☑ |
-| `POST` | `/heartbeat` | `{mode, band_link, phone_batt, lat, lon}` every 60 s while armed | ☑ |
+| `POST` | `/heartbeat` | `{mode, band_link, phone_batt, band_batt, lat, lon}` every 60 s while armed | ☑ |
 | `POST` | `/pair` | issue a one-time, ten-minute pairing code | ☑ new |
 | `POST` | `/invite` | redeem a pairing code, or ask by user code | ☑ |
 | `GET` | `/invites` | what is waiting on me, and what I am waiting on | ☑ new |
@@ -732,8 +733,9 @@ Diagnostic before blaming the app: open `http://<laptop-ip>:8000/health` in the
 | 10 | App swiped away, 20 min in a pocket | Band still connected, SOS still works |
 | 11 | Phone rebooted | Service restarts, reconnects in < 60 s |
 | 12 | Band out of range 5 min, then return | Auto-reconnect, no user action |
-| 13 | Battery to 20 % | Family alerted + last buzz delivered |
-| 14 | Battery to 5 % | `going_dark`; family screen shows last-seen |
+| 13 | **Phone** battery to 20 % | `low_battery`; family alerted + last buzz delivered |
+| 13b | **Band** battery to 20 % | `band_battery` (sev 1), *not* a phone warning |
+| 14 | **Phone** battery to 5 % | `going_dark`; family screen shows last-seen |
 | 15 | High Alert armed | Buzz at randomised 5–10 min; miss → alert |
 | 16 | High Alert disarm without PIN | Refused |
 | 17 | Fall: drop the band from 1.5 m | Detected, countdown appears |
