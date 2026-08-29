@@ -163,7 +163,15 @@ function Main() {
   useEffect(() => subscribeNotificationTaps(setPendingAlertId), []);
 
   useEffect(() => {
-    if (!pendingAlertId || !session) return;
+    if (!pendingAlertId) return;
+    // No session to fetch the alert with. While booting that is only "not yet",
+    // so wait; once boot is done it is final, and the id has to be dropped
+    // rather than held -- a held id keeps the siren armed forever, because the
+    // stop below refuses to fire while one is outstanding.
+    if (!session) {
+      if (!booting) setPendingAlertId(null);
+      return;
+    }
     (async () => {
       try {
         const list = await call(session, '/alerts?scope=incoming');
@@ -199,12 +207,23 @@ function Main() {
   // `incoming`, so hanging the stop off that rather than off each button is
   // what makes it impossible to add a fourth exit that leaves a siren running.
   //
-  // It also fires once on mount, which is deliberate: the alarm notification is
+  // It also fires on mount, which is deliberate: the alarm notification is
   // ongoing and survives the process, so an app killed mid-siren would come
   // back to a notification it no longer has any way to clear.
+  //
+  // But that mount fire must not silence the alarm that *opened* this app. The
+  // lock-screen takeover launches us cold with the siren already sounding, and
+  // `incoming` cannot be set yet -- the alert id still has to be read off the
+  // launch intent, the session loaded, and the row fetched. Firing before all
+  // of that killed the siren about a second in and left the takeover on screen
+  // silent. So the stop waits until nothing is still on its way: `booting`
+  // covers the intent read, `pendingAlertId` covers the fetch, and both clear
+  // even when they find nothing, which is when there really is a stale siren
+  // to cut.
   useEffect(() => {
-    if (!incoming) stopAlarm();
-  }, [incoming]);
+    if (booting || pendingAlertId || incoming) return;
+    stopAlarm();
+  }, [incoming, pendingAlertId, booting]);
 
   useEffect(() => {
     if (!toast) return undefined;

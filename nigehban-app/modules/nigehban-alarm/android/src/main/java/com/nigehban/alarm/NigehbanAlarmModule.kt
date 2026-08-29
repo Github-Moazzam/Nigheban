@@ -65,27 +65,51 @@ class NigehbanAlarmModule : Module() {
 
     /** Matches SIREN_PATTERN in src/alarm.js, so the two feel like one product. */
     private val SIREN_PATTERN = longArrayOf(0, 500, 200, 500, 200, 500, 900)
+
+    /**
+     * The siren lives on the class, not on the instance, because it has to
+     * outlive the instance.
+     *
+     * A data-only push starts the alarm from a headless JS runtime. Expo tears
+     * that runtime down when the task finishes -- `RNHeadlessAppLoader` only
+     * spares it when an Activity has taken the ReactHost over -- and a later
+     * cold start builds a *new* module instance. With the player held per
+     * instance, that new instance saw `player == null` and `stopAlarm()` became
+     * a no-op against a siren that was still audibly playing in the same
+     * process, with nothing left that could stop it short of force-stopping the
+     * app. Static state means whichever instance is asked can always answer.
+     */
+    private var player: MediaPlayer? = null
+
+    /**
+     * The alarm-stream volume as we found it, so it can be handed back.
+     *
+     * Null means "not currently raised". Kept separate from the player because a
+     * failed `MediaPlayer.prepare()` must still restore the volume it moved.
+     */
+    private var previousAlarmVolume: Int? = null
+
+    /**
+     * The application context the siren was started with.
+     *
+     * Restoring the volume and cancelling the vibration need a Context, and
+     * `appContext.reactContext` is exactly what may already be gone by then --
+     * that is the case this whole block exists for. The application context is
+     * process-scoped, so it is still good when the React one is not.
+     */
+    private var sirenContext: Context? = null
+
+    /**
+     * Set when a full-screen intent reaches an app that is already running.
+     *
+     * A cold start reads the id straight off `activity.intent`, but Android
+     * delivers the intent to `onNewIntent` when the activity already exists, and
+     * that never reaches `activity.intent`. Both paths feed the same
+     * `consumeLaunchAlertId()`. Static for the same reason as the player: the
+     * instance that receives the intent need not be the one that is asked.
+     */
+    private var pendingAlertId: String? = null
   }
-
-  private var player: MediaPlayer? = null
-
-  /**
-   * The alarm-stream volume as we found it, so it can be handed back.
-   *
-   * Null means "not currently raised". Kept separate from the player because a
-   * failed `MediaPlayer.prepare()` must still restore the volume it moved.
-   */
-  private var previousAlarmVolume: Int? = null
-
-  /**
-   * Set when a full-screen intent reaches an app that is already running.
-   *
-   * A cold start reads the id straight off `activity.intent`, but Android
-   * delivers the intent to `onNewIntent` when the activity already exists, and
-   * that never reaches `activity.intent`. Both paths feed the same
-   * `consumeLaunchAlertId()`.
-   */
-  private var pendingAlertId: String? = null
 
   override fun definition() = ModuleDefinition {
     Name("NigehbanAlarm")
@@ -94,10 +118,16 @@ class NigehbanAlarmModule : Module() {
       intent.getStringExtra(EXTRA_ALERT_ID)?.let { pendingAlertId = it }
     }
 
-    // Android kills the process without unwinding anything, but a JS reload in
-    // development does destroy the module -- and a siren that outlives the code
-    // that knows how to stop it can only be silenced by force-stopping the app.
-    OnDestroy { silence() }
+    // There is deliberately no OnDestroy that silences.
+    //
+    // It used to, to cover a JS reload in development leaving a siren nothing
+    // could stop. But the module is also destroyed when Expo tears down the
+    // headless runtime a background push ran in -- and on Android 14 without
+    // USE_FULL_SCREEN_INTENT no Activity takes the ReactHost over, so that
+    // teardown happens seconds after the alarm starts, on a killed phone, which
+    // is the exact scenario N3.3 exists for. The siren has to outlive the
+    // runtime that started it. Development is covered from JS instead: App.js
+    // stops the alarm once boot settles with no alert to answer.
 
     AsyncFunction("presentAlarm") { title: String, body: String, alertId: String ->
       val context = requireContext()
@@ -113,7 +143,12 @@ class NigehbanAlarmModule : Module() {
 
     AsyncFunction("stopAlarm") {
       silence()
-      requireContext().let { NotificationManagerCompat.from(it).cancel(NOTIFICATION_ID) }
+      // The siren goes first and the notification second, and the cancel uses
+      // whatever context is available rather than insisting on the React one:
+      // a stop that throws before silencing is a stop that leaves the phone
+      // screaming.
+      (appContext.reactContext ?: sirenContext)
+        ?.let { NotificationManagerCompat.from(it).cancel(NOTIFICATION_ID) }
       true
     }
 
@@ -240,7 +275,9 @@ class NigehbanAlarmModule : Module() {
   // ---- the siren -----------------------------------------------------------
 
   private fun startSiren(context: Context) {
-    stopSiren(context)
+    stopSiren()
+    // Held for the stop, which may run long after this React context is gone.
+    sirenContext = context.applicationContext
 
     val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
       ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
@@ -281,11 +318,11 @@ class NigehbanAlarmModule : Module() {
       // A dead ringtone URI must not take the vibration and the takeover down
       // with it.
       player = null
-      restoreVolume(context)
+      restoreVolume()
     }
   }
 
-  private fun stopSiren(context: Context) {
+  private fun stopSiren() {
     player?.let {
       try {
         if (it.isPlaying) it.stop()
@@ -295,12 +332,13 @@ class NigehbanAlarmModule : Module() {
       it.release()
     }
     player = null
-    restoreVolume(context)
+    restoreVolume()
   }
 
-  private fun restoreVolume(context: Context) {
+  private fun restoreVolume() {
     val previous = previousAlarmVolume ?: return
     previousAlarmVolume = null
+    val context = sirenContext ?: appContext.reactContext ?: return
     try {
       val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
       audio.setStreamVolume(AudioManager.STREAM_ALARM, previous, 0)
@@ -337,12 +375,19 @@ class NigehbanAlarmModule : Module() {
 
   /** Everything that makes noise, stopped. Safe to call when nothing is running. */
   private fun silence() {
-    val context = appContext.reactContext ?: return
-    stopSiren(context)
-    try {
-      vibrator(context).cancel()
-    } catch (e: Exception) {
-      // no vibrator on this device
+    stopSiren()
+    // Whichever context is still alive. Returning early on a missing React
+    // context, as this once did, meant the one path that most needs to silence
+    // an alarm -- a runtime that has been torn down since it started one -- was
+    // the one path that could not.
+    val context = appContext.reactContext ?: sirenContext
+    if (context != null) {
+      try {
+        vibrator(context).cancel()
+      } catch (e: Exception) {
+        // no vibrator on this device
+      }
     }
+    sirenContext = null
   }
 }
