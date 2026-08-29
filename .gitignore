@@ -9,8 +9,6 @@ server/*.db-shm
 events.jsonl
 
 # ------------------------------------------------------------------- secrets
-.env
-.env.*
 !.env.example
 # nigehban-app/google-services.json is deliberately NOT ignored. It is Firebase
 # *client* config, not a credential -- the API key inside is restricted to the
@@ -91,3 +89,4 @@ desktop.ini
 npm-debug.log*
 yarn-error.log*
 files.zip
+config.bat
