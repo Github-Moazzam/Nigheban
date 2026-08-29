@@ -490,8 +490,12 @@ function MemberCard({ member, session }) {
   const w = member.watchState || {};
   const online = !!member.online;
   const tone = online ? U.mint : U.faint;
+  // Two cells, two batteries. This card used to show one number labelled
+  // BATTERY that actually held the band's charge -- see migration 002. The
+  // band's now rides on the BAND cell, so neither can be read as the other.
   const batt = w.phone_batt != null ? `${Math.round(w.phone_batt)}%` : '—';
   const linked = !!w.band_link;
+  const bandBatt = w.band_batt != null ? `${Math.round(w.band_batt)}%` : null;
 
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -529,7 +533,7 @@ function MemberCard({ member, session }) {
         <View style={s.cell}>
           <Icon name="battery" size={15} color={U.faint} />
           <View style={{ flex: 1 }}>
-            <Text style={[T.label, { color: U.faint }]}>BATTERY</Text>
+            <Text style={[T.label, { color: U.faint }]}>PHONE BATTERY</Text>
             <Text style={[T.number, { color: U.text }]}>{batt}</Text>
           </View>
         </View>
@@ -539,7 +543,7 @@ function MemberCard({ member, session }) {
           <View style={{ flex: 1 }}>
             <Text style={[T.label, { color: U.faint }]}>BAND</Text>
             <Text style={[T.number, { color: linked ? U.text : U.faint }]}>
-              {linked ? 'Linked' : 'None'}
+              {linked ? (bandBatt ? `Linked · ${bandBatt}` : 'Linked') : 'None'}
             </Text>
           </View>
           <Bars active={linked} />

@@ -173,7 +173,7 @@ export default function Home({
         </View>
 
         <View style={s.stats}>
-          <Stat label="Battery" icon="battery"
+          <Stat label="Band battery" icon="battery"
                 value={band.battery != null ? `${Math.round(band.battery)}%` : '—'}
                 tone={band.battery == null ? C.dim
                       : band.battery <= 5 ? C.red

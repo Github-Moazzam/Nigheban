@@ -9,14 +9,20 @@ const SILENT_S = 180;   // the server's BEAT_LOST_S; the tile must agree with it
  * U4.2 — is her watch actually running?
  *
  * A family member's real question is not "is she okay" but "would I be told if
- * she were not". This tile answers that one: the band link, the phone battery,
- * and the age of the last heartbeat. Three minutes of silence turns it amber
- * at the same moment the server decides the same thing (matrix #19), so the
- * screen and the sweeper never disagree in front of a user.
+ * she were not". This tile answers that one: the band link, both batteries, and
+ * the age of the last heartbeat. Three minutes of silence turns it amber at the
+ * same moment the server decides the same thing (matrix #19), so the screen and
+ * the sweeper never disagree in front of a user.
+ *
+ * The two batteries are shown apart because they fail apart, and the tile used
+ * to conflate them: `phone_batt` carried the *band's* reading and was labelled
+ * as the phone's, so this tile said "Phone battery 4%" about a wristband. The
+ * band's now sits beside the band's own link status, where it is unambiguous.
  */
 export default function WatchStatusTile({ watchState = {}, isVirtual = false, style }) {
   const { mode = 'idle', band_link: bandLink = false,
-          phone_batt: batt = null, last_beat: lastBeat = null } = watchState;
+          phone_batt: batt = null, band_batt: bandBatt = null,
+          last_beat: lastBeat = null } = watchState;
 
   const [, force] = useState(0);
   useEffect(() => {
@@ -27,8 +33,12 @@ export default function WatchStatusTile({ watchState = {}, isVirtual = false, st
   const age = lastBeat ? Math.max(0, Math.floor(Date.now() / 1000 - lastBeat)) : null;
   const silent = age !== null && age > SILENT_S;
 
+  // The band's charge rides on the band's own row. A null is "not reported"
+  // -- virtual mode has no second cell, and an older build sends none -- which
+  // must not read as a band at zero.
   const link = bandLink
-    ? { text: 'connected', tone: C.green }
+    ? { text: bandBatt == null ? 'connected' : `connected · ${bandBatt}%`,
+        tone: bandBatt != null && bandBatt <= 20 ? C.amber : C.green }
     : isVirtual
       ? { text: 'phone as band', tone: C.dim }
       : { text: 'no band', tone: C.amber };

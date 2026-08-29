@@ -18,7 +18,8 @@ const KIND = {
   going_dark:     { title: 'Phone about to die',  icon: 'battery' },
   checkin_req:    { title: 'Check-in asked',      icon: 'help-circle' },
   checkin_ack:    { title: 'Checked in — fine',   icon: 'check-circle' },
-  low_battery:    { title: 'Battery low',         icon: 'battery' },
+  low_battery:    { title: 'Phone battery low',   icon: 'battery' },
+  band_battery:   { title: 'Band battery low',    icon: 'battery' },
   near_miss:      { title: 'Near miss — private', icon: 'eye-off' },
 };
 

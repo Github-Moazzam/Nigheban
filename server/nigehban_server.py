@@ -66,6 +66,9 @@ def db_label():
 SEVERITY = {
     "sos": 5, "snatch": 5, "fall": 4, "checkin_missed": 3, "watch_lost": 3,
     "going_dark": 3, "checkin_req": 2, "checkin_ack": 1, "low_battery": 1,
+    # The band stopping is a maintenance problem -- the phone is still
+    # reachable by push. going_dark is the phone, and that closes every path.
+    "band_battery": 1,
     "sos_clear": 1, "near_miss": 1,
 }
 
@@ -296,7 +299,15 @@ class HighAlertIn(BaseModel):
 class HeartbeatIn(BaseModel):
     mode: str = "idle"                 # idle | high_alert | sos
     band_link: bool = False
+    # Two batteries, and they fail independently: a flat band means the safety
+    # device is off the air, a flat phone means every path to the family is
+    # about to close. band_batt is None in virtual mode, where the phone *is*
+    # the band and there is no second cell to report.
+    #
+    # phone_batt held band battery until migration 002 -- an older build still
+    # sends it that way, which is why neither is trusted to imply the other.
     phone_batt: Optional[int] = None
+    band_batt: Optional[int] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
 
@@ -1239,10 +1250,15 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
     now = time.time()
     with closing(db()) as c:
         watch_row(c, u["id"])
-        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, phone_batt=%s, "
+        # COALESCE on the batteries for the same reason as the position: an
+        # older build sends no band_batt at all, and a null from it must not
+        # erase a good reading the family is looking at.
+        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, "
+                  "phone_batt=COALESCE(%s,phone_batt), band_batt=COALESCE(%s,band_batt), "
                   "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
                   "lost_notified=FALSE WHERE user_id=%s",
-                  (now, bool(b.band_link), b.phone_batt, b.lat, b.lon, u["id"]))
+                  (now, bool(b.band_link), b.phone_batt, b.band_batt,
+                   b.lat, b.lon, u["id"]))
         # The mode is the server's to hold, not the phone's to declare -- the
         # phone may have been restarted and forgotten. It may only *raise* to
         # sos, never quietly stand High Alert down.
@@ -1276,6 +1292,7 @@ def watch_of(member_id: str, u=Depends(me)):
         "mode": w["mode"] if w else "idle",
         "band_link": bool(w["band_link"]) if w else False,
         "phone_batt": w["phone_batt"] if w else None,
+        "band_batt": w["band_batt"] if w else None,
         "last_beat": w["last_beat"] if w else None,
         "beat_age_s": (now - w["last_beat"]) if (w and w["last_beat"]) else None,
         "next_buzz_at": w["next_buzz_at"] if w else None,

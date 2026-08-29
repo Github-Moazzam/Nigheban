@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { call } from './api';
 
 // expo-location is loaded defensively, as everywhere else: an older build must
@@ -6,7 +6,49 @@ import { call } from './api';
 let Location = null;
 try { Location = require('expo-location'); } catch { /* no position available */ }
 
+let Battery = null;
+try { Battery = require('expo-battery'); } catch { /* no phone battery reading */ }
+
 export const BEAT_MS = 60000;
+
+/**
+ * This phone's own battery, 0-100, or null if it cannot be read.
+ *
+ * It had never been read outside virtualBand.js, where expo-battery stands in
+ * for the band's ADC pin so the escalation can be tested by leaving the phone
+ * unplugged. Everywhere else `band.battery` was sent as `phone_batt` and shown
+ * to the family as "phone about to die" -- so in BLE mode the family was told
+ * about the wristband while believing they were told about the phone.
+ *
+ * The two fail independently and mean different things. A flat band means the
+ * safety device is off the air; a flat phone means every path to the family is
+ * about to close, including the push that a flat band would otherwise still
+ * reach them by.
+ */
+export function usePhoneBattery() {
+  const [level, setLevel] = useState(null);
+
+  useEffect(() => {
+    if (!Battery) return undefined;
+    let alive = true;
+    let sub = null;
+
+    (async () => {
+      try {
+        const lvl = await Battery.getBatteryLevelAsync();
+        // -1 is expo-battery's "unknown", which must not read as a flat phone.
+        if (alive && lvl >= 0) setLevel(lvl * 100);
+        sub = Battery.addBatteryLevelListener(({ batteryLevel }) => {
+          if (alive && batteryLevel >= 0) setLevel(batteryLevel * 100);
+        });
+      } catch { /* stays null: unknown is not the same as empty */ }
+    })();
+
+    return () => { alive = false; try { sub?.remove(); } catch { /* never set */ } };
+  }, []);
+
+  return level;
+}
 
 /**
  * The last position this phone knows about, without waking the GPS.
@@ -53,9 +95,9 @@ export async function lastKnownFix() {
  * would cost more battery than the feature is worth. It is there so that
  * `watch_lost` can tell the family where the phone was when it went quiet.
  */
-export function useHeartbeat(session, { mode, bandLink, batt }) {
-  const state = useRef({ mode, bandLink, batt });
-  state.current = { mode, bandLink, batt };
+export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt }) {
+  const state = useRef({ mode, bandLink, bandBatt, phoneBatt });
+  state.current = { mode, bandLink, bandBatt, phoneBatt };
 
   useEffect(() => {
     if (!session?.token || mode === 'idle') return undefined;
@@ -74,7 +116,11 @@ export function useHeartbeat(session, { mode, bandLink, batt }) {
           body: {
             mode: cur.mode,
             band_link: !!cur.bandLink,
-            phone_batt: cur.batt == null ? null : Math.round(cur.batt),
+            // Sent separately and never substituted for one another. A null
+            // band_batt is virtual mode, where there is no second cell -- not
+            // a band at zero.
+            phone_batt: cur.phoneBatt == null ? null : Math.round(cur.phoneBatt),
+            band_batt: cur.bandBatt == null ? null : Math.round(cur.bandBatt),
             lat: pos?.coords?.latitude ?? null,
             lon: pos?.coords?.longitude ?? null,
           },

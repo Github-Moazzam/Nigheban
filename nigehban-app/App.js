@@ -23,7 +23,7 @@ import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
-import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
+import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/watch';
 import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
@@ -415,26 +415,57 @@ function Main() {
     return () => { cancelled = true; };
   }, [session, band.status, band.mode, band.modeLoaded, watchMode]);
 
-  // ---- U3.4 battery: one alert per threshold crossing --------------------
-  const battLatch = useRef({ low: false, dark: false });
+  // ---- U3.4 battery: one alert per threshold crossing, per device --------
+  //
+  // Two cells, watched separately. They used to be one number: `band.battery`
+  // was raised as `going_dark` and shown to the family as "phone about to
+  // die", so in BLE mode a wearer at 4% band and 90% phone paged his family
+  // about the wrong device -- and a wearer whose phone was genuinely dying
+  // said nothing at all, because the phone's own battery was never read.
+  //
+  // The distinction is not cosmetic. A flat band means the safety device is
+  // off the air while the phone can still be reached by push; a flat phone
+  // means every path to the family is about to close, including that push.
+  // Hence going_dark at severity 3 against band_battery at 1.
+  const phoneBatt = usePhoneBattery();
+  const battLatch = useRef({ phoneLow: false, phoneDark: false, bandLow: false });
+
   useEffect(() => {
-    const level = band.battery;
-    if (level == null) return;
+    const level = phoneBatt;
+    if (level == null) return;                 // unknown is not the same as empty
     const low = level <= BATT_LOW;
     const dark = level <= BATT_DARK;
 
-    if (dark && !battLatch.current.dark) {
-      battLatch.current = { low: true, dark: true };
-      raise({ kind: 'going_dark', source: 'app', note: `${Math.round(level)}%` });
-      setToast('Battery critical — your family has been told where you were');
-    } else if (low && !battLatch.current.low) {
-      battLatch.current.low = true;
-      raise({ kind: 'low_battery', source: 'app', note: `${Math.round(level)}%` });
+    if (dark && !battLatch.current.phoneDark) {
+      battLatch.current.phoneLow = true;
+      battLatch.current.phoneDark = true;
+      raise({ kind: 'going_dark', source: 'app', note: `phone ${Math.round(level)}%` });
+      setToast('Phone battery critical — your family has been told where you were');
+    } else if (low && !battLatch.current.phoneLow) {
+      battLatch.current.phoneLow = true;
+      raise({ kind: 'low_battery', source: 'app', note: `phone ${Math.round(level)}%` });
     } else if (!low) {
-      battLatch.current = { low: false, dark: false };   // charged: arm it again
+      battLatch.current.phoneLow = false;
+      battLatch.current.phoneDark = false;     // charged: arm it again
     }
     dispatch('BATTERY', { level, low, goingDark: dark });
-  }, [band.battery, raise, dispatch]);
+  }, [phoneBatt, raise, dispatch]);
+
+  // The band's own cell. Only in BLE mode: in virtual mode `band.battery` is
+  // this same phone read through expo-battery, so raising it here would page
+  // the family twice for one battery.
+  useEffect(() => {
+    if (band.mode !== MODES.BLE) return;
+    const level = band.battery;
+    if (level == null) return;
+
+    if (level <= BATT_LOW && !battLatch.current.bandLow) {
+      battLatch.current.bandLow = true;
+      raise({ kind: 'band_battery', source: 'app', note: `band ${Math.round(level)}%` });
+    } else if (level > BATT_LOW) {
+      battLatch.current.bandLow = false;       // charged: arm it again
+    }
+  }, [band.battery, band.mode, raise]);
 
   // The server's watchdog listens for silence, so the phone speaks while
   // anything is armed. N2's foreground service is what keeps this going once
@@ -442,7 +473,10 @@ function Main() {
   useHeartbeat(session, {
     mode: watchMode,
     bandLink: band.status === 'connected' || band.status === 'virtual',
-    batt: band.battery,
+    // Never substituted for one another. In virtual mode there is no second
+    // cell, so bandBatt is null rather than a copy of the phone's reading.
+    bandBatt: band.mode === MODES.BLE ? band.battery : null,
+    phoneBatt,
   });
 
   // Presence is what makes the Good Samaritan fan-out possible at all: it is
