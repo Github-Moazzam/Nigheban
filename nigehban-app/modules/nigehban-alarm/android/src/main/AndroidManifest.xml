@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    The permissions this module needs are declared by the app, not here, because
+    plugins/withNigehbanAndroid.js is the one place that decides them and
+    `expo prebuild` regenerates the app manifest from it: USE_FULL_SCREEN_INTENT
+    to fire the takeover, WAKE_LOCK, and android:showWhenLocked /
+    android:turnScreenOn on MainActivity so the launched activity comes up over
+    the keyguard with the display on rather than behind it in the dark.
+  -->
+</manifest>

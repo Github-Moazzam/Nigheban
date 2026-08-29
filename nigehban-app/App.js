@@ -5,7 +5,7 @@ import {
   Vibration, View,
 } from 'react-native';
 import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
-import { useBandLink } from './src/bandLink';
+import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
 import SamaritanCall from './src/components/SamaritanCall';
@@ -163,7 +163,15 @@ function Main() {
   useEffect(() => subscribeNotificationTaps(setPendingAlertId), []);
 
   useEffect(() => {
-    if (!pendingAlertId || !session) return;
+    if (!pendingAlertId) return;
+    // No session to fetch the alert with. While booting that is only "not yet",
+    // so wait; once boot is done it is final, and the id has to be dropped
+    // rather than held -- a held id keeps the siren armed forever, because the
+    // stop below refuses to fire while one is outstanding.
+    if (!session) {
+      if (!booting) setPendingAlertId(null);
+      return;
+    }
     (async () => {
       try {
         const list = await call(session, '/alerts?scope=incoming');
@@ -199,12 +207,23 @@ function Main() {
   // `incoming`, so hanging the stop off that rather than off each button is
   // what makes it impossible to add a fourth exit that leaves a siren running.
   //
-  // It also fires once on mount, which is deliberate: the alarm notification is
+  // It also fires on mount, which is deliberate: the alarm notification is
   // ongoing and survives the process, so an app killed mid-siren would come
   // back to a notification it no longer has any way to clear.
+  //
+  // But that mount fire must not silence the alarm that *opened* this app. The
+  // lock-screen takeover launches us cold with the siren already sounding, and
+  // `incoming` cannot be set yet -- the alert id still has to be read off the
+  // launch intent, the session loaded, and the row fetched. Firing before all
+  // of that killed the siren about a second in and left the takeover on screen
+  // silent. So the stop waits until nothing is still on its way: `booting`
+  // covers the intent read, `pendingAlertId` covers the fetch, and both clear
+  // even when they find nothing, which is when there really is a stale siren
+  // to cut.
   useEffect(() => {
-    if (!incoming) stopAlarm();
-  }, [incoming]);
+    if (booting || pendingAlertId || incoming) return;
+    stopAlarm();
+  }, [incoming, pendingAlertId, booting]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -344,6 +363,17 @@ function Main() {
   }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert]);
 
   const band = useBandLink(onBandEvent);
+
+  // The BLE link lives in this app's Android process, so when the process dies
+  // the GATT connection dies with it and the band drops back to advertising --
+  // the blinking light. The foreground service is the only thing that keeps the
+  // process alive once the app is off screen or swiped out of Recents, so it
+  // has to be up whenever a real band is the chosen radio, not only once
+  // somebody is signed in. Starting it twice is a no-op (bgService checks).
+  useEffect(() => {
+    if (band.mode !== MODES.BLE) return;
+    startBackgroundWatch();
+  }, [band.mode]);
 
   // ---- U3.4 battery: one alert per threshold crossing --------------------
   const battLatch = useRef({ low: false, dark: false });

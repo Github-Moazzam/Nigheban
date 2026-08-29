@@ -35,7 +35,10 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.VIBRATE",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION"
       ]
     },
     "plugins": [
@@ -74,6 +77,7 @@
         }
       ],
       "./plugins/withNigehbanAndroid",
+      "./plugins/withNativeModuleGuard",
       "expo-font",
       "expo-secure-store",
       "expo-task-manager",
@@ -84,12 +88,12 @@
         }
       ]
     ],
+    "owner": "srk1122",
+    "scheme": "nigehban",
     "extra": {
       "eas": {
-        "projectId": "ac29701a-e36d-4e87-97a3-86d7b4fa035f"
+        "projectId": "c9294627-3ef6-4ff8-91b6-9ecf73bad0c0"
       }
-    },
-    "owner": "moaxxx",
-    "scheme": "nigehban"
+    }
   }
 }

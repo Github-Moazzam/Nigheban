@@ -37,6 +37,37 @@ export function alarmCapability() {
 }
 
 /**
+ * Whether Android will still honour a full-screen intent from this app.
+ *
+ * Since Android 14 the `USE_FULL_SCREEN_INTENT` permission is no longer granted
+ * at install to anything that is not a calling or alarm-clock app. Declaring it
+ * in the manifest is necessary and no longer sufficient. When it is missing,
+ * `setFullScreenIntent` does not fail -- it quietly degrades to an ordinary
+ * heads-up notification, which looks like the alarm simply not working.
+ *
+ * Returns true/false, or null where the question does not apply (Android 13 and
+ * below, Expo Go, web) so a caller can tell "not allowed" from "not asked".
+ */
+export async function fullScreenIntentAllowed() {
+  if (!NativeAlarm?.canUseFullScreenIntent) return null;
+  try {
+    return await NativeAlarm.canUseFullScreenIntent();
+  } catch {
+    return null;
+  }
+}
+
+/** Open the one Settings page that can grant the above. */
+export async function openFullScreenIntentSettings() {
+  if (!NativeAlarm?.openFullScreenIntentSettings) return false;
+  try {
+    return await NativeAlarm.openFullScreenIntentSettings();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Take over the screen for an incoming severity-4-or-worse alert.
  *
  * `alert` is the row the server sent, straight off the socket or rebuilt from a

@@ -40,6 +40,7 @@ from psycopg.rows import dict_row
 from dotenv import load_dotenv
 load_dotenv()
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from collections import defaultdict, deque
@@ -1085,6 +1086,18 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
                     dead.append(token)
             kind = "silent" if silent else "visible"
             print(f"  [expo push/{kind}] {ok}/{len(sent_tokens)} accepted by Expo")
+        except urllib.error.HTTPError as e:
+            # "HTTP Error 400: Bad Request" on its own says nothing, and this is
+            # the one failure mode where Expo does explain itself: a 4xx body is
+            # JSON carrying a `code` and a `message` that name the actual
+            # problem. PUSH_TOO_MANY_EXPERIENCE_IDS -- push tokens minted by two
+            # different EAS projects batched into one request -- is the usual
+            # one after the project id changes, and it is invisible without this.
+            try:
+                body = e.read().decode('utf-8', 'replace')
+            except Exception:
+                body = '(no body)'
+            print(f"  [expo push error] HTTP {e.code} {e.reason} -- {body[:600]}")
         except Exception as e:
             print(f"  [expo push error] {e}")
 
