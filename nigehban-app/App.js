@@ -24,7 +24,8 @@ import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
 import { lastKnownFix, useHeartbeat, usePresence } from './src/watch';
-import { startBackgroundWatch, stopBackgroundWatch } from './src/bgService';
+import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
+import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
 import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
@@ -112,7 +113,9 @@ function Main() {
       if (launched != null) setPendingAlertId(launched);
       const s = await loadSession();
       setSession(s);
-      if (s) startBackgroundWatch();
+      // The foreground service is no longer started here. Signing in is not
+      // by itself a reason to hold a process alive; holding a band link or
+      // being armed is. The effect below owns that and runs on this launch.
       setBooting(false);
     })();
   }, []);
@@ -364,16 +367,53 @@ function Main() {
 
   const band = useBandLink(onBandEvent);
 
-  // The BLE link lives in this app's Android process, so when the process dies
-  // the GATT connection dies with it and the band drops back to advertising --
-  // the blinking light. The foreground service is the only thing that keeps the
-  // process alive once the app is off screen or swiped out of Recents, so it
-  // has to be up whenever a real band is the chosen radio, not only once
-  // somebody is signed in. Starting it twice is a no-op (bgService checks).
+  // Two separate things need this app's Android process alive, and the service
+  // is the only thing that keeps it alive once the app is off screen or swiped
+  // out of Recents. Either one on its own is enough to justify it:
+  //
+  //   1. A linked band. The GATT link belongs to the process, so when the
+  //      process dies the band drops back to advertising -- the blinking light.
+  //   2. Being armed at all. useHeartbeat only beats while mode != 'idle', and
+  //      the server's watchdog pages the whole family with watch_lost after
+  //      BEAT_LOST_S of silence in exactly that state. Kill the process of an
+  //      armed phone and it reports its own wearer missing. That applies to
+  //      virtual mode especially, where the phone *is* the band and there is no
+  //      stored band id to find.
+  //
+  // Condition 2 is why this cannot simply ask "does this phone want a band".
+  //
+  // What must *not* be used is the live connection. A band out of range is
+  // exactly when band.js's retry loop needs the process alive; stopping the
+  // service there would kill the thing doing the reconnecting. band.status is
+  // in the dependency list as a trigger only -- it changes at both moments the
+  // stored flag does (connected when the id is written, idle when DISCONNECT
+  // clears it), which re-runs the read without band.js having to know the
+  // service exists at all.
   useEffect(() => {
-    if (band.mode !== MODES.BLE) return;
-    startBackgroundWatch();
-  }, [band.mode]);
+    // Before the stored mode loads every launch looks like virtual mode -- the
+    // same trap bandLink.js's autoLink had. Acting on that default would stop
+    // the service for a moment on every launch of a band-wearer's phone.
+    if (!band.modeLoaded) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      // Armed is decisive on its own and needs no storage read, so it is
+      // answered first: there is no band state that makes it safe to let an
+      // armed phone's process die.
+      if (watchMode !== 'idle') { syncBackgroundWatch(!!session); return; }
+
+      // Idle from here. Only a band the user still wants keeps the service up;
+      // DISCONNECT clears that id, and virtual mode has none to begin with.
+      if (band.mode !== MODES.BLE) { syncBackgroundWatch(false); return; }
+
+      const wanted = await wantsBand();
+      if (cancelled) return;
+      // null means the read failed. Passed through so syncBackgroundWatch
+      // leaves the service alone rather than tearing down a live link over it.
+      syncBackgroundWatch(wanted === null ? null : (!!session && wanted));
+    })();
+    return () => { cancelled = true; };
+  }, [session, band.status, band.mode, band.modeLoaded, watchMode]);
 
   // ---- U3.4 battery: one alert per threshold crossing --------------------
   const battLatch = useRef({ low: false, dark: false });

@@ -1,6 +1,6 @@
 # Branch notes — `fix/ble-close-app-bug`
 
-**Last updated:** 29 Aug 2026 · **Base:** `main` @ `66f09a1` · **Head:** `d0c0e0c`
+**Last updated:** 29 Aug 2026 · **Base:** `main` @ `66f09a1` · **Head:** `1f14d48`
 
 The one sentence this branch exists for:
 
@@ -27,6 +27,8 @@ changed, why, what the actual defect was in each case, and what is still open.
 | `7b40286` | Android 14 full-screen-intent permission surfaced in Setup | branch only |
 | `9cb366c` | Expo push error body logged by the server | branch only |
 | `d0c0e0c` | `scripts/db.py` | branch only |
+| `6474484` | Short-alarm-on-locked-screen fix (`App.js`, `NigehbanAlarmModule.kt`) | branch only — **not yet written up below** |
+| `1f14d48` | `.gitignore` update | branch only |
 
 The first two commits were made on `main` directly before the branch was cut, so
 `git log main..HEAD` does not show them — but they are the first half of this
@@ -299,12 +301,19 @@ where Expo does explain itself: a 4xx body is JSON carrying a `code` and a
       `consumeLaunchAlertId`. `withNativeModuleGuard` also ran and passed.
 - [x] **Setup → TEST THE LOCK-SCREEN ALARM** — siren heard on device.
 - [x] **Full-screen permission granted** on the Android 14+ test phone.
-- [ ] **Verify the killed-app path on hardware.** This is the only one left, and
-      nothing above proves it: every box ticked here was passing *while* a real
-      SOS to a closed app still produced one plain notification. That was the
-      `dataString` defect in §6.1, and the fix (`c79894d`) has not yet been in a
-      build. Swipe the app out of Recents, lock the phone, fire an SOS from
-      another account, expect the takeover — not a notification.
+- [x] **Verify the killed-app path on hardware.** **Observed 29 Aug 2026.** App
+      swiped out of Recents, phone locked, a real SOS fired from a second phone
+      on a different account — the full-screen takeover came up with the siren,
+      not a plain notification.
+
+      This was the only box in this section that could catch the defect it was
+      written for: every *other* box here was passing while a real SOS to a
+      closed app still produced one silent notification. That it now takes over
+      means `c79894d` is in the installed build and the whole chain holds end to
+      end — server → Expo → FCM → headless task → `extractAlert` parsing
+      `dataString` → native alarm.
+
+**§7.1 is now clear.** Everything remaining on this branch is §7.2–§7.5.
 
 ### 7.2 Push tokens after the account move (§5)
 

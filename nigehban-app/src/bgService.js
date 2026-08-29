@@ -96,6 +96,42 @@ export async function startBackgroundWatch() {
 }
 
 /**
+ * Bring the service in line with whether this phone is acting as a safety
+ * device right now.
+ *
+ * It used to be tied to "is someone signed in", which is the wrong question --
+ * a family member watching from across town got a permanent service, a sticky
+ * notification and the ACCESS_BACKGROUND_LOCATION prompt for nothing, since
+ * their emergencies arrive by push and push works with the app dead.
+ *
+ * "Does this phone want a band" is also the wrong question, and more
+ * dangerously so: an armed phone in virtual mode has no band at all, and its
+ * heartbeat is the only thing standing between it and the server telling the
+ * whole family its wearer has gone silent. App.js owns that decision; see the
+ * effect there for both conditions.
+ *
+ * `shouldRun` is deliberately a strict tri-state rather than anything truthy:
+ *
+ *   true  -- this phone is holding a link or is armed; service up
+ *   false -- neither; service down
+ *   null  -- could not tell (see band.js wantsBand); change nothing
+ *
+ * The null case is the one that matters. Treating "don't know" as false would
+ * stop the service, kill the process and drop a live BLE link on nothing worse
+ * than a transient AsyncStorage error. Leaving a service up one cycle too long
+ * costs a notification; taking it down wrongly costs the emergency path, so
+ * this fails in the first direction on purpose.
+ *
+ * Idempotent: both start and stop already check the current state, so calling
+ * this on every render pass or status change is free.
+ */
+export async function syncBackgroundWatch(shouldRun) {
+  if (Platform.OS !== 'android') return false;
+  if (shouldRun === null || shouldRun === undefined) return false;
+  return shouldRun ? startBackgroundWatch() : stopBackgroundWatch();
+}
+
+/**
  * Is the foreground service actually running right now? Used by the Setup
  * screen so "is this working" can be answered without a new build.
  */
