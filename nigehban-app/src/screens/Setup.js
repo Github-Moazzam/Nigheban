@@ -6,7 +6,10 @@ import {
   backgroundWatchDiagnostics, isBackgroundWatchRunning, startBackgroundWatch,
 } from '../bgService';
 import { backgroundNotificationDiagnostics } from '../bgNotifications';
-import { alarmCapability, presentAlarm, stopAlarm } from '../alarm';
+import {
+  alarmCapability, fullScreenIntentAllowed, openFullScreenIntentSettings,
+  presentAlarm, stopAlarm,
+} from '../alarm';
 import { DEFAULT_CHANNEL_ID, pushDiagnostics, registerPushToken } from '../notifications';
 import { C, S, T } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Label, Txt } from '../ui';
@@ -131,6 +134,7 @@ export default function Setup({ onDone, session }) {
     bgModules: null, bgRunning: null, bgError: null,
     pushToken: null, pushError: null, pushRegistered: false, testSent: false,
     alarmLevel: null, alarmReason: null, alarmError: null, bgNotifRegistered: null,
+    fsiAllowed: null,
     alarmTesting: false,
   });
   const [diagBusy, setDiagBusy] = useState(false);
@@ -156,6 +160,7 @@ export default function Setup({ onDone, session }) {
     const push = pushDiagnostics();
     const alarm = alarmCapability();
     const bgNotif = backgroundNotificationDiagnostics();
+    const fsiAllowed = await fullScreenIntentAllowed();
     setDiag((d) => ({
       ...d,
       bgModules: bg.modulesLoaded,
@@ -166,6 +171,7 @@ export default function Setup({ onDone, session }) {
       pushRegistered: push.registered,
       alarmLevel: alarm.level,
       alarmReason: alarm.reason,
+      fsiAllowed,
       alarmError: alarm.lastError || bgNotif.lastError,
       bgNotifRegistered: bgNotif.registered,
     }));
@@ -184,6 +190,21 @@ export default function Setup({ onDone, session }) {
     if (!session) return;
     setDiagBusy(true);
     await registerPushToken(session);
+    await refreshDiag();
+    setDiagBusy(false);
+  };
+
+  /**
+   * Android 14 stopped granting USE_FULL_SCREEN_INTENT at install to anything
+   * that is not a calling or alarm-clock app, and there is no runtime prompt
+   * for it -- only this Settings page. Declaring the permission in the manifest
+   * is now necessary and not sufficient, and when it is missing the takeover
+   * degrades to an ordinary heads-up notification without erroring, which is
+   * indistinguishable from the alarm simply not working.
+   */
+  const runOpenFullScreenSettings = async () => {
+    setDiagBusy(true);
+    await openFullScreenIntentSettings();
     await refreshDiag();
     setDiagBusy(false);
   };
@@ -432,6 +453,31 @@ export default function Setup({ onDone, session }) {
             </View>
             {diag.alarmReason ? (
               <Text style={[T.meta, { color: C.faint }]}>{diag.alarmReason}</Text>
+            ) : null}
+
+            {/* Android 14+ only. Null means the question does not apply -- below
+                14 the permission is granted at install, and Expo Go has no
+                native module to ask -- and neither is worth a row. `false` is
+                worth a loud one: everything else here can read green while the
+                takeover is quietly downgraded to a heads-up notification. */}
+            {diag.fsiAllowed === false ? (
+              <>
+                <View style={s.diagRow}>
+                  <Text style={[T.meta, { color: C.dim }]}>Full-screen permission</Text>
+                  <Chip text="blocked" tone={C.red} icon="x" />
+                </View>
+                <Text style={[T.meta, { color: C.faint }]}>
+                  Android is holding the takeover back to an ordinary notification.
+                  Nothing else here can tell you that.
+                </Text>
+                <Button title="ALLOW FULL-SCREEN ALERTS" tone={C.red}
+                        disabled={diagBusy} onPress={runOpenFullScreenSettings} />
+              </>
+            ) : diag.fsiAllowed === true ? (
+              <View style={s.diagRow}>
+                <Text style={[T.meta, { color: C.dim }]}>Full-screen permission</Text>
+                <Chip text="granted" tone={C.green} icon="check" />
+              </View>
             ) : null}
 
             <View style={s.diagRow}>
