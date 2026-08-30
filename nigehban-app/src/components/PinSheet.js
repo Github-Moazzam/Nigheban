@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, Vibration, View } from 'react-native';
+import {
+  ActivityIndicator, Modal, Pressable, StyleSheet, Text, Vibration, View,
+} from 'react-native';
 import { setPin, verifyPin } from '../security';
 import { C, R, S, T } from '../theme';
 import { Icon, Txt } from '../ui';
@@ -23,9 +25,16 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
   const [first, setFirst] = useState(null);      // 'set' mode: the first pass
   const [error, setError] = useState(null);
   const [tries, setTries] = useState(0);
+  // The PIN lives in the keystore, and reading it is not instant on every
+  // phone. Without this the fourth dot fills and the sheet simply sits there,
+  // which on the screen that stands between somebody and disarming an alarm
+  // is the worst possible moment to look broken.
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
-    if (!visible) { setEntry(''); setFirst(null); setError(null); setTries(0); }
+    if (!visible) {
+      setEntry(''); setFirst(null); setError(null); setTries(0); setChecking(false);
+    }
   }, [visible]);
 
   const locked = tries >= 3;
@@ -51,13 +60,18 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
   };
 
   const press = (k) => {
-    if (locked) return;
+    if (locked || checking) return;
     setError(null);
     if (k === 'del') { setEntry((e) => e.slice(0, -1)); return; }
     if (!k || entry.length >= 4) return;
     const next = entry + k;
     setEntry(next);
-    if (next.length === 4) setTimeout(() => commit(next), 90);
+    if (next.length === 4) {
+      setChecking(true);
+      setTimeout(async () => {
+        try { await commit(next); } finally { setChecking(false); }
+      }, 90);
+    }
   };
 
   const heading = title
@@ -86,7 +100,14 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
             ))}
           </View>
 
-          {error ? (
+          {checking ? (
+            <View style={s.errRow}>
+              <ActivityIndicator size="small" color={C.green} />
+              <Text style={[T.meta, { color: C.dim }]}>
+                {mode === 'set' ? 'Saving…' : 'Checking…'}
+              </Text>
+            </View>
+          ) : error ? (
             <View style={s.errRow}>
               <Icon name="alert-circle" size={14} color={C.red} />
               <Text style={[T.meta, { color: C.red }]}>{error}</Text>
@@ -97,15 +118,15 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
             {KEYS.map((k, i) => (
               <Pressable
                 key={i}
-                disabled={!k || locked}
+                disabled={!k || locked || checking}
                 onPress={() => press(k)}
                 accessibilityRole="button"
                 accessibilityLabel={k === 'del' ? 'Delete' : k || undefined}
                 style={({ pressed }) => [
                   s.key,
                   !k && { backgroundColor: 'transparent' },
-                  pressed && k && !locked && { backgroundColor: C.line },
-                  locked && k && { opacity: 0.4 },
+                  pressed && k && !locked && !checking && { backgroundColor: C.line },
+                  (locked || checking) && k && { opacity: 0.4 },
                 ]}
               >
                 {k === 'del'

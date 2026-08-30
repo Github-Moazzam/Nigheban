@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
+  ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import CheckinBanner from '../components/CheckinBanner';
 import HighAlertPanel from '../components/HighAlertPanel';
@@ -36,6 +36,9 @@ export default function Home({
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [setupLeft, setSetupLeft] = useState(0);
+  // The band's controls all cross a radio link. `bandBusy` holds which one is
+  // waiting on it, so the press is answered on the button that was pressed.
+  const [bandBusy, setBandBusy] = useState(null);
 
   // A safety app that has been denied notifications is a safety app that does
   // not work, and nothing else on this screen would say so.
@@ -76,6 +79,13 @@ export default function Home({
       setBusy(false);
     }
   }, [fix, onRaise]);
+
+  const runBand = useCallback(async (key, fn) => {
+    if (bandBusy) return;
+    setBandBusy(key);
+    try { await fn?.(); } catch { /* the chip above reports the link state */ }
+    finally { setBandBusy(null); }
+  }, [bandBusy]);
 
   const bandTone =
     band.status === 'connected' ? C.green
@@ -148,10 +158,14 @@ export default function Home({
         >
           {({ pressed }) => (
             <>
-              <Icon name="alert-octagon" size={30} color={pressed ? C.bg : C.red} />
+              {busy ? (
+                <ActivityIndicator size="large" color={C.red} />
+              ) : (
+                <Icon name="alert-octagon" size={30} color={pressed ? C.bg : C.red} />
+              )}
               <Text style={[s.sosGlyph, pressed && { color: C.bg }]}>SOS</Text>
               <Text style={[s.sosHint, pressed && { color: C.bg }]}>
-                Press and hold for a second
+                {busy ? 'Sending…' : 'Press and hold for a second'}
               </Text>
             </>
           )}
@@ -209,10 +223,15 @@ export default function Home({
           <View style={s.btnRow}>
             <View style={{ flex: 1 }}>
               <Button title="BUZZ IT" icon="bell" tone={C.dim}
-                      onPress={() => band.send({ c: 'buzz', n: 2 })} />
+                      loading={bandBusy === 'buzz'}
+                      disabled={!!bandBusy && bandBusy !== 'buzz'}
+                      onPress={() => runBand('buzz', () => band.send({ c: 'buzz', n: 2 }))} />
             </View>
             <View style={{ flex: 1 }}>
-              <Button title="DISCONNECT" icon="x" tone={C.dim} onPress={band.disconnect} />
+              <Button title="DISCONNECT" icon="x" tone={C.dim}
+                      loading={bandBusy === 'disconnect'}
+                      disabled={!!bandBusy && bandBusy !== 'disconnect'}
+                      onPress={() => runBand('disconnect', band.disconnect)} />
             </View>
           </View>
         ) : band.status === 'no-permission' ? (
@@ -223,7 +242,12 @@ export default function Home({
             <Button title="FIX THIS IN SETUP" icon="settings" onPress={onOpenSetup} />
           </>
         ) : (
-          <Button title="CONNECT TO BAND" filled icon="bluetooth" onPress={band.connect} />
+          /* Scanning outlives the press by seconds, so the link state is the
+             honest busy signal here -- not the promise `connect` returns. */
+          <Button title="CONNECT TO BAND" filled icon="bluetooth"
+                  loading={bandBusy === 'connect' || band.status === 'scanning'
+                           || band.status === 'connecting'}
+                  onPress={() => runBand('connect', band.connect)} />
         )}
       </Card>
 

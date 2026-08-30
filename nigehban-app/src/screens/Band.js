@@ -244,7 +244,12 @@ export default function Band({ band, serverOnline }) {
               </View>
             </View>
           ) : (
-            <Button title="SCAN FOR THE BAND" filled icon="search" onPress={band.connect} />
+            /* The scan runs for seconds after the press returns, so the link
+               state -- not the promise -- is what this button waits on. */
+            <Button title={band.status === 'connecting' ? 'CONNECTING' : 'SCAN FOR THE BAND'}
+                    filled icon="search"
+                    loading={band.status === 'scanning' || band.status === 'connecting'}
+                    onPress={band.connect} />
           )}
           {band.bleError ? (
             <Banner tone={C.amber} icon="alert-triangle" title="Bluetooth is unavailable">

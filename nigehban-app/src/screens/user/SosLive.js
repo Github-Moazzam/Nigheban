@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { S, T, fmtAgo, fmtCount } from '../../theme';
+import {
+  ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View,
+} from 'react-native';
+import { HIT, S, T, fmtAgo, fmtCount } from '../../theme';
 import { Icon, Txt } from '../../ui';
 import { RU, U } from './kit';
 
@@ -27,9 +29,23 @@ const LEDE_QUEUED = {
  * OFFLINE QUEUE: when deliveryStatus is 'queued', the screen shows an amber
  * banner explaining that the alert is saved locally. The user is never told
  * their family was alerted when they have not been — that lie could cost a life.
+ *
+ * A WAY OUT THAT IS NOT A CANCELLATION: `onMinimise` hands the rest of the app
+ * back without touching the alert. It exists because the two controls this
+ * screen used to offer were "stand down" and nothing, and somebody who needs
+ * to look up an address, send a message in her own words, or check what her
+ * family has already been told should not have to end her own emergency to do
+ * it. The word on the button is never "close" or "dismiss" for the same
+ * reason: what is being put away is the screen, not the SOS.
  */
-export default function SosLive({ alert, deliveredTo, deliveryStatus, responders = [], onStandDown }) {
+export default function SosLive({
+  alert, deliveredTo, deliveryStatus, responders = [], onStandDown, onMinimise,
+}) {
   const isQueued = deliveryStatus === 'queued';
+  // Standing down goes to the server and does not come back for a moment. On
+  // the one screen where nobody is going to wait patiently, that moment has to
+  // be visible or the button gets pressed again -- and again.
+  const [standingDown, setStandingDown] = useState(false);
   const [, force] = useState(0);
   useEffect(() => {
     const id = setInterval(() => force((n) => n + 1), 1000);
@@ -46,10 +62,25 @@ export default function SosLive({ alert, deliveredTo, deliveryStatus, responders
 
   return (
     <ScrollView style={s.root} contentContainerStyle={s.content}>
-      <View style={s.badge}>
-        <View style={s.pulse} />
-        <Text style={[T.label, { color: U.red }]}>SOS LIVE</Text>
-        <Text style={[T.label, { color: U.red }]}>{fmtCount(elapsed)}</Text>
+      <View style={s.topRow}>
+        <View style={s.badge}>
+          <View style={s.pulse} />
+          <Text style={[T.label, { color: U.red }]}>SOS LIVE</Text>
+          <Text style={[T.label, { color: U.red }]}>{fmtCount(elapsed)}</Text>
+        </View>
+
+        {onMinimise ? (
+          <Pressable
+            onPress={onMinimise}
+            hitSlop={HIT}
+            accessibilityRole="button"
+            accessibilityLabel="Go back to the app. Your SOS stays live."
+            style={({ pressed }) => [s.back, pressed && { opacity: 0.7 }]}
+          >
+            <Icon name="chevron-left" size={15} color={U.dim} />
+            <Text style={[T.label, { color: U.dim }]}>BACK TO APP</Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <Txt variant="h1" color={U.text} style={s.title}>{lede}</Txt>
@@ -103,14 +134,34 @@ export default function SosLive({ alert, deliveredTo, deliveryStatus, responders
       </View>
 
       <Pressable
-        onPress={() => onStandDown?.(alert.id)}
+        onPress={async () => {
+          if (standingDown) return;
+          setStandingDown(true);
+          try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
+        }}
+        disabled={standingDown}
         accessibilityRole="button"
+        accessibilityState={{ busy: standingDown, disabled: standingDown }}
         accessibilityLabel="I am safe, stand the alert down"
         style={({ pressed }) => [s.standDown, pressed && { opacity: 0.75 }]}
       >
-        <Icon name="shield" size={17} color={U.bg} />
-        <Text style={[T.button, { color: U.bg }]}>I am safe — stand down</Text>
+        {standingDown ? (
+          <ActivityIndicator size="small" color={U.bg} />
+        ) : (
+          <Icon name="shield" size={17} color={U.bg} />
+        )}
+        <Text style={[T.button, { color: U.bg }]}>
+          {standingDown ? 'Standing down…' : 'I am safe — stand down'}
+        </Text>
       </Pressable>
+
+      {onMinimise ? (
+        <Text style={[T.meta, s.foot]}>
+          Standing down is the only thing that ends this. Going back to the app
+          does not: the alert keeps running, your family keeps being told, and a
+          red bar at the top of every screen brings you straight back here.
+        </Text>
+      ) : null}
     </ScrollView>
   );
 }
@@ -119,11 +170,24 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: U.bg },
   content: { padding: S.lg, paddingTop: S.xxl, gap: S.md },
 
+  topRow: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', gap: S.md,
+  },
   badge: {
     flexDirection: 'row', alignItems: 'center', gap: S.sm,
     alignSelf: 'flex-start', backgroundColor: U.redSoft,
     paddingHorizontal: S.md, paddingVertical: S.sm, borderRadius: RU.pill,
   },
+  /* Quiet, and at the opposite end of the screen from the stand-down button.
+     The two must never be confusable, and a thumb reaching for one must not
+     be able to find the other. */
+  back: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: S.md, paddingVertical: S.sm,
+    borderRadius: RU.pill, backgroundColor: U.card,
+  },
+  foot: { color: U.faint, textAlign: 'center', marginTop: S.sm },
   pulse: { width: 7, height: 7, borderRadius: 4, backgroundColor: U.red },
 
   title: { marginTop: S.md },
