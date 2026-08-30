@@ -14,7 +14,7 @@
  * The state machine lives in state.js and does not need to know about this.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { call, TUNNEL_HEADERS } from './api';
+import { call, loadSession } from './api';
 import { lastKnownFix } from './watch';
 
 const QUEUE_KEY = 'nigehban.alertQueue';
@@ -82,6 +82,11 @@ export async function clearQueue() {
   try { await AsyncStorage.removeItem(QUEUE_KEY); } catch { /* non-fatal */ }
 }
 
+/** How many alerts are still waiting. Cheap enough to call on every wake. */
+export async function pendingCount() {
+  return (await getPending()).length;
+}
+
 // -------------------------------------------------------------- flush ---
 
 /**
@@ -126,4 +131,28 @@ export async function flushQueue(session) {
   }
 
   return { delivered, failed };
+}
+
+/**
+ * The same flush, for a caller with no React tree behind it.
+ *
+ * The app's flush hangs off the WebSocket's rising edge, which only exists
+ * while the UI is mounted. That left the worst case of all unhandled: SOS
+ * pressed in a dead zone, app swiped away, signal returns — and the alert sat
+ * on the phone until somebody thought to open the app, which is not something
+ * a person in trouble is going to do.
+ *
+ * So the Android foreground service's own 60 s tick calls this. It runs
+ * headless, reads the session off disk because there is no `session` prop out
+ * here, and delivers whatever is waiting. Doing nothing when the queue is
+ * empty is the normal case and must stay cheap — it is one AsyncStorage read.
+ */
+export async function flushPending() {
+  const queue = await getPending();
+  if (!queue.length) return { delivered: [], failed: [] };
+
+  const session = await loadSession();
+  if (!session?.token) return { delivered: [], failed: [] };
+
+  return flushQueue(session);
 }

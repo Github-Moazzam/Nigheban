@@ -294,9 +294,13 @@ export default function Family({ session, refreshKey }) {
                   tone={item.online ? C.green : C.faint} />
           </View>
 
+          {/* Virtual is the server's answer now (band_virtual, migration 003).
+              It used to be guessed here as "no band link", which is exactly
+              backwards: a phone standing in for a band reports a link, so this
+              said "no band" for the one case it was written for -- and
+              "connected", with a wristband battery, for the other. */}
           {item.watchState ? (
-            <WatchStatusTile watchState={item.watchState}
-                             isVirtual={!item.watchState.band_link} />
+            <WatchStatusTile watchState={item.watchState} />
           ) : (
             <Text style={[T.meta, { color: C.faint }]}>
               Their watch has not reported yet.

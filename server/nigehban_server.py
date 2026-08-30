@@ -306,6 +306,11 @@ class HeartbeatIn(BaseModel):
     # sends it that way, which is why neither is trusted to imply the other.
     phone_batt: Optional[int] = None
     band_batt: Optional[int] = None
+    # Which kind of band is behind band_link. In virtual mode the phone *is*
+    # the band, so there is no second cell and the family must not be shown
+    # one -- see migration 003. False by default, because a build old enough
+    # not to send this field only ever had a real band to talk about.
+    virtual: bool = False
     lat: Optional[float] = None
     lon: Optional[float] = None
 
@@ -1251,11 +1256,18 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
         # COALESCE on the batteries for the same reason as the position: an
         # older build sends no band_batt at all, and a null from it must not
         # erase a good reading the family is looking at.
-        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, "
-                  "phone_batt=COALESCE(%s,phone_batt), band_batt=COALESCE(%s,band_batt), "
+        #
+        # Virtual mode is the one case where a null *is* the reading: the phone
+        # is the band, there is no second cell, and COALESCE would otherwise
+        # keep showing whatever a real band last said -- for as long as the
+        # account exists. So that case clears the column outright.
+        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, band_virtual=%s, "
+                  "phone_batt=COALESCE(%s,phone_batt), "
+                  "band_batt=CASE WHEN %s THEN NULL ELSE COALESCE(%s,band_batt) END, "
                   "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
                   "lost_notified=FALSE WHERE user_id=%s",
-                  (now, bool(b.band_link), b.phone_batt, b.band_batt,
+                  (now, bool(b.band_link), bool(b.virtual), b.phone_batt,
+                   bool(b.virtual), b.band_batt,
                    b.lat, b.lon, u["id"]))
         # The mode is the server's to hold, not the phone's to declare -- the
         # phone may have been restarted and forgotten. It may only *raise* to
@@ -1289,6 +1301,9 @@ def watch_of(member_id: str, u=Depends(me)):
         "online": HUB.online(member_id),
         "mode": w["mode"] if w else "idle",
         "band_link": bool(w["band_link"]) if w else False,
+        # The family screen has to say which device it is looking at. Without
+        # this it showed "band connected" for a phone standing in for one.
+        "band_virtual": bool(w["band_virtual"]) if w else False,
         "phone_batt": w["phone_batt"] if w else None,
         "band_batt": w["band_batt"] if w else None,
         "last_beat": w["last_beat"] if w else None,
@@ -1435,9 +1450,22 @@ async def sweep_once(now):
     for w in lost:
         # The last known position is the most useful thing there is here: the
         # phone has stopped reporting, so this is where it stopped.
+        #
+        # The wording is the alert. "Watch stopped reporting" reads like a
+        # gadget fault, and that is how a family treats it -- but the watch was
+        # ARMED, which is the one state where going quiet is itself the thing
+        # worth waking someone over. So the note says the three causes the
+        # server can honestly distinguish between (it cannot tell them apart)
+        # and names the one that matters, rather than describing the sensor.
+        silent_s = int(now - w["last_beat"])
+        mins = max(1, round(silent_s / 60))
         await emit_alert(w["user_id"], "watch_lost", source="server",
                          lat=w["last_lat"], lon=w["last_lon"],
-                         note=f"phone silent for {int(now - w['last_beat'])}s while armed")
+                         note=(f"Armed, then went quiet {mins} min ago. "
+                               "The phone lost signal, was switched off, or the app "
+                               "was stopped — Nigehban cannot tell which. "
+                               "The pin is where it last reported. "
+                               "Try calling; if there is no answer, treat this as real."))
 
     LIMIT.sweep()
     return {"missed": len(due), "buzzed": len(buzz), "lost": len(lost)}

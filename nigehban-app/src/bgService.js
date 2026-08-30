@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { flushPending } from './alertQueue';
 
 const TASK_NAME = 'NIGEHBAN_BACKGROUND_WATCH';
 
@@ -27,8 +28,23 @@ if (TaskManager && Location) {
       if (error) {
         console.warn('[bgService] task error', error.message);
       }
-      // No-op beyond the tick itself: the point of this task is the Android
-      // foreground service + wake it creates, not the location payload.
+      // The location payload is still not the point -- the foreground service
+      // and the wake it creates are. But this tick is the only heartbeat the
+      // app has while it is off screen or swiped out of Recents, so it is also
+      // the only chance a queued SOS gets to leave the phone before somebody
+      // opens the app again. An emergency raised in a dead zone must not wait
+      // on the user's attention returning.
+      //
+      // Guarded and silent: an exception thrown out of a headless task takes
+      // the service with it, and the service is what keeps the process alive.
+      try {
+        const { delivered } = await flushPending();
+        if (delivered.length) {
+          console.log(`[bgService] flushed ${delivered.length} queued alert(s) from the background`);
+        }
+      } catch (e) {
+        console.warn('[bgService] background flush failed', e?.message || e);
+      }
     });
   } catch (e) {
     console.warn('[bgService] defineTask failed', e?.message || e);
@@ -77,7 +93,13 @@ export async function startBackgroundWatch() {
       await Location.startLocationUpdatesAsync(TASK_NAME, {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: 60000, // 60 seconds interval
-        distanceInterval: 50, // 50 meters
+        // Zero, not 50 m. Android treats distanceInterval as a *floor* on
+        // movement: with 50 m set, a phone sitting on a table never produces a
+        // single tick, however long the interval. That was harmless while the
+        // task did nothing, and is not now that the queued-SOS flush rides on
+        // it -- somebody hiding still in a dead zone is precisely the person
+        // whose alert must go out the moment signal returns.
+        distanceInterval: 0,
         deferredUpdatesInterval: 60000,
         foregroundService: {
           notificationTitle: 'Nigehban is watching',

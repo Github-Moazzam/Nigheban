@@ -174,9 +174,18 @@ export default function Home({
         </View>
 
         <View style={s.stats}>
+          {/* In virtual mode `band.battery` is this phone read through
+              expo-battery -- the stand-in for the band's ADC pin. Showing it
+              under "Band battery" reported a wristband cell that does not
+              exist, which is the same conflation migration 002 fixed on the
+              family side. There is no band here, so the honest value is N/A;
+              the phone's own charge is on the banner above. */}
           <Stat label="Band battery" icon="battery"
-                value={band.battery != null ? `${Math.round(band.battery)}%` : '—'}
-                tone={band.battery == null ? C.dim
+                value={band.status === 'virtual' ? 'N/A'
+                       : band.battery != null ? `${Math.round(band.battery)}%` : '—'}
+                sub={band.status === 'virtual' ? 'phone is the band' : undefined}
+                tone={band.status === 'virtual' ? C.dim
+                      : band.battery == null ? C.dim
                       : band.battery <= 5 ? C.red
                       : band.battery <= 20 ? C.amber : C.text} />
           <Stat label="Anti-snatch" icon={band.armed ? 'lock' : 'unlock'}

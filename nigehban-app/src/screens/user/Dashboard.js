@@ -2,10 +2,12 @@ import * as Clipboard from 'expo-clipboard';
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View,
+  ActivityIndicator, AppState, FlatList, Pressable, RefreshControl, StyleSheet,
+  Text, View,
 } from 'react-native';
 import { call } from '../../api';
 import PinSheet from '../../components/PinSheet';
+import { askPermission, fullScreenIntentState } from '../../permissions';
 import { hasPin } from '../../security';
 import { HIT, S, T, fmtAgo } from '../../theme';
 import { Icon, Txt } from '../../ui';
@@ -37,6 +39,9 @@ export default function Dashboard({
   const [adding, setAdding] = useState(false);
   const [fix, setFix] = useState(null);
   const [locState, setLocState] = useState('asking');   // asking|ok|denied|error
+  // true | false | null, where null is "the question does not apply here"
+  // (Android 13 and below, Expo Go, web) and must show nothing at all.
+  const [fsiAllowed, setFsiAllowed] = useState(null);
 
   // Asked once, then watched, so an SOS never waits on a GPS lock. Every fix
   // is handed up to App.js as well: that is the copy that rides along on an
@@ -84,6 +89,19 @@ export default function Dashboard({
   }, [session]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  // Re-read on every return to the app, because the only way this can change
+  // is somebody going to Settings and coming back -- there is no callback and
+  // no promise to await.
+  useEffect(() => {
+    let alive = true;
+    const read = () => { fullScreenIntentState().then((v) => { if (alive) setFsiAllowed(v); }); };
+    read();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') read();
+    });
+    return () => { alive = false; sub.remove(); };
+  }, []);
 
   const copyCode = async () => {
     await Clipboard.setStringAsync(session.user_id);
@@ -162,6 +180,29 @@ export default function Dashboard({
             Below 5% the watch stops being able to help.
           </Text>
         </View>
+      ) : null}
+
+      {/* The one permission with no prompt behind it.
+          Since Android 14, USE_FULL_SCREEN_INTENT is not granted at install to
+          anything that is not a phone or an alarm clock, and when it is missing
+          the lock-screen takeover quietly becomes an ordinary notification --
+          no error, nothing in the log, just a family emergency that waits in
+          the tray until somebody happens to look. There is no dialog to raise,
+          only a Settings page, so this asks in place. */}
+      {fsiAllowed === false ? (
+        <Pressable
+          onPress={async () => { await askPermission('fsi'); }}
+          accessibilityRole="button"
+          accessibilityLabel="Allow Nigehban to take over the screen for emergencies"
+          style={({ pressed }) => [s.invite, pressed && { opacity: 0.75 }]}
+        >
+          <Icon name="phone-incoming" size={16} color={U.amber} />
+          <Text style={[T.bodyMed, { color: U.amber, flex: 1 }]}>
+            Emergencies cannot ring through a locked screen yet — allow full-screen
+            alerts
+          </Text>
+          <Icon name="chevron-right" size={16} color={U.amber} />
+        </Pressable>
       ) : null}
 
       {/* Somebody asked to be family. Without this the request is invisible
@@ -495,7 +536,13 @@ function MemberCard({ member, session }) {
   // band's now rides on the BAND cell, so neither can be read as the other.
   const batt = w.phone_batt != null ? `${Math.round(w.phone_batt)}%` : '—';
   const linked = !!w.band_link;
+  // Virtual mode has no second cell at all, so this cell must say so rather
+  // than show the phone's own charge a second time under a band's name.
+  const virtual = !!w.band_virtual;
   const bandBatt = w.band_batt != null ? `${Math.round(w.band_batt)}%` : null;
+  const bandValue = virtual ? 'Phone as band'
+                  : linked ? (bandBatt ? `Linked · ${bandBatt}` : 'Linked')
+                  : 'None';
 
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -542,9 +589,12 @@ function MemberCard({ member, session }) {
           <Icon name="radio" size={15} color={U.faint} />
           <View style={{ flex: 1 }}>
             <Text style={[T.label, { color: U.faint }]}>BAND</Text>
-            <Text style={[T.number, { color: linked ? U.text : U.faint }]}>
-              {linked ? (bandBatt ? `Linked · ${bandBatt}` : 'Linked') : 'None'}
+            <Text style={[T.number, { color: linked && !virtual ? U.text : U.faint }]}>
+              {bandValue}
             </Text>
+            {virtual ? (
+              <Text style={[T.meta, { color: U.faint }]}>Band battery N/A</Text>
+            ) : null}
           </View>
           <Bars active={linked} />
         </View>
