@@ -6,6 +6,9 @@ requests>=2.31.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 psycopg[binary]>=3.1.0
+# Pooling is not optional against Supabase: session mode caps the whole
+# project at 15 client connections. See the db() comment in the server.
+psycopg_pool>=3.2.0
 python-dotenv>=1.0.0
 
 # Needed by nigehban_bridge.py and tests/test_sockets.py
