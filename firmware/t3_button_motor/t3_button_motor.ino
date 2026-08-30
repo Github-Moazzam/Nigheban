@@ -100,7 +100,7 @@ void loop() {
     if (!hit1 && held >= HOLD_1_MS) {
       hit1 = true;
       Serial.println(F("  3 s crossed"));
-      buzz(120);
+      buzz(1500);
     }
     if (!hit2 && held >= HOLD_2_MS) {
       hit2 = true;

@@ -1,9 +1,9 @@
 // One icon family, imported by path so the bundle carries Feather alone
 // rather than every set @expo/vector-icons ships.
 import Feather from '@expo/vector-icons/Feather';
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
-  ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View,
+  ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { C, F, HIT, R, S, T, toneSoft } from './theme';
 
@@ -235,6 +235,80 @@ export function ProgressBar({ value = 0, tone = C.green, height = 4 }) {
           accessibilityRole="progressbar"
           accessibilityValue={{ min: 0, max: 100, now: Math.round(pct) }}>
       <View style={{ width: `${pct}%`, height: '100%', backgroundColor: tone }} />
+    </View>
+  );
+}
+
+// ----------------------------------------------------------- skeleton ---
+/**
+ * A block standing in for a value that has not arrived yet.
+ *
+ * Every skeleton in the app breathes on ONE shared driver, so a screen full of
+ * them reads as a single surface rather than a dozen unsynchronised blinks --
+ * and so twenty placeholders still cost one animation. The loop is started by
+ * the first skeleton mounted and stopped by the last one unmounted; nothing
+ * animates once the data is on screen.
+ *
+ * Opacity only, on the native driver. A shimmer driven from JS is the first
+ * thing to stutter on the cheap phone this app is built for, and a stuttering
+ * placeholder reads as a hung app -- the opposite of what it is there to say.
+ *
+ * Skeletons are invisible to screen readers; `SkeletonGroup` says "Loading"
+ * once, which is the entire content of a loading screen as far as a screen
+ * reader is concerned.
+ */
+const pulse = new Animated.Value(0);
+let pulseUsers = 0;
+let pulseLoop = null;
+
+function beginPulse() {
+  pulseUsers += 1;
+  if (pulseLoop) return;
+  const leg = (toValue) => Animated.timing(pulse, {
+    toValue, duration: 620, easing: Easing.inOut(Easing.quad), useNativeDriver: true,
+  });
+  pulseLoop = Animated.loop(Animated.sequence([leg(1), leg(0)]));
+  pulseLoop.start();
+}
+
+function endPulse() {
+  pulseUsers = Math.max(0, pulseUsers - 1);
+  if (pulseUsers > 0) return;
+  // Stopped where it stands, not reset. The node is native-driven, and the
+  // next skeleton to mount simply animates on from wherever this left it --
+  // which nobody can see, because by definition none are on screen.
+  pulseLoop?.stop();
+  pulseLoop = null;
+}
+
+const pulseOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.85] });
+
+export function Skeleton({
+  width = '100%', height = 12, radius = R.chip, color = C.raised, style,
+}) {
+  useEffect(() => { beginPulse(); return endPulse; }, []);
+  return (
+    <Animated.View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[
+        { width, height, borderRadius: radius, backgroundColor: color, opacity: pulseOpacity },
+        style,
+      ]}
+    />
+  );
+}
+
+/** Wraps a set of placeholders so the screen announces itself once, not N times. */
+export function SkeletonGroup({ label = 'Loading', gap = S.md, children, style }) {
+  return (
+    <View
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={label}
+      style={[{ gap }, style]}
+    >
+      {children}
     </View>
   );
 }

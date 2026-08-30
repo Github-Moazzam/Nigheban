@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View,
+} from 'react-native';
 import { MODES } from '../../bandLink';
 import PinSheet from '../../components/PinSheet';
 import {
@@ -8,7 +10,7 @@ import {
 } from '../../permissions';
 import { clearPin, hasPin } from '../../security';
 import { S, T, fmtAgo } from '../../theme';
-import { Icon, Txt } from '../../ui';
+import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { usePhoneBattery } from '../../watch';
 import { RU, U, rowStyles as r } from './kit';
 
@@ -39,13 +41,26 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   const phoneBatt = usePhoneBattery();
 
   const [pinSet, setPinSet] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
   const [sheet, setSheet] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  // Which control is mid-flight. One at a time is the truth here: every one of
+  // these hands off to Android or to the band, and both take long enough that
+  // a button with no answer on it reads as a button that did nothing.
+  const [pending, setPending] = useState(null);   // 'connect' | 'buzz' | …
 
   const refreshPin = useCallback(async () => setPinSet(await hasPin()), []);
   useEffect(() => { refreshPin(); }, [refreshPin]);
 
   const [perm, setPerm] = useState({ notif: null, loc: null, bg: null, fsi: null });
-  const refreshPerm = useCallback(async () => setPerm(await readPermissions()), []);
+  // Nothing is known until the first read comes back, and "not granted" is the
+  // wrong thing to draw in the meantime -- it puts an amber ladder in front of
+  // somebody whose phone is already set up correctly.
+  const [permLoading, setPermLoading] = useState(true);
+  const [asking, setAsking] = useState(null);     // the rung being asked for
+  const refreshPerm = useCallback(async () => {
+    try { setPerm(await readPermissions()); } finally { setPermLoading(false); }
+  }, []);
   useEffect(() => { refreshPerm(); }, [refreshPerm]);
 
   // Android hands the answer back through the Settings app, not through the
@@ -58,9 +73,38 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   }, [refreshPerm]);
 
   const askAndRefresh = useCallback(async (key, denied) => {
-    await askPermission(key, denied);
-    refreshPerm();
+    setAsking(key);
+    try {
+      await askPermission(key, denied);
+      await refreshPerm();
+    } finally {
+      setAsking(null);
+    }
   }, [refreshPerm]);
+
+  /** Re-read the ladder on demand, saying so while it happens. */
+  const recheck = useCallback(async () => {
+    setAsking('recheck');
+    try { await refreshPerm(); } finally { setAsking(null); }
+  }, [refreshPerm]);
+
+  /**
+   * Hand off to a Settings page. Android takes a visible moment to swap
+   * activities, and on the phones that need these rows most it takes several.
+   */
+  const openSettingsRow = useCallback(async (key, open) => {
+    setAsking(key);
+    try { await open(); } catch { /* the row stays; there is nothing else to say */ }
+    finally { setAsking(null); }
+  }, []);
+
+  /** Runs one band control, and marks it as running while it does. */
+  const run = useCallback(async (key, fn) => {
+    if (pending) return;
+    setPending(key);
+    try { await fn?.(); } catch { /* the rows above report the outcome */ }
+    finally { setPending(null); }
+  }, [pending]);
 
   const ladder = ladderRows(perm);
   const permLeft = ladder.filter((row) => row.granted !== true).length;
@@ -89,12 +133,27 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               are not working right now.
             </Text>
             <Pressable
-              onPress={() => band?.connect?.()}
+              onPress={() => run('reconnect', band?.connect)}
+              disabled={!!pending}
               accessibilityRole="button"
-              style={({ pressed }) => [s.noticeBtn, pressed && { opacity: 0.75 }]}
+              accessibilityState={{ busy: pending === 'reconnect', disabled: !!pending }}
+              style={({ pressed }) => [
+                s.noticeBtn,
+                !!pending && { opacity: 0.6 },
+                pressed && { opacity: 0.75 },
+              ]}
             >
-              <Text style={[T.button, { color: U.bg }]}>Reconnect</Text>
-              <Icon name="chevron-right" size={16} color={U.bg} />
+              {pending === 'reconnect' ? (
+                <>
+                  <ActivityIndicator size="small" color={U.bg} />
+                  <Text style={[T.button, { color: U.bg }]}>Reconnecting…</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={[T.button, { color: U.bg }]}>Reconnect</Text>
+                  <Icon name="chevron-right" size={16} color={U.bg} />
+                </>
+              )}
             </Pressable>
           </View>
         ) : null}
@@ -164,31 +223,40 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           {band?.status === 'connected' ? (
             <>
               <Action
-                icon="bell" label="Buzz it"
-                onPress={() => band.send?.({ c: 'buzz', n: 2 })}
+                icon="bell" label="Buzz it" busyLabel="Buzzing…"
+                busy={pending === 'buzz'} disabled={!!pending}
+                onPress={() => run('buzz', () => band.send?.({ c: 'buzz', n: 2 }))}
               />
               <Action
-                icon="x" label="Disconnect"
-                onPress={() => band.disconnect?.()}
+                icon="x" label="Disconnect" busyLabel="Disconnecting…"
+                busy={pending === 'disconnect'} disabled={!!pending}
+                onPress={() => run('disconnect', band.disconnect)}
               />
             </>
           ) : virtual ? (
             <Action
-              icon="bluetooth" label="Connect a real band" filled
-              onPress={() => band.chooseMode?.(MODES.BLE)}
+              icon="bluetooth" label="Connect a real band" busyLabel="Switching…" filled
+              busy={pending === 'mode'} disabled={!!pending}
+              onPress={() => run('mode', () => band.chooseMode?.(MODES.BLE))}
             />
           ) : (
             <>
+              {/* The band's own scan is the busy signal here -- it outlives this
+                  press by seconds, so the link state says "searching" long
+                  after `connect` has returned. */}
               <Action
-                icon="bluetooth" label={band?.status === 'scanning' || band?.status === 'connecting'
-                  ? 'Searching…' : 'Connect to band'}
+                icon="bluetooth" label="Connect to band" busyLabel="Searching…"
                 filled
-                disabled={band?.status === 'scanning' || band?.status === 'connecting'}
-                onPress={() => band?.connect?.()}
+                busy={band?.status === 'scanning' || band?.status === 'connecting'
+                      || pending === 'connect'}
+                disabled={band?.status === 'scanning' || band?.status === 'connecting'
+                          || !!pending}
+                onPress={() => run('connect', band?.connect)}
               />
               <Action
-                icon="smartphone" label="Use this phone instead"
-                onPress={() => band?.chooseMode?.(MODES.VIRTUAL)}
+                icon="smartphone" label="Use this phone instead" busyLabel="Switching…"
+                busy={pending === 'mode'} disabled={!!pending}
+                onPress={() => run('mode', () => band?.chooseMode?.(MODES.VIRTUAL))}
               />
             </>
           )}
@@ -210,11 +278,23 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             fresh account therefore had an app that looked configured and could
             not ring through a locked phone. */}
         <Section title="PHONE PERMISSIONS" tone={U.mint} />
-        {permLeft === 0 ? (
+        {permLoading ? (
+          <View style={s.group}>
+            <SkeletonGroup label="Checking what Android allows" gap={0}>
+              <PermissionRowSkeleton />
+              <View style={r.line} />
+              <PermissionRowSkeleton />
+              <View style={r.line} />
+              <PermissionRowSkeleton />
+            </SkeletonGroup>
+          </View>
+        ) : permLeft === 0 ? (
           <View style={s.group}>
             <Row icon="check-circle" title="Everything Nigehban needs is allowed"
                  sub="Re-check it any time — Android switches these off on its own."
-                 value="Ready" tone={U.mint} onPress={refreshPerm} />
+                 value="Ready" tone={U.mint}
+                 busy={asking === 'recheck'}
+                 onPress={recheck} />
           </View>
         ) : (
           <View style={s.group}>
@@ -230,6 +310,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                        : row.why}
                   value={row.granted === true ? 'Allowed' : 'Tap to allow'}
                   tone={row.granted === true ? U.mint : U.amber}
+                  busy={asking === row.key}
                   onPress={row.blocked ? undefined : () => askAndRefresh(row.key)}
                 />
               </React.Fragment>
@@ -246,7 +327,8 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               ? `${OEM[vendor].label}: ${OEM[vendor].how}`
               : 'Set battery use to unrestricted, or the watch stops when the screen does.'}
             value="Open settings" tone={U.dim}
-            onPress={openBatterySettings}
+            busy={asking === 'battery'}
+            onPress={() => openSettingsRow('battery', openBatterySettings)}
           />
           {vendor ? (
             <>
@@ -255,7 +337,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                 icon="external-link" title="Allow autostart"
                 sub="Your phone's own list, separate from Android's"
                 value="Open" tone={U.dim}
-                onPress={() => openActivity(OEM[vendor].pkg, OEM[vendor].cls)}
+                busy={asking === 'autostart'}
+                onPress={() => openSettingsRow('autostart',
+                  () => openActivity(OEM[vendor].pkg, OEM[vendor].cls))}
               />
             </>
           ) : null}
@@ -275,19 +359,36 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               <View style={r.line} />
               <Row
                 icon="rotate-ccw" title="Remove PIN" tone={U.dim}
-                onPress={async () => { await clearPin(); refreshPin(); }}
+                busy={pinBusy}
+                onPress={async () => {
+                  if (pinBusy) return;
+                  setPinBusy(true);
+                  try { await clearPin(); await refreshPin(); } finally { setPinBusy(false); }
+                }}
               />
             </>
           ) : null}
         </View>
 
         <Pressable
-          onPress={onSignOut}
+          onPress={async () => {
+            if (signingOut) return;
+            setSigningOut(true);
+            try { await onSignOut?.(); } finally { setSigningOut(false); }
+          }}
+          disabled={signingOut}
           accessibilityRole="button"
+          accessibilityState={{ busy: signingOut, disabled: signingOut }}
           style={({ pressed }) => [s.signOut, pressed && { opacity: 0.75 }]}
         >
-          <Icon name="log-out" size={16} color={U.dim} />
-          <Text style={[T.button, { color: U.dim }]}>Sign out</Text>
+          {signingOut ? (
+            <ActivityIndicator size="small" color={U.dim} />
+          ) : (
+            <Icon name="log-out" size={16} color={U.dim} />
+          )}
+          <Text style={[T.button, { color: U.dim }]}>
+            {signingOut ? 'Signing out…' : 'Sign out'}
+          </Text>
         </Pressable>
       </ScrollView>
 
@@ -310,29 +411,46 @@ function Section({ title, tone }) {
   );
 }
 
-/** A band control. Filled is the one thing to do next; the rest are outlines. */
-function Action({ icon, label, onPress, filled, disabled }) {
+/**
+ * A band control. Filled is the one thing to do next; the rest are outlines.
+ *
+ * `busy` swaps the icon for a spinner and the label for `busyLabel`, so the
+ * control says which of these it is doing -- "Searching…" and "Switching…" are
+ * different waits, and a bare spinner makes them look like the same one.
+ */
+function Action({ icon, label, busyLabel, onPress, filled, disabled, busy }) {
+  const fg = filled ? U.bg : U.dim;
+  const inactive = disabled || busy;
   return (
     <Pressable
       onPress={onPress}
-      disabled={disabled}
+      disabled={inactive}
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
+      accessibilityState={{ disabled: !!inactive, busy: !!busy }}
       style={({ pressed }) => [
         s.action,
         { backgroundColor: filled ? U.mint : U.card },
-        disabled && { opacity: 0.5 },
+        inactive && { opacity: 0.5 },
         pressed && { opacity: 0.75 },
       ]}
     >
-      <Icon name={icon} size={16} color={filled ? U.bg : U.dim} />
-      <Text style={[T.button, { color: filled ? U.bg : U.dim }]}>{label}</Text>
+      {busy
+        ? <ActivityIndicator size="small" color={fg} />
+        : <Icon name={icon} size={16} color={fg} />}
+      <Text style={[T.button, { color: fg }]}>
+        {busy ? (busyLabel || label) : label}
+      </Text>
     </Pressable>
   );
 }
 
-function Row({ icon, title, sub, value, tone = U.dim, onPress }) {
+/**
+ * A settings row. `busy` replaces the right-hand value with a spinner: these
+ * rows hand off to Android, which can take a second to put its dialog up, and
+ * a row that does not flinch when tapped gets tapped again.
+ */
+function Row({ icon, title, sub, value, tone = U.dim, onPress, busy }) {
   const body = (
     <View style={r.row}>
       <View style={r.tile}>
@@ -342,17 +460,34 @@ function Row({ icon, title, sub, value, tone = U.dim, onPress }) {
         <Text style={r.title}>{title}</Text>
         {sub ? <Text style={r.sub}>{sub}</Text> : null}
       </View>
-      {value ? <Text style={[T.meta, { color: tone }]}>{value}</Text> : null}
+      {busy ? <ActivityIndicator size="small" color={tone} /> : null}
+      {value && !busy ? <Text style={[T.meta, { color: tone }]}>{value}</Text> : null}
       {onPress ? <Icon name="chevron-right" size={16} color={U.faint} /> : null}
     </View>
   );
 
   if (!onPress) return body;
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={title}
+    <Pressable onPress={onPress} disabled={!!busy}
+               accessibilityRole="button" accessibilityLabel={title}
+               accessibilityState={{ busy: !!busy, disabled: !!busy }}
                style={({ pressed }) => pressed && { opacity: 0.7 }}>
       {body}
     </Pressable>
+  );
+}
+
+/** A settings row before Android has answered what it allows. */
+function PermissionRowSkeleton() {
+  return (
+    <View style={r.row}>
+      <Skeleton width={38} height={38} radius={RU.inner} color={U.raised} />
+      <View style={[r.body, { gap: 7 }]}>
+        <Skeleton width={148} height={14} color={U.raised} />
+        <Skeleton width={210} height={10} color={U.raised} />
+      </View>
+      <Skeleton width={58} height={12} color={U.raised} />
+    </View>
   );
 }
 

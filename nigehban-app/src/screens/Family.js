@@ -1,12 +1,15 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, FlatList, StyleSheet, Text, View,
+  Alert, FlatList, StyleSheet, Text, View,
 } from 'react-native';
 import WatchStatusTile from '../components/WatchStatusTile';
 import { call } from '../api';
-import { C, S, T } from '../theme';
-import { Banner, Button, Card, Chip, Divider, EmptyState, Field, Icon, Label, Txt } from '../ui';
+import { C, R, S, T } from '../theme';
+import {
+  Banner, Button, Card, Chip, Divider, EmptyState, Field, Icon, Label,
+  Skeleton, SkeletonGroup, Txt,
+} from '../ui';
 
 /**
  * FAMILY — pairing, and the consent that has to come before it.
@@ -31,6 +34,11 @@ export default function Family({ session, refreshKey }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
   const [note, setNote] = useState(null);
+  // Everything below this line is a round trip. `pending` is whichever one is
+  // in flight, keyed so that one member's spinner does not appear on another's
+  // card -- these buttons sit inside a repeated row, and a shared boolean
+  // would light all of them at once.
+  const [pending, setPending] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +87,13 @@ export default function Family({ session, refreshKey }) {
     catch { setNote(value); }
   };
 
+  /** One round trip at a time, with the key of whatever is running. */
+  const run = async (key, fn) => {
+    if (pending) return;
+    setPending(key);
+    try { await fn(); } finally { setPending(null); }
+  };
+
   const makePair = async () => {
     setBusy(true); setErr(null); setNote(null);
     try {
@@ -115,18 +130,21 @@ export default function Family({ session, refreshKey }) {
     }
   };
 
-  const answer = async (inv, accept) => {
-    try {
-      await call(session, `/invite/${inv.id}/${accept ? 'accept' : 'decline'}`,
-        { method: 'POST' });
-      setNote(accept
-        ? `${inv.from.name} is now in your family.`
-        : 'Declined. They are not told, and they cannot ask again.');
-      await load();
-    } catch (e) {
-      setErr(e.message);
-    }
-  };
+  const answer = (inv, accept) => run(
+    `inv:${inv.id}:${accept ? 'yes' : 'no'}`,
+    async () => {
+      try {
+        await call(session, `/invite/${inv.id}/${accept ? 'accept' : 'decline'}`,
+          { method: 'POST' });
+        setNote(accept
+          ? `${inv.from.name} is now in your family.`
+          : 'Declined. They are not told, and they cannot ask again.');
+        await load();
+      } catch (e) {
+        setErr(e.message);
+      }
+    },
+  );
 
   const confirmDecline = (inv) => {
     Alert.alert(`Say no to ${inv.from.name}?`,
@@ -139,13 +157,13 @@ export default function Family({ session, refreshKey }) {
     Alert.alert(`Remove ${m.name}?`,
       'You will stop seeing each other\'s alerts.',
       [{ text: 'Cancel', style: 'cancel' },
-       { text: 'Remove', style: 'destructive', onPress: async () => {
+       { text: 'Remove', style: 'destructive', onPress: () => run(`rm:${m.id}`, async () => {
            try { await call(session, `/family/${m.id}`, { method: 'DELETE' }); await load(); }
            catch (e) { setErr(e.message); }
-         } }]);
+         }) }]);
   };
 
-  const checkin = async (m) => {
+  const checkin = (m) => run(`ci:${m.id}`, async () => {
     try {
       const r = await call(session, `/checkin/${m.id}`, { method: 'POST' });
       Alert.alert('Check-in sent',
@@ -155,7 +173,7 @@ export default function Family({ session, refreshKey }) {
     } catch (e) {
       Alert.alert('Could not send', e.message);
     }
-  };
+  });
 
   return (
     <FlatList
@@ -182,10 +200,14 @@ export default function Family({ session, refreshKey }) {
               <View style={s.btnRow}>
                 <View style={{ flex: 1 }}>
                   <Button title="ACCEPT" tone={C.green} filled icon="check"
+                          loading={pending === `inv:${inv.id}:yes`}
+                          disabled={!!pending && pending !== `inv:${inv.id}:yes`}
                           onPress={() => answer(inv, true)} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Button title="SAY NO" tone={C.red} icon="x"
+                          loading={pending === `inv:${inv.id}:no`}
+                          disabled={!!pending && pending !== `inv:${inv.id}:no`}
                           onPress={() => confirmDecline(inv)} />
                 </View>
               </View>
@@ -277,7 +299,12 @@ export default function Family({ session, refreshKey }) {
       }
       ListEmptyComponent={
         loading
-          ? <ActivityIndicator color={C.green} style={{ marginTop: S.xl }} />
+          ? (
+            <SkeletonGroup label="Loading your family">
+              <MemberCardSkeleton />
+              <MemberCardSkeleton />
+            </SkeletonGroup>
+          )
           : <EmptyState icon="users" title="Nobody yet"
                         body="Make a pairing code and read it out to whoever is with you. Until then, an alert has nowhere to go." />
       }
@@ -309,12 +336,38 @@ export default function Family({ session, refreshKey }) {
 
           <Divider />
           <Button title="ASK FOR A CHECK-IN" filled icon="help-circle"
+                  loading={pending === `ci:${item.id}`}
+                  disabled={!!pending && pending !== `ci:${item.id}`}
                   onPress={() => checkin(item)} />
           <Button title="REMOVE FROM FAMILY" tone={C.dim} icon="user-minus"
+                  loading={pending === `rm:${item.id}`}
+                  disabled={!!pending && pending !== `rm:${item.id}`}
                   onPress={() => remove(item)} />
         </Card>
       )}
     />
+  );
+}
+
+/**
+ * A family card with nobody in it yet. Same shape as the real one -- name row,
+ * watch tile, two buttons -- so the header above it does not shift when the
+ * list lands under it.
+ */
+function MemberCardSkeleton() {
+  return (
+    <Card>
+      <View style={s.row}>
+        <View style={{ flex: 1, gap: 6 }}>
+          <Skeleton width={124} height={18} />
+          <Skeleton width={92} height={11} />
+        </View>
+        <Skeleton width={72} height={24} radius={R.chip} />
+      </View>
+      <Skeleton height={64} radius={R.control} />
+      <Skeleton height={48} radius={R.control} />
+      <Skeleton height={48} radius={R.control} />
+    </Card>
   );
 }
 

@@ -1,8 +1,8 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useState } from 'react';
 import {
-  Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
-  StyleSheet, Text, TextInput, View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable,
+  ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { call } from '../../api';
 import { useEdgeInsets } from '../../safeArea';
@@ -29,6 +29,10 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
   const [err, setErr] = useState(null);
   const [note, setNote] = useState(null);
   const [copied, setCopied] = useState(false);
+  // Which invitation is being answered. Accepting is a round trip plus a
+  // reload of the board behind this sheet, and until now both buttons sat
+  // there looking untouched for the whole of it.
+  const [answering, setAnswering] = useState(null);   // `${inv.id}:accept|decline`
   const insets = useEdgeInsets();
 
   const incoming = invites?.incoming || [];
@@ -58,13 +62,17 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
   };
 
   const answer = async (inv, accept) => {
+    if (answering) return;
+    setAnswering(`${inv.id}:${accept ? 'accept' : 'decline'}`);
     try {
       await call(session, `/invite/${inv.id}/${accept ? 'accept' : 'decline'}`,
         { method: 'POST' });
       setNote(accept ? `${inv.from.name} is now in your family.` : 'Declined.');
-      onChanged?.();
+      await onChanged?.();
     } catch (e) {
       setErr(e.message);
+    } finally {
+      setAnswering(null);
     }
   };
 
@@ -129,25 +137,45 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                       <View style={s.inviteBtns}>
                         <Pressable
                           onPress={() => answer(inv, true)}
+                          disabled={!!answering}
                           accessibilityRole="button"
+                          accessibilityState={{
+                            busy: answering === `${inv.id}:accept`, disabled: !!answering,
+                          }}
                           accessibilityLabel={`Accept ${inv.from.name}`}
                           style={({ pressed }) => [
                             s.btn, { backgroundColor: U.mint, flex: 1 },
+                            !!answering && { opacity: 0.6 },
                             pressed && { opacity: 0.75 },
                           ]}
                         >
-                          <Text style={[T.button, { color: U.bg }]}>Accept</Text>
+                          {answering === `${inv.id}:accept` ? (
+                            <ActivityIndicator size="small" color={U.bg} />
+                          ) : null}
+                          <Text style={[T.button, { color: U.bg }]}>
+                            {answering === `${inv.id}:accept` ? 'Accepting…' : 'Accept'}
+                          </Text>
                         </Pressable>
                         <Pressable
                           onPress={() => confirmDecline(inv)}
+                          disabled={!!answering}
                           accessibilityRole="button"
+                          accessibilityState={{
+                            busy: answering === `${inv.id}:decline`, disabled: !!answering,
+                          }}
                           accessibilityLabel={`Decline ${inv.from.name}`}
                           style={({ pressed }) => [
                             s.btn, { backgroundColor: U.raised, flex: 1 },
+                            !!answering && { opacity: 0.6 },
                             pressed && { opacity: 0.75 },
                           ]}
                         >
-                          <Text style={[T.button, { color: U.dim }]}>Not now</Text>
+                          {answering === `${inv.id}:decline` ? (
+                            <ActivityIndicator size="small" color={U.dim} />
+                          ) : null}
+                          <Text style={[T.button, { color: U.dim }]}>
+                            {answering === `${inv.id}:decline` ? 'Declining…' : 'Not now'}
+                          </Text>
                         </Pressable>
                       </View>
                     </View>
@@ -183,6 +211,7 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                   onPress={send}
                   disabled={busy || !code.trim()}
                   accessibilityRole="button"
+                  accessibilityState={{ busy, disabled: busy || !code.trim() }}
                   style={({ pressed }) => [
                     s.btn,
                     { backgroundColor: U.mint },
@@ -190,8 +219,14 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                     pressed && { opacity: 0.75 },
                   ]}
                 >
-                  <Icon name="user-plus" size={16} color={U.bg} />
-                  <Text style={[T.button, { color: U.bg }]}>Send request</Text>
+                  {busy ? (
+                    <ActivityIndicator size="small" color={U.bg} />
+                  ) : (
+                    <Icon name="user-plus" size={16} color={U.bg} />
+                  )}
+                  <Text style={[T.button, { color: U.bg }]}>
+                    {busy ? 'Sending…' : 'Send request'}
+                  </Text>
                 </Pressable>
                 <Text style={[T.meta, { color: U.faint }]}>
                   Nothing is shared until they accept.

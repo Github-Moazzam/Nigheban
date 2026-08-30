@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Linking, Pressable, RefreshControl,
-  StyleSheet, Text, View,
+  FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View,
 } from 'react-native';
 import { call } from '../api';
-import { C, S, T, fmtAgo, sevColor } from '../theme';
-import { Banner, Button, Card, Chip, EmptyState, Icon, Txt } from '../ui';
+import { C, R, S, T, fmtAgo, sevColor } from '../theme';
+import {
+  Banner, Button, Card, Chip, EmptyState, Icon, Skeleton, SkeletonGroup, Txt,
+} from '../ui';
 
 const KIND = {
   sos:            { title: 'SOS',                 icon: 'alert-octagon' },
@@ -89,7 +90,11 @@ export default function Alerts({ session, refreshKey }) {
       }
       ListEmptyComponent={
         loading ? (
-          <ActivityIndicator color={C.green} style={{ marginTop: S.xxl }} />
+          <SkeletonGroup label="Loading alerts">
+            <AlertCardSkeleton />
+            <AlertCardSkeleton />
+            <AlertCardSkeleton />
+          </SkeletonGroup>
         ) : scope === 'incoming' ? (
           <EmptyState icon="shield" title="Nothing from your family"
                       body="That is the good outcome. Anything they raise appears here the moment it happens." />
@@ -149,6 +154,26 @@ export default function Alerts({ session, refreshKey }) {
         );
       }}
     />
+  );
+}
+
+/** The card's own geometry, drawn empty, so the list does not jump on arrival. */
+function AlertCardSkeleton() {
+  return (
+    <Card>
+      <View style={s.head}>
+        <Skeleton width={34} height={34} radius={R.control} />
+        <View style={{ flex: 1, gap: 6 }}>
+          <Skeleton width={136} height={17} />
+          <Skeleton width={98} height={11} />
+        </View>
+        <Skeleton width={48} height={11} />
+      </View>
+      <View style={s.chips}>
+        <Skeleton width={104} height={24} radius={R.chip} />
+        <Skeleton width={82} height={24} radius={R.chip} />
+      </View>
+    </Card>
   );
 }
 

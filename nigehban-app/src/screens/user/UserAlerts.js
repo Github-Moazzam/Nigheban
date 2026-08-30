@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { call } from '../../api';
 import { S, T, fmtAgo } from '../../theme';
-import { Icon, Txt } from '../../ui';
+import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { RU, U } from './kit';
 
 /** Every kind the server can write, said the way a person would say it. */
@@ -149,7 +149,11 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
         </View>
       )}
       ListEmptyComponent={loading ? (
-        <ActivityIndicator color={U.mint} style={{ marginTop: S.xxl }} />
+        <SkeletonGroup label="Loading alerts">
+          <AlertCardSkeleton />
+          <AlertCardSkeleton />
+          <AlertCardSkeleton />
+        </SkeletonGroup>
       ) : (
         <View style={s.empty}>
           <Icon name={scope === 'incoming' ? 'shield' : 'activity'} size={22} color={U.faint} />
@@ -232,6 +236,32 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
         );
       }}
     />
+  );
+}
+
+/**
+ * An alert card before its alert arrives.
+ *
+ * Three of these rather than a spinner, because the question this screen
+ * answers is "how many, and how bad" -- and a spinner in the middle of an
+ * empty screen is indistinguishable from the answer being none.
+ */
+function AlertCardSkeleton() {
+  return (
+    <View style={s.card}>
+      <View style={s.head}>
+        <Skeleton width={34} height={34} radius={RU.inner} color={U.raised} />
+        <View style={{ flex: 1, gap: 6 }}>
+          <Skeleton width={140} height={17} color={U.raised} />
+          <Skeleton width={104} height={11} color={U.raised} />
+        </View>
+        <Skeleton width={52} height={11} color={U.raised} />
+      </View>
+      <View style={s.chips}>
+        <Skeleton width={96} height={26} radius={RU.pill} color={U.raised} />
+        <Skeleton width={78} height={26} radius={RU.pill} color={U.raised} />
+      </View>
+    </View>
   );
 }
 

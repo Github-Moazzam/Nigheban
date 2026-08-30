@@ -10,7 +10,7 @@ import PinSheet from '../../components/PinSheet';
 import { askPermission, fullScreenIntentState } from '../../permissions';
 import { hasPin } from '../../security';
 import { HIT, S, T, fmtAgo } from '../../theme';
-import { Icon, Txt } from '../../ui';
+import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import AddFamily from './AddFamily';
 import { RU, U } from './kit';
 
@@ -37,6 +37,13 @@ export default function Dashboard({
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [adding, setAdding] = useState(false);
+  // The SOS is fire-and-forget from this screen's point of view -- App.js swaps
+  // the whole shell for the live view the moment it dispatches -- but the fix
+  // is captured before that, and on a phone with no lock yet that wait is
+  // seconds long. Without this the button looks dead for exactly as long as
+  // the person pressing it is least able to tolerate a dead button.
+  const [sending, setSending] = useState(false);
+  const [acking, setAcking] = useState(false);
   const [fix, setFix] = useState(null);
   const [locState, setLocState] = useState('asking');   // asking|ok|denied|error
   // true | false | null, where null is "the question does not apply here"
@@ -138,16 +145,28 @@ export default function Dashboard({
       </View>
 
       <View style={s.strip}>
-        <Text style={[T.bodyMed, { color: U.text, flex: 1 }]}>
-          {members.length
-            ? `${online} of ${members.length} ${members.length === 1 ? 'member' : 'members'} active`
-            : 'No family added yet'}
-        </Text>
-        <View style={s.stripPill}>
-          <Text style={[T.label, { color: secureTone }]}>
-            {members.length ? `${pct}% SECURED` : 'NOT SET UP'}
-          </Text>
-        </View>
+        {/* "No family added yet" is a fact about her account, not a thing to
+            say while the answer is still in flight -- it read as an empty
+            family list on every cold start. */}
+        {loading ? (
+          <>
+            <Skeleton width={168} height={15} color={U.raised} style={{ flex: 1 }} />
+            <Skeleton width={92} height={26} radius={RU.pill} color={U.raised} />
+          </>
+        ) : (
+          <>
+            <Text style={[T.bodyMed, { color: U.text, flex: 1 }]}>
+              {members.length
+                ? `${online} of ${members.length} ${members.length === 1 ? 'member' : 'members'} active`
+                : 'No family added yet'}
+            </Text>
+            <View style={s.stripPill}>
+              <Text style={[T.label, { color: secureTone }]}>
+                {members.length ? `${pct}% SECURED` : 'NOT SET UP'}
+              </Text>
+            </View>
+          </>
+        )}
       </View>
 
       {!serverOnline ? (
@@ -231,14 +250,27 @@ export default function Dashboard({
               : `${ctx.checkin.name} is checking on you`}
           </Text>
           <Pressable
-            onPress={() => onAckCheckin(ctx.checkin)}
+            onPress={async () => {
+              if (acking) return;
+              setAcking(true);
+              try { await onAckCheckin(ctx.checkin); } finally { setAcking(false); }
+            }}
+            disabled={acking}
             accessibilityRole="button"
+            accessibilityState={{ disabled: acking, busy: acking }}
             style={({ pressed }) => [
-              s.primary, { backgroundColor: U.mint }, pressed && { opacity: 0.75 },
+              s.primary, { backgroundColor: U.mint },
+              pressed && { opacity: 0.75 },
             ]}
           >
-            <Icon name="check" size={16} color={U.bg} />
-            <Text style={[T.button, { color: U.bg }]}>I am fine</Text>
+            {acking ? (
+              <ActivityIndicator size="small" color={U.bg} />
+            ) : (
+              <Icon name="check" size={16} color={U.bg} />
+            )}
+            <Text style={[T.button, { color: U.bg }]}>
+              {acking ? 'Answering…' : 'I am fine'}
+            </Text>
           </Pressable>
         </View>
       ) : null}
@@ -262,14 +294,27 @@ export default function Dashboard({
           down to it. */}
       <View style={s.sosRing}>
         <Pressable
-          onPress={() => onRaise({ kind: 'sos', source: 'app' })}
+          onPress={async () => {
+            if (sending) return;
+            setSending(true);
+            try { await onRaise({ kind: 'sos', source: 'app' }); }
+            finally { setSending(false); }
+          }}
+          disabled={sending}
           accessibilityRole="button"
+          accessibilityState={{ busy: sending, disabled: sending }}
           accessibilityLabel="Send an emergency SOS to your family"
           style={({ pressed }) => [s.sos, pressed && { backgroundColor: U.redPress }]}
         >
-          <Icon name="alert-octagon" size={30} color={U.bg} />
+          {sending ? (
+            <ActivityIndicator size="large" color={U.bg} />
+          ) : (
+            <Icon name="alert-octagon" size={30} color={U.bg} />
+          )}
           <Text style={s.sosGlyph}>SOS</Text>
-          <Text style={s.sosHint}>Tap to send</Text>
+          {/* The word changes, not the shape. A control this size that resized
+              on press would move under a thumb that is not looking at it. */}
+          <Text style={s.sosHint}>{sending ? 'Sending…' : 'Tap to send'}</Text>
         </Pressable>
       </View>
 
@@ -305,7 +350,12 @@ export default function Dashboard({
             onRefresh={() => { setRefreshing(true); load(); }}
           />
         )}
-        ListEmptyComponent={loading ? null : (
+        ListEmptyComponent={loading ? (
+          <SkeletonGroup label="Loading your family">
+            <MemberCardSkeleton />
+            <MemberCardSkeleton />
+          </SkeletonGroup>
+        ) : (
           <View style={s.empty}>
             <Icon name="users" size={22} color={U.faint} />
             <Text style={[T.body, { color: U.dim, textAlign: 'center' }]}>
@@ -512,18 +562,46 @@ function LocationCard({ state, fix }) {
           </Text>
         </View>
       ) : state === 'denied' ? (
-        <Pressable
-          onPress={() => Location.requestForegroundPermissionsAsync().catch(() => {})}
-          accessibilityRole="button"
-          style={({ pressed }) => [
-            s.primary, { backgroundColor: U.amber }, pressed && { opacity: 0.75 },
-          ]}
-        >
-          <Icon name="map-pin" size={16} color={U.bg} />
-          <Text style={[T.button, { color: U.bg }]}>Turn location on</Text>
-        </Pressable>
+        <AskForLocation />
       ) : null}
     </View>
+  );
+}
+
+/**
+ * The permission dialog can take a beat to appear, and on a phone that has
+ * already refused once it never appears at all -- so the button has to admit
+ * it was pressed by itself rather than waiting for Android to say so.
+ */
+function AskForLocation() {
+  const [asking, setAsking] = useState(false);
+
+  const ask = async () => {
+    if (asking) return;
+    setAsking(true);
+    try { await Location.requestForegroundPermissionsAsync(); } catch { /* the card still says denied */ }
+    setAsking(false);
+  };
+
+  return (
+    <Pressable
+      onPress={ask}
+      disabled={asking}
+      accessibilityRole="button"
+      accessibilityState={{ busy: asking, disabled: asking }}
+      style={({ pressed }) => [
+        s.primary, { backgroundColor: U.amber }, pressed && { opacity: 0.75 },
+      ]}
+    >
+      {asking ? (
+        <ActivityIndicator size="small" color={U.bg} />
+      ) : (
+        <Icon name="map-pin" size={16} color={U.bg} />
+      )}
+      <Text style={[T.button, { color: U.bg }]}>
+        {asking ? 'Asking Android…' : 'Turn location on'}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -604,6 +682,7 @@ function MemberCard({ member, session }) {
         onPress={checkin}
         disabled={busy || sent}
         accessibilityRole="button"
+        accessibilityState={{ busy, disabled: busy || sent }}
         accessibilityLabel={`Request a check-in from ${member.name}`}
         style={({ pressed }) => [
           s.primary,
@@ -611,9 +690,13 @@ function MemberCard({ member, session }) {
           pressed && { opacity: 0.75 },
         ]}
       >
-        <Icon name={sent ? 'check' : 'shield'} size={16} color={sent ? U.mint : U.bg} />
+        {busy ? (
+          <ActivityIndicator size="small" color={U.bg} />
+        ) : (
+          <Icon name={sent ? 'check' : 'shield'} size={16} color={sent ? U.mint : U.bg} />
+        )}
         <Text style={[T.button, { color: sent ? U.mint : U.bg }]}>
-          {sent ? 'Check-in sent' : 'Request Check-in'}
+          {busy ? 'Sending…' : sent ? 'Check-in sent' : 'Request Check-in'}
         </Text>
       </Pressable>
 
@@ -624,6 +707,45 @@ function MemberCard({ member, session }) {
         </Text>
         <Text style={[T.meta, { color: U.faint }]}>ID {member.id}</Text>
       </View>
+    </View>
+  );
+}
+
+/**
+ * The member card before its member arrives.
+ *
+ * Deliberately the same geometry as the real thing -- head, two-cell panel,
+ * button, footer -- so the list does not jump when the data lands. A spinner
+ * would have said "wait"; this says what is about to be here.
+ */
+function MemberCardSkeleton() {
+  return (
+    <View style={s.card}>
+      <View style={s.cardHead}>
+        <Skeleton width={132} height={20} color={U.raised} style={{ flex: 1 }} />
+        <Skeleton width={82} height={26} radius={RU.pill} color={U.raised} />
+      </View>
+
+      <View style={s.panel}>
+        <View style={s.cell}>
+          <Skeleton width={15} height={15} color={U.line} />
+          <View style={{ flex: 1, gap: 6 }}>
+            <Skeleton width={78} height={9} color={U.line} />
+            <Skeleton width={46} height={15} color={U.line} />
+          </View>
+        </View>
+        <View style={s.cellLine} />
+        <View style={s.cell}>
+          <Skeleton width={15} height={15} color={U.line} />
+          <View style={{ flex: 1, gap: 6 }}>
+            <Skeleton width={38} height={9} color={U.line} />
+            <Skeleton width={64} height={15} color={U.line} />
+          </View>
+        </View>
+      </View>
+
+      <Skeleton height={48} radius={RU.inner} color={U.raised} />
+      <Skeleton width={148} height={11} color={U.raised} />
     </View>
   );
 }
