@@ -4,8 +4,8 @@ import {
   ActivityIndicator, AppState, Linking, Modal, Pressable, StyleSheet, Text,
   Vibration, View,
 } from 'react-native';
-import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
-import { clearQueue, dequeue, enqueue, flushQueue, pendingCount } from './src/alertQueue';
+import { ALERT_TIMEOUT, call, clearSession, loadSession, saveSession, useLive } from './src/api';
+import { clearQueue, dequeue, enqueue, flushQueue, pendingCount, pressId } from './src/alertQueue';
 import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
@@ -274,7 +274,16 @@ function Main() {
     // This is where the emergency happened, not wherever the phone drifts
     // to while waiting for signal.
     const at = fix || await lastKnownFix();
-    const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
+
+    // The id of this press, minted here and not one line later. It goes out on
+    // the FIRST attempt, which is the one that matters: the duplicate SOS came
+    // from an attempt that reached the server, inserted the row and paged the
+    // family, and then took longer to answer than the phone was willing to
+    // wait. Every retry now carries the same id and the server recognises it.
+    const clientId = pressId();
+    const body = {
+      lat: at?.lat, lon: at?.lon, accuracy: at?.acc, client_id: clientId, ...payload,
+    };
     const isEmergency = ['sos', 'snatch', 'fall'].includes(payload.kind);
 
     // LOCAL-FIRST: fire the state machine and vibrate immediately, before
@@ -297,7 +306,9 @@ function Main() {
 
     // Now try the network call.
     try {
-      const r = await call(session, '/alert', { method: 'POST', body });
+      const r = await call(session, '/alert', {
+        method: 'POST', body, timeout: ALERT_TIMEOUT,
+      });
       if (isEmergency) {
         // Replace the local placeholder with the real server alert.
         dispatch('SOS_RAISED', { alert: r.alert });
@@ -665,9 +676,13 @@ function Main() {
   //      the thing that came back (captive portal, server restarted)
   //   4. the foreground service's tick -- app closed entirely; see bgService
   //
-  // `flushing` is the interlock. Two of these firing together would send the
-  // same alert twice, and a family being paged twice for one press is how a
-  // real one gets ignored.
+  // Two of these firing together would send the same alert twice, and a family
+  // paged twice for one press is how a real one gets ignored. There are two
+  // guards against that now, at different depths: `flushing` below keeps this
+  // screen from doing redundant work, the queue's own interlock covers the
+  // background service that this ref cannot see, and `client_id` makes a
+  // duplicate that gets through harmless at the server. The last one is the
+  // only one that survives the app being killed mid-send.
   const flushing = useRef(false);
   const flushNow = useCallback(async () => {
     if (!session || flushing.current) return;
