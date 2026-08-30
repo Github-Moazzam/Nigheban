@@ -15,8 +15,10 @@ import {
   readPermissions, vendorKey,
 } from '../permissions';
 import { DEFAULT_CHANNEL_ID, pushDiagnostics, registerPushToken } from '../notifications';
-import { C, S, T } from '../theme';
-import { Banner, Button, Card, Chip, Divider, Icon, Label, Txt } from '../ui';
+import { C, R, S, T } from '../theme';
+import {
+  Banner, Button, Card, Chip, Divider, Icon, Label, Skeleton, SkeletonGroup, Txt,
+} from '../ui';
 
 let Notifications = null;
 try { Notifications = require('expo-notifications'); } catch { /* degrades below */ }
@@ -57,6 +59,9 @@ export default function Setup({ onDone, session }) {
     alarmTesting: false,
   });
   const [diagBusy, setDiagBusy] = useState(false);
+  // Which rung is waiting on Android's dialog. It can take a beat to appear,
+  // and on a rung that has already been refused once it never appears at all.
+  const [asking, setAsking] = useState(null);
   const vendor = vendorKey();
 
   const refresh = useCallback(async () => {
@@ -172,12 +177,20 @@ export default function Setup({ onDone, session }) {
   };
 
   const ask = async (which) => {
-    await askPermission(which);
-    refresh();
+    if (asking) return;
+    setAsking(which);
+    try {
+      await askPermission(which);
+      await refresh();
+    } finally {
+      setAsking(null);
+    }
   };
 
   const ladder = ladderRows(perm);
   const remaining = ladder.filter((r) => r.granted !== true).length;
+  // The very first read, before anything at all is known about this phone.
+  const unread = checking && perm.notif === null && perm.loc === null;
 
   return (
     <ScrollView
@@ -193,14 +206,23 @@ export default function Setup({ onDone, session }) {
         </Text>
       </View>
 
-      {remaining === 0 ? (
+      {remaining === 0 && !unread ? (
         <Banner tone={C.green} icon="check-circle" title="Permissions are all set">
           Only the vendor step below is left, and it is the one people skip.
         </Banner>
       ) : null}
 
       <View style={{ gap: S.md }}>
-        {ladder.map((r, i) => (
+        {/* Until the first read comes back nothing is known, and drawing the
+            ladder from all-nulls puts a stack of amber "not granted" cards in
+            front of somebody whose phone is already configured. */}
+        {unread ? (
+          <SkeletonGroup label="Checking what Android allows">
+            <StepCardSkeleton />
+            <StepCardSkeleton />
+            <StepCardSkeleton />
+          </SkeletonGroup>
+        ) : ladder.map((r, i) => (
           <Card key={r.key} tone={r.granted === true ? C.green : undefined}>
             <View style={s.stepHead}>
               <View style={[s.num, r.granted === true && { backgroundColor: C.green }]}>
@@ -220,7 +242,9 @@ export default function Setup({ onDone, session }) {
               <Chip text="do the step above first" tone={C.faint} icon="lock" />
             ) : (
               <Button title={r.action} filled={r.granted !== true}
-                      icon={r.icon} onPress={() => ask(r.key)} />
+                      icon={r.icon} loading={asking === r.key}
+                      disabled={!!asking && asking !== r.key}
+                      onPress={() => ask(r.key)} />
             )}
 
             {r.granted === false ? (
@@ -420,6 +444,23 @@ export default function Setup({ onDone, session }) {
         <Button title="DONE" filled icon="check" onPress={onDone} />
       ) : null}
     </ScrollView>
+  );
+}
+
+/** One rung of the ladder, drawn before Android has said anything about it. */
+function StepCardSkeleton() {
+  return (
+    <Card>
+      <View style={s.stepHead}>
+        <Skeleton width={32} height={32} radius={R.control} />
+        <View style={{ flex: 1, gap: 7 }}>
+          <Skeleton width={168} height={17} />
+          <Skeleton height={11} />
+          <Skeleton width="72%" height={11} />
+        </View>
+      </View>
+      <Skeleton height={48} radius={R.control} />
+    </Card>
   );
 }
 
