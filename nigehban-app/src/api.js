@@ -162,11 +162,21 @@ export async function clearSession() {
   await AsyncStorage.removeItem(KEY);
 }
 
-/** Thin REST wrapper. Throws Error(message) with the server's own wording,
- *  because the server already writes errors a person can act on. */
-export async function call(session, path, { method = 'GET', body } = {}) {
+/**
+ * Thin REST wrapper. Throws Error(message) with the server's own wording,
+ * because the server already writes errors a person can act on.
+ *
+ * `timeout` is per call, and 8 s is the wrong number for exactly one endpoint.
+ *
+ * Giving up on a request the server has already acted on is not a neutral act:
+ * for /alert it meant the press was queued as undelivered and sent again, so a
+ * slow network turned one SOS into four rows and four pages. The alert now
+ * carries a `client_id` so a retry is free -- but the first attempt should
+ * still be given room to finish rather than raced. See ALERT_TIMEOUT.
+ */
+export async function call(session, path, { method = 'GET', body, timeout = 8000 } = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
+  const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     const res = await fetch(session.url + path, {
       method,
@@ -200,6 +210,16 @@ export async function call(session, path, { method = 'GET', body } = {}) {
     clearTimeout(timer);
   }
 }
+
+/**
+ * The deadline for raising an alert, as opposed to any other call.
+ *
+ * Longer than the rest because the cost of being wrong is asymmetric: a call
+ * that waits too long shows a spinner, and a call that gives up too early
+ * duplicates an emergency. Twenty seconds is comfortably past the server's own
+ * worst case now that the Expo pushes have been moved off the request path.
+ */
+export const ALERT_TIMEOUT = 20000;
 
 /**
  * How often the phone proves the socket is still a socket, and how long the
