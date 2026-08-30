@@ -53,8 +53,6 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DB_F = os.path.join(HERE, "nigehban.db")   # legacy sqlite file, kept for reference
 PORT = 8000
 
 

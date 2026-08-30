@@ -18,7 +18,7 @@ import { U } from './user/kit';
  * this shell reaches into them, so the two can move independently.
  */
 export default function UserShell({
-  session, band, ctx, deliveredTo, serverOnline,
+  session, band, ctx, deliveredTo, deliveryStatus, serverOnline,
   onRaise, onResolve, onSignOut, refreshKey, onAckCheckin,
   onToggleHighAlert, onFix,
 }) {
@@ -50,6 +50,7 @@ export default function UserShell({
         <SosLive
           alert={ctx.activeSos}
           deliveredTo={deliveredTo}
+          deliveryStatus={deliveryStatus}
           responders={ctx.responders}
           onStandDown={onResolve}
         />

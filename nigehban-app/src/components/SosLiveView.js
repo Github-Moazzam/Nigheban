@@ -9,6 +9,13 @@ const KIND = {
   snatch: { label: 'Band torn off',      lede: 'Your family has been alerted' },
 };
 
+// When offline, the lede changes to reflect the honest state.
+const KIND_QUEUED = {
+  sos:    { label: 'SOS ACTIVATED',      lede: 'Waiting for connection' },
+  fall:   { label: 'Fall reported',      lede: 'Waiting for connection' },
+  snatch: { label: 'Band torn off',      lede: 'Waiting for connection' },
+};
+
 /**
  * U3.5 — what the wearer sees while her own SOS is live.
  *
@@ -21,9 +28,18 @@ const KIND = {
  * button, reachable in one tap, but the screen does not lead with it: the band
  * can also stand it down, and a person under pressure should not be able to
  * cancel her own alarm by fumbling the phone.
+ *
+ * OFFLINE QUEUE ADDITION: when deliveryStatus is 'queued', an amber banner
+ * explains that the alert is saved locally and will be sent automatically
+ * when signal returns. The user must never be told their family was alerted
+ * when they have not been.
  */
-export default function SosLiveView({ alert, deliveredTo, responders = [], onStandDown, busy, fix }) {
-  const kind = KIND[alert?.kind] || KIND.sos;
+export default function SosLiveView({ alert, deliveredTo, deliveryStatus, responders = [], onStandDown, busy, fix }) {
+  const isQueued = deliveryStatus === 'queued';
+  const kind = isQueued
+    ? (KIND_QUEUED[alert?.kind] || KIND_QUEUED.sos)
+    : (KIND[alert?.kind] || KIND.sos);
+
   const [, force] = useState(0);
   useEffect(() => {
     const id = setInterval(() => force((n) => n + 1), 1000);
@@ -44,11 +60,30 @@ export default function SosLiveView({ alert, deliveredTo, responders = [], onSta
         <Chip text={fmtCount(elapsed)} tone={C.red} icon="clock" />
       </View>
 
+      {/* ---- offline banner ---- */}
+      {isQueued && (
+        <View style={s.offlineBanner}>
+          <Icon name="wifi-off" size={18} color={C.amber} />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={[T.bodyMed, { color: C.amber }]}>
+              Alert saved on this device
+            </Text>
+            <Text style={[T.meta, { color: C.dim }]}>
+              It will be sent to your family the moment signal returns. Stay where help can reach you.
+            </Text>
+          </View>
+        </View>
+      )}
+
       <View style={s.grid}>
         <View style={s.cell}>
           <Label>Sent to</Label>
-          <Text style={[T.number, { color: C.text }]}>
-            {deliveredTo == null ? '—' : `${deliveredTo} ${deliveredTo === 1 ? 'person' : 'people'}`}
+          <Text style={[T.number, { color: isQueued ? C.amber : C.text }]}>
+            {isQueued
+              ? 'Not yet — waiting for signal'
+              : deliveredTo == null
+                ? '—'
+                : `${deliveredTo} ${deliveredTo === 1 ? 'person' : 'people'}`}
           </Text>
         </View>
         <View style={s.cell}>
@@ -68,7 +103,7 @@ export default function SosLiveView({ alert, deliveredTo, responders = [], onSta
       <Divider />
 
       <View style={{ gap: S.sm }}>
-        <Label>{responders.length ? 'On their way' : 'Waiting for someone to answer'}</Label>
+        <Label>{responders.length ? 'On their way' : (isQueued ? 'Nobody has been reached yet' : 'Waiting for someone to answer')}</Label>
         {responders.length ? (
           responders.map((r) => (
             <View key={r.id} style={s.responder}>
@@ -79,8 +114,9 @@ export default function SosLiveView({ alert, deliveredTo, responders = [], onSta
           ))
         ) : (
           <Text style={[T.meta, { color: C.dim }]}>
-            Their phones are ringing, and they keep ringing while this is open —
-            a closed app does not stop the alarm getting through.
+            {isQueued
+              ? 'Your family will be alerted as soon as your phone finds signal. The alert is safe — it cannot be lost.'
+              : 'Their phones are ringing, and they keep ringing while this is open — a closed app does not stop the alarm getting through.'}
           </Text>
         )}
       </View>
@@ -102,4 +138,12 @@ const s = StyleSheet.create({
   cell: { flex: 1, gap: 4 },
   responder: { flexDirection: 'row', alignItems: 'center', gap: S.sm },
   foot: { color: C.faint, textAlign: 'center' },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: S.sm,
+    backgroundColor: C.amberSoft,
+    borderRadius: 8,
+    padding: S.md,
+  },
 });

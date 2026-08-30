@@ -28,7 +28,7 @@ const BAND_LABEL = {
  * fix — each one written so that a failure reads as a sentence, not a colour.
  */
 export default function Home({
-  session, band, ctx, deliveredTo, onRaise, onResolve, serverOnline,
+  session, band, ctx, deliveredTo, deliveryStatus, onRaise, onResolve, serverOnline,
   onOpenBand, onOpenSetup, onAckCheckin, onToggleHighAlert, onFix,
 }) {
   const [fix, setFix] = useState(null);
@@ -134,6 +134,7 @@ export default function Home({
       {/* ---- the one control that matters ---- */}
       {ctx.activeSos ? (
         <SosLiveView alert={ctx.activeSos} deliveredTo={deliveredTo}
+                     deliveryStatus={deliveryStatus}
                      responders={ctx.responders} busy={busy}
                      fix={fix} onStandDown={onResolve} />
       ) : (

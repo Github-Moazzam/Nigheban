@@ -86,12 +86,20 @@ and it covers the two-phone test that proves the whole product loop.
 ### 1. The server
 
 ```bash
-cd server
-pip install -r ../requirements.txt
-python nigehban_server.py
+pip install -r requirements.txt
+python server/migrate_pg.py        # applies server/migrations/*.sql, idempotent
+python server/nigehban_server.py
 ```
 
-The database is `server/nigehban.db` — delete that file to reset everything.
+The server is **Postgres only**. It reads `DATABASE_URL` from the repo-root
+`.env` and there is no second place to configure it, on purpose: pointing a
+query at the wrong database is easy to do and hard to notice, because both
+databases answer. On a fresh database, load `server/supabase_migration.sql`
+once first, then let `migrate_pg.py` carry it forward.
+
+The server prints the host and database name it connected to on startup. Read
+that line before debugging anything — it is the cheapest way to catch the
+mistake above.
 
 To reach it from phones on mobile data (which is how you will demo):
 
@@ -269,8 +277,10 @@ yet built:
 
 ## Security notes
 
-`server/nigehban.db` and `events.jsonl` are gitignored on purpose — they hold
-password hashes, live auth tokens and location history.
+`.env` and `events.jsonl` are gitignored on purpose — `.env` holds the database
+password inside `DATABASE_URL`, and `events.jsonl` holds location history. The
+account data itself (password hashes, hashed session tokens) lives in Postgres,
+never in the repo.
 
 `config.json` ships with placeholder contacts and empty API keys. If you fill in
 real phone numbers or a Telegram/CallMeBot/DashScope key, take it out of version
