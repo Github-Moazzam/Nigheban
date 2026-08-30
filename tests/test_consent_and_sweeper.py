@@ -10,17 +10,46 @@ deadlines pass with nothing connected to anything.
 """
 import json
 import os
-import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
 
+import psycopg
+from psycopg.rows import dict_row
+
 BASE = os.environ.get("NGB", "http://127.0.0.1:8000")
-DB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                  "..", "server", "nigehban.db")
 
 PASS = FAIL = 0
+
+
+def db():
+    """The same database the server uses, and only that one.
+
+    This used to open `server/nigehban.db` with sqlite3, which is trap #5 from
+    the branch notes happening to the test suite itself: two databases both
+    answer. The read half passed against a stale file the server had not
+    touched in days, and the write half updated a row nothing would ever read,
+    so the watchdog section failed while the code it tested was fine.
+
+    DATABASE_URL is read from the environment first, then from the repo-root
+    `.env` -- this script is run directly, so nothing else loads it.
+    """
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+        try:
+            with open(env) as fh:
+                for line in fh:
+                    if line.strip().startswith("DATABASE_URL"):
+                        url = line.split("=", 1)[1].strip()
+                        break
+        except OSError:
+            pass
+    if not url:
+        sys.exit("DATABASE_URL not set, and no .env at the repo root -- "
+                 "the suite cannot check the database the server is using.")
+    return psycopg.connect(url, row_factory=dict_row, autocommit=True)
 
 
 def check(name, ok, extra=""):
@@ -162,18 +191,26 @@ sts = [call("/login", "POST", {"username": bob["username"], "password": "nope"})
 check("password guessing is throttled", 429 in sts, sts)
 
 print("\n== B1: the database is not a list of live sessions ==")
-con = sqlite3.connect(DB)
-con.row_factory = sqlite3.Row
-rows = con.execute("SELECT token, token_hash FROM users").fetchall()
-check("no session token is stored in the clear",
-      all((r["token"] or "") == "" for r in rows), "some users still have a plaintext token")
+con = db()
+# Stronger than the old row-by-row check: on Postgres the column is gone
+# entirely, so a plaintext token cannot be stored even by accident.
+cols = [r["column_name"] for r in con.execute(
+    "SELECT column_name FROM information_schema.columns "
+    "WHERE table_name='users'").fetchall()]
+check("the schema has no plaintext token column at all", "token" not in cols, cols)
+rows = con.execute("SELECT token_hash FROM users").fetchall()
 check("hashes are there instead", all(len(r["token_hash"] or "") == 64 for r in rows))
 prs = con.execute("SELECT token_hash FROM pairings").fetchall()
 check("pairing codes are stored hashed too",
       all(len(r["token_hash"]) == 64 for r in prs), prs)
 st, r = call("/me", token=A)
 check("a real token still works", st == 200 and r["user_id"] == alice["user_id"], r)
-st, r = call("/me", token=rows[0]["token_hash"])
+# Alice's own stored hash, not an arbitrary row -- so this cannot pass merely
+# because some unrelated user happened to have a null one.
+mine = con.execute("SELECT token_hash FROM users WHERE id=%s",
+                   (alice["user_id"],)).fetchone()
+check("a live session is stored as a hash", len(mine["token_hash"] or "") == 64, mine)
+st, r = call("/me", token=mine["token_hash"])
 check("the stored hash is not itself a usable token", st == 401, f"{st} {r}")
 
 print("\n== B2: deadlines with no phone attached ==")
@@ -217,8 +254,13 @@ check("no escalation follows an answered check-in", before == after, f"{before} 
 print("\n== B2: High Alert is the server's mode, not the app's ==")
 st, r = call("/watch/high_alert", "POST", {"on": True, "first_buzz_s": 5}, B)
 check("High Alert can be armed", st == 200 and r["mode"] == "high_alert", r)
-print("     waiting 9s for the buzz...")
-time.sleep(9)
+# 12s, not 9. The deadline is +5s and the sweeper ticks every 5s on a phase set
+# when the server booted, so the buzz can legitimately land anywhere in
+# [+5s, +10s). Asserting at +9s failed about one run in five for no reason but
+# the phase -- and a check that goes red at random on the one assertion proving
+# the server keeps asking without a phone is a check people learn to ignore.
+print("     waiting 12s for the buzz...")
+time.sleep(12)
 _, w = call(f"/watch/{bob['user_id']}", token=A)
 check("the server asked on its own - a new question is open",
       w["checkin_due_at"] is not None, w)
@@ -241,10 +283,9 @@ check("the family sees the band link and the battery",
 call("/watch/high_alert", "POST", {"on": True, "first_buzz_s": 590}, B)
 call("/heartbeat", "POST", {"mode": "high_alert", "band_link": True,
                             "lat": 24.86, "lon": 67.01}, B)
-con2 = sqlite3.connect(DB)
-con2.execute("UPDATE watch_state SET last_beat=? WHERE user_id=?",
+con2 = db()
+con2.execute("UPDATE watch_state SET last_beat=%s WHERE user_id=%s",
              (time.time() - 400, bob["user_id"]))
-con2.commit()
 con2.close()
 print("     phone has 'gone silent'; waiting 8s...")
 time.sleep(8)
