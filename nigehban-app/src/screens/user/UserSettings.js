@@ -1,10 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { MODES } from '../../bandLink';
 import PinSheet from '../../components/PinSheet';
+import {
+  OEM, askPermission, ladderRows, openActivity, openBatterySettings,
+  readPermissions, vendorKey,
+} from '../../permissions';
 import { clearPin, hasPin } from '../../security';
 import { S, T, fmtAgo } from '../../theme';
 import { Icon, Txt } from '../../ui';
+import { usePhoneBattery } from '../../watch';
 import { RU, U, rowStyles as r } from './kit';
 
 /** The link states, said as a person would say them. */
@@ -31,12 +36,35 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   // otherwise here would report a fault that does not exist.
   const linked = band?.status === 'connected' || band?.status === 'virtual';
   const virtual = band?.status === 'virtual';
+  const phoneBatt = usePhoneBattery();
 
   const [pinSet, setPinSet] = useState(false);
   const [sheet, setSheet] = useState(false);
 
   const refreshPin = useCallback(async () => setPinSet(await hasPin()), []);
   useEffect(() => { refreshPin(); }, [refreshPin]);
+
+  const [perm, setPerm] = useState({ notif: null, loc: null, bg: null, fsi: null });
+  const refreshPerm = useCallback(async () => setPerm(await readPermissions()), []);
+  useEffect(() => { refreshPerm(); }, [refreshPerm]);
+
+  // Android hands the answer back through the Settings app, not through the
+  // promise, so nothing is known until this screen is looked at again.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshPerm();
+    });
+    return () => sub.remove();
+  }, [refreshPerm]);
+
+  const askAndRefresh = useCallback(async (key, denied) => {
+    await askPermission(key, denied);
+    refreshPerm();
+  }, [refreshPerm]);
+
+  const ladder = ladderRows(perm);
+  const permLeft = ladder.filter((row) => row.granted !== true).length;
+  const vendor = vendorKey();
 
   return (
     <>
@@ -87,10 +115,27 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             tone={linked ? U.mint : U.amber}
           />
           <View style={r.line} />
+          {/* Two cells, and in virtual mode only one of them exists.
+              `band.battery` is the *phone's* charge read through expo-battery
+              when this phone is standing in for the band, so showing it here
+              labelled "Band battery" told the wearer her wristband was at 77%
+              when she is not wearing one. The band's row says N/A instead, and
+              the phone's own charge gets the row it never had. */}
+          <Row
+            icon="battery" title="Phone battery"
+            sub={virtual ? 'This phone is the safety device' : undefined}
+            value={phoneBatt != null ? `${Math.round(phoneBatt)}%` : '—'}
+            tone={phoneBatt == null ? U.dim
+                  : phoneBatt <= 5 ? U.red
+                  : phoneBatt <= 20 ? U.amber : U.mint}
+          />
+          <View style={r.line} />
           <Row
             icon="battery" title="Band battery"
-            value={band?.battery != null ? `${Math.round(band.battery)}%` : '—'}
-            tone={band?.battery != null && band.battery <= 20 ? U.amber : U.dim}
+            sub={virtual ? 'No wristband paired — nothing to report' : undefined}
+            value={virtual ? 'N/A'
+                   : band?.battery != null ? `${Math.round(band.battery)}%` : '—'}
+            tone={!virtual && band?.battery != null && band.battery <= 20 ? U.amber : U.dim}
           />
           <View style={r.line} />
           <Row
@@ -155,6 +200,66 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             in Android settings, or let this phone stand in for the band.
           </Text>
         ) : null}
+
+        {/* ---- what Android has to allow ----
+            This shell had no permission screen at all. Notifications were
+            asked for by whatever tried to post one, location by the background
+            service, and the rest -- the full-screen takeover, the battery
+            exemption, the vendor autostart -- were never asked for by anybody,
+            because they only existed on the admin console. A wearer with a
+            fresh account therefore had an app that looked configured and could
+            not ring through a locked phone. */}
+        <Section title="PHONE PERMISSIONS" tone={U.mint} />
+        {permLeft === 0 ? (
+          <View style={s.group}>
+            <Row icon="check-circle" title="Everything Nigehban needs is allowed"
+                 sub="Re-check it any time — Android switches these off on its own."
+                 value="Ready" tone={U.mint} onPress={refreshPerm} />
+          </View>
+        ) : (
+          <View style={s.group}>
+            {ladder.map((row, i) => (
+              <React.Fragment key={row.key}>
+                {i ? <View style={r.line} /> : null}
+                <Row
+                  icon={row.granted === true ? 'check-circle' : row.icon}
+                  title={row.title}
+                  sub={row.granted === true ? undefined
+                       : row.blocked ? 'Do the step above first'
+                       : row.granted === false ? `Denied — tap to open settings. ${row.why}`
+                       : row.why}
+                  value={row.granted === true ? 'Allowed' : 'Tap to allow'}
+                  tone={row.granted === true ? U.mint : U.amber}
+                  onPress={row.blocked ? undefined : () => askAndRefresh(row.key)}
+                />
+              </React.Fragment>
+            ))}
+          </View>
+        )}
+
+        {/* The one Android will not prompt for and will not report. A phone
+            that stops the app to save power fails silently, weeks later. */}
+        <View style={s.group}>
+          <Row
+            icon="battery-charging" title="Let Nigehban keep running"
+            sub={vendor
+              ? `${OEM[vendor].label}: ${OEM[vendor].how}`
+              : 'Set battery use to unrestricted, or the watch stops when the screen does.'}
+            value="Open settings" tone={U.dim}
+            onPress={openBatterySettings}
+          />
+          {vendor ? (
+            <>
+              <View style={r.line} />
+              <Row
+                icon="external-link" title="Allow autostart"
+                sub="Your phone's own list, separate from Android's"
+                value="Open" tone={U.dim}
+                onPress={() => openActivity(OEM[vendor].pkg, OEM[vendor].cls)}
+              />
+            </>
+          ) : null}
+        </View>
 
         <Section title="SAFETY" tone={U.mint} />
         <View style={s.group}>

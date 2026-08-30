@@ -61,9 +61,70 @@ let linked = null;        // the connected Device, or null
 let notifySub = null;     // notify subscription on NUS_TX
 let dropSub = null;       // onDisconnected listener
 
+// The reconnect machinery belongs here for the same reason the manager does.
+//
+// It used to live in the component as refs, and the unmount cleanup cleared
+// every timer -- so the moment Android destroyed the activity (the app closed,
+// or swiped out of Recents while the foreground service kept the process
+// alive) the retry loop stopped. Walk out of range with the app closed and
+// nothing was left scanning; walk back in and nothing reconnected, however
+// long you stood there. Reopening the app mounted a fresh tree and connected
+// on the spot, which is exactly the shape of the bug as reported.
+//
+// A link that outlives the React tree needs a retry loop that outlives it too.
+let wantsLink = false;    // the standing "keep this link up" instruction
+let retryTimer = null;
+let scanTimer = null;
+let dataTimer = null;
+let lastDataAt = 0;
+let connectFn = null;     // the newest mounted tree's connect(), for the retry
+// The band advertises every 20 ms, so several scan callbacks for the same
+// device are already queued before the first connect() reaches native. One
+// attempt at a time, process-wide.
+let connecting = false;
+let buf = '';             // partial line across BLE notifications
+let sawLine = false;      // dev logging: confirm reassembly once
+
 function bleManager() {
   if (!manager && BleManager) manager = new BleManager();
   return manager;
+}
+
+/** Schedule another attempt, unless the user has withdrawn the instruction. */
+function retrySoon() {
+  if (!wantsLink) return;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => { retryTimer = null; connectFn?.(); }, RETRY_MS);
+}
+
+/**
+ * A GATT connection this process is already holding.
+ *
+ * `linked` can be null while the radio link is very much alive: a connect that
+ * was in flight when the activity went away, a tree that unmounted between the
+ * connect and the bookkeeping. Ask again and the native side answers "Already
+ * connected to device with MAC address ..." -- an error the UI showed verbatim
+ * and then retried forever, because every retry hit the same wall.
+ *
+ * It is not an error. It is the link, and it can simply be adopted.
+ */
+async function heldConnection(mgr, id) {
+  try {
+    const open = await mgr.connectedDevices([NUS_SERVICE]);
+    const hit = (id && open.find((d) => d.id === id)) || open[0];
+    if (hit) return hit;
+  } catch { /* older adapter, or none open: fall through */ }
+  if (!id) return null;
+  try {
+    const [d] = await mgr.devices([id]);
+    if (d && (await d.isConnected())) return d;
+  } catch { /* not known to this manager */ }
+  return null;
+}
+
+/** Is this the "you already have this device" refusal, rather than a failure? */
+function isAlreadyConnected(e) {
+  return /already connected/i.test(e?.reason || e?.message || '');
 }
 
 async function rememberBand(id) {
@@ -139,8 +200,22 @@ async function askPermissions() {
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]
       : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
-  const res = await PermissionsAndroid.requestMultiple(need);
-  return need.every((p) => res[p] === PermissionsAndroid.RESULTS.GRANTED);
+
+  // Check before asking, and survive not being able to ask at all.
+  //
+  // The retry loop now runs with the app closed, and a permission *request*
+  // needs an Activity to hang its dialog on -- with none, React Native rejects
+  // the promise. That rejection used to escape connect() and take the whole
+  // reconnect attempt with it, on a phone whose permissions were granted
+  // months ago. A plain check needs no Activity and answers the normal case.
+  try {
+    const have = await Promise.all(need.map((p) => PermissionsAndroid.check(p)));
+    if (have.every(Boolean)) return true;
+    const res = await PermissionsAndroid.requestMultiple(need);
+    return need.every((p) => res[p] === PermissionsAndroid.RESULTS.GRANTED);
+  } catch {
+    return false;                // nothing to ask with right now
+  }
 }
 
 /**
@@ -182,41 +257,15 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   // thing the UI ever said. Whatever went wrong now has somewhere to surface.
   const [lastError, setLastError] = useState(null);
 
-  const buf = useRef('');
   const cb = useRef(onEvent);
   cb.current = onEvent;
 
-  // Set right before a deliberate disconnect() so onDisconnected can tell
-  // "the user asked for this" from "the radio just dropped" -- only the
-  // second case should retry on its own.
-  const wantsConnection = useRef(false);
-  const retryTimer = useRef(null);
-  const scanTimer = useRef(null);
-
-  // The band advertises every 20 ms (setInterval(32, 244) in the firmware), so
-  // by the time the first connect() has even crossed to the native side, more
-  // scan callbacks for the same device have already been queued and delivered.
-  // Every one of them used to start its own connect() against that device, and
-  // concurrent connects on Android tear the GATT down and rebuild it under the
-  // subscription the previous one just registered. The result is precisely the
-  // failure seen here: a link that reports "connected" and never delivers a
-  // single notification, while the band happily notifies anyone else.
-  // stopDeviceScan() is not enough on its own -- it stops future callbacks, not
-  // the ones already in flight -- so the guard has to be set synchronously.
-  const connecting = useRef(false);
-
-  // Belt and braces for the same class of failure: if the link is up but no
-  // line arrives in two and a half heartbeat periods, the subscription is dead
-  // no matter what the status says. Recycle it rather than sit there silent.
-  const dataTimer = useRef(null);
-  const lastDataAt = useRef(0);
-  const sawLine = useRef(false);   // dev logging: confirm reassembly once
-
-  // connect() and the retry that reschedules it are mutually recursive, and a
-  // useCallback cannot close over itself. The ref breaks the cycle without
-  // making either of them depend on the other's identity.
-  const connectRef = useRef(null);
-
+  // Everything the link needs to keep itself up -- the standing instruction,
+  // the retry, the scan guard, the data watchdog, the partial line -- now
+  // lives at module scope with the connection itself. See the block at the top
+  // of this file for why: a React tree is not the lifetime of a BLE link, and
+  // treating it as one is what stopped the band ever reconnecting once the app
+  // had been closed.
   const simulated = !BleManager;
 
   const handleLine = useCallback((line) => {
@@ -231,12 +280,6 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     if (msg.e === 'high_alert_off') setHighAlert(false);
     if (msg.e === 'hb') return;              // heartbeat is status, not an event
     cb.current?.(msg);
-  }, []);
-
-  const retrySoon = useCallback(() => {
-    if (!wantsConnection.current) return;
-    clearTimeout(retryTimer.current);
-    retryTimer.current = setTimeout(() => connectRef.current?.(), RETRY_MS);
   }, []);
 
   const setUpLink = useCallback(async (c) => {
@@ -256,8 +299,8 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // would fight its own button.
     dropSub = c.onDisconnected(() => {
       linked = null;
-      connecting.current = false;
-      clearInterval(dataTimer.current);
+      connecting = false;
+      clearInterval(dataTimer);
       setStatus('disconnected');
       retrySoon();
     });
@@ -293,7 +336,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       setStatus('no-service');
       // Nothing here is retryable without the user clearing the cache, but
       // the guard still has to come off or connect() is dead for good.
-      connecting.current = false;
+      connecting = false;
       try { dropSub?.remove(); } catch { /* already gone */ }
       dropSub = null;
       linked = null;
@@ -303,7 +346,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
     // A fragment left over from the previous link would corrupt the first
     // line of this one.
-    buf.current = '';
+    buf = '';
 
     if (__DEV__) console.log('BAND subscribing to', NUS_TX);
     notifySub = c.monitorCharacteristicForService(NUS_SERVICE, NUS_TX, (e, ch) => {
@@ -312,7 +355,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         // Swallowing this is how a dead link passes for a live one: the
         // subscribe can fail on its own (cached table, notify not granted)
         // long after connect() resolved, and nothing else reports it.
-        if (wantsConnection.current) {
+        if (wantsLink) {
           setLastError('Notify subscribe failed: ' + (e.reason || e.message));
           setStatus('no-notify');
         }
@@ -322,17 +365,17 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       // Fed on raw bytes, not on parsed lines. A band whose lines arrive
       // truncated is a real fault, but it is not a dead subscription, and
       // tearing the link down every 25 s only hid the actual problem.
-      lastDataAt.current = Date.now();
-      buf.current += b64decode(ch.value);
-      const parts = buf.current.split('\n');
-      buf.current = parts.pop();           // keep the incomplete tail
+      lastDataAt = Date.now();
+      buf += b64decode(ch.value);
+      const parts = buf.split('\n');
+      buf = parts.pop();           // keep the incomplete tail
       // A band that never sends a newline would otherwise grow this
       // string forever. One line is ~90 bytes; 4 KB of tail is garbage.
-      if (buf.current.length > 4096) buf.current = '';
+      if (buf.length > 4096) buf = '';
       // One line on the first complete parse, to confirm reassembly works
       // without printing five packets per heartbeat forever after.
-      if (__DEV__ && parts.length && !sawLine.current) {
-        sawLine.current = true;
+      if (__DEV__ && parts.length && !sawLine) {
+        sawLine = true;
         console.log('BAND first line:', parts[0].trim());
       }
       parts.forEach((p) => p.trim() && handleLine(p.trim()));
@@ -357,11 +400,11 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // heartbeats every 10 s, so silence past 25 s means the subscription is
     // not live however healthy the link looks -- drop it and start over,
     // and leave a note saying why rather than sitting there blank.
-    lastDataAt.current = Date.now();
-    clearInterval(dataTimer.current);
-    dataTimer.current = setInterval(() => {
-      if (Date.now() - lastDataAt.current < DATA_TIMEOUT_MS) return;
-      clearInterval(dataTimer.current);
+    lastDataAt = Date.now();
+    clearInterval(dataTimer);
+    dataTimer = setInterval(() => {
+      if (Date.now() - lastDataAt < DATA_TIMEOUT_MS) return;
+      clearInterval(dataTimer);
       setLastError(
         'Link was up but the band sent nothing for '
         + Math.round(DATA_TIMEOUT_MS / 1000) + 's -- the notify subscription '
@@ -369,7 +412,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       // onDisconnected does the retry and clears the guard.
       try { linked?.cancelConnection(); } catch { /* already gone */ }
     }, 5000);
-  }, [handleLine, retrySoon]);
+  }, [handleLine]);
 
   /**
    * setUpLink, plus the cleanup its callers would otherwise each have to write.
@@ -397,17 +440,22 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
   const connect = useCallback(async () => {
     if (simulated) { setStatus('simulated'); return; }
-    if (!(await askPermissions())) { setStatus('no-permission'); return; }
-    if (await locationServicesOff()) { setStatus('location-off'); return; }
+    // Each of these is recoverable without the user touching the app again --
+    // a permission granted from Settings, Bluetooth switched back on, Location
+    // re-enabled -- so each schedules another attempt rather than ending the
+    // loop. Ending it meant the band stayed dark until somebody found the
+    // CONNECT button.
+    if (!(await askPermissions())) { setStatus('no-permission'); retrySoon(); return; }
+    if (await locationServicesOff()) { setStatus('location-off'); retrySoon(); return; }
 
-    wantsConnection.current = true;
+    wantsLink = true;
     // The guard below is per attempt -- one attempt, one connection. Starting
     // a fresh one has to clear it or a stuck guard would make the band
     // permanently unfindable.
-    connecting.current = false;
-    clearTimeout(retryTimer.current);
-    clearTimeout(scanTimer.current);
-    clearInterval(dataTimer.current);
+    connecting = false;
+    clearTimeout(retryTimer); retryTimer = null;
+    clearTimeout(scanTimer); scanTimer = null;
+    clearInterval(dataTimer); dataTimer = null;
 
     const mgr = bleManager();
     if (!mgr) { setStatus('simulated'); return; }
@@ -417,7 +465,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // for a settled state and name the one thing the user can act on.
     try {
       const state = await mgr.state();
-      if (state === 'PoweredOff') { setStatus('bluetooth-off'); return; }
+      if (state === 'PoweredOff') { setStatus('bluetooth-off'); retrySoon(); return; }
     } catch { /* older adapters: just try the scan */ }
 
     // --- the band we already know ------------------------------------------
@@ -427,8 +475,34 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // the app was killed and the band went back to advertising. Falling back to
     // the scan below costs nothing when this misses.
     const knownId = await recallBand();
+
+    // --- a link this process is already holding -----------------------------
+    // Before asking for a connection, check whether we have one. The activity
+    // can be destroyed and rebuilt with the GATT connection untouched, and a
+    // connect() against a device the native side already holds does not
+    // succeed and does not fail usefully -- it throws "Already connected to
+    // device with MAC address ...", which the UI printed as the band's status
+    // and then retried into forever. Adopting it is both correct and instant.
+    const held = await heldConnection(mgr, knownId);
+    if (held) {
+      connecting = true;
+      setStatus('connecting');
+      try {
+        const c = await held.discoverAllServicesAndCharacteristics();
+        await finishLink(c);
+        return;
+      } catch (e) {
+        // The connection exists but cannot be used. Drop it so the scan below
+        // has a band that is advertising again to find.
+        connecting = false;
+        if (__DEV__) console.log('BAND adopt failed:', e.reason || e.message);
+        try { await held.cancelConnection(); } catch { /* already gone */ }
+        if (!wantsLink) return;
+      }
+    }
+
     if (knownId) {
-      connecting.current = true;
+      connecting = true;
       setStatus('connecting');
       try {
         // No requestMTU here on purpose -- see the scan path below.
@@ -440,9 +514,22 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         // Band off, out of range, or a stale id after a re-flash. The id is
         // kept either way: "not powered on yet" is by far the likeliest cause
         // and it is not a reason to forget which band is ours.
-        connecting.current = false;
+        connecting = false;
         if (__DEV__) console.log('BAND direct connect failed:', e.reason || e.message);
-        if (!wantsConnection.current) return;
+        if (!wantsLink) return;
+        // A connection that appeared between the check above and this call.
+        // Rare, and it costs nothing to pick it up rather than start scanning
+        // for a band that cannot advertise while it is connected to us.
+        if (isAlreadyConnected(e)) {
+          const late = await heldConnection(mgr, knownId);
+          if (late) {
+            try {
+              const c = await late.discoverAllServicesAndCharacteristics();
+              await finishLink(c);
+              return;
+            } catch { connecting = false; }
+          }
+        }
       }
     }
 
@@ -451,12 +538,12 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // Every exit from the scan goes through here, so the timer can never
     // outlive the scan it was guarding and fire over a live connection.
     const endScan = () => {
-      clearTimeout(scanTimer.current);
-      scanTimer.current = null;
+      clearTimeout(scanTimer);
+      scanTimer = null;
       try { mgr.stopDeviceScan(); } catch { /* already stopped */ }
     };
 
-    scanTimer.current = setTimeout(() => {
+    scanTimer = setTimeout(() => {
       endScan();
       setStatus('not-found');
       retrySoon();
@@ -488,8 +575,8 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
       // First match wins. Set before any await, or the callbacks already
       // queued behind this one race straight past it.
-      if (connecting.current) return;
-      connecting.current = true;
+      if (connecting) return;
+      connecting = true;
 
       endScan();
       setStatus('connecting');
@@ -505,21 +592,41 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         c = await c.discoverAllServicesAndCharacteristics();
         await finishLink(c);
       } catch (e) {
-        connecting.current = false;
+        connecting = false;
+        // "Already connected" is not a failure, it is the answer: this process
+        // is holding the very band the scan just found. Showing it as the
+        // band's status -- `error:Already connected to device with MAC address
+        // E2:59:...` -- was the app reporting a working link as a fault, and
+        // every retry hit the same wall because a connected band stops
+        // advertising and the scan could never find it again either.
+        if (isAlreadyConnected(e)) {
+          try {
+            const held = await heldConnection(mgr, d.id);
+            if (held) {
+              connecting = true;
+              const c = await held.discoverAllServicesAndCharacteristics();
+              await finishLink(c);
+              return;
+            }
+          } catch { /* fall through to the retry below */ }
+          connecting = false;
+        }
         setStatus('error:' + (e.reason || e.message));
         retrySoon();
       }
     });
-  }, [simulated, finishLink, retrySoon]);
+  }, [simulated, finishLink]);
 
-  connectRef.current = connect;
+  connectFn = connect;
 
   const disconnect = useCallback(async () => {
-    wantsConnection.current = false;
-    connecting.current = false;
-    clearTimeout(retryTimer.current);
-    clearTimeout(scanTimer.current);
-    clearInterval(dataTimer.current);
+    wantsLink = false;
+    connecting = false;
+    // Nulled, not merely cleared: `retryTimer` is now the "is a loop running"
+    // answer for the cold-start effect, and a stale handle would read as yes.
+    clearTimeout(retryTimer); retryTimer = null;
+    clearTimeout(scanTimer); scanTimer = null;
+    clearInterval(dataTimer); dataTimer = null;
     // The only place the standing "this phone wants that band" instruction is
     // withdrawn. Leave it set and the effects below would helpfully undo the
     // button the user just pressed.
@@ -552,14 +659,14 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         // may have gone out of range while nothing was watching.
         if (!(await c.isConnected())) throw new Error('stale');
         if (cancelled) return;
-        wantsConnection.current = true;
+        wantsLink = true;
         await finishLink(c);
       } catch {
         if (cancelled) return;
         try { await c.cancelConnection(); } catch { /* already gone */ }
         if (linked === c) linked = null;
         setStatus('disconnected');
-        if (autoLink) connectRef.current?.();
+        if (autoLink) connectFn?.();
       }
     })();
     return () => { cancelled = true; };
@@ -577,12 +684,18 @@ export function useBand(onEvent, { autoLink = false } = {}) {
    * about it. A remembered id is the user having already asked for this link;
    * `autoLink` is the caller confirming a real band is the chosen radio.
    */
+  //
+  // The guard is "is anything already trying", not "has anyone ever asked".
+  // `wantsLink` outlives this tree now, so testing it here would let a loop
+  // that has stopped -- permission refused, Bluetooth off, an adopt that
+  // returned early -- stay stopped for the life of the process, with the user
+  // left pressing CONNECT by hand.
   useEffect(() => {
-    if (simulated || !autoLink || linked || wantsConnection.current) return undefined;
+    if (simulated || !autoLink || linked || connecting || retryTimer) return undefined;
     let cancelled = false;
     (async () => {
       const id = await recallBand();
-      if (!cancelled && id) connectRef.current?.();
+      if (!cancelled && id) connectFn?.();
     })();
     return () => { cancelled = true; };
   }, [simulated, autoLink]);
@@ -611,12 +724,20 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   }, [handleLine, battery]);
 
   useEffect(() => () => {
-    // Timers belong to this tree and must not fire into it once it is gone.
-    clearTimeout(retryTimer.current);
-    clearTimeout(scanTimer.current);
-    clearInterval(dataTimer.current);
+    // The timers deliberately keep running.
+    //
+    // They used to be cleared here, on the reasoning that they belonged to
+    // this tree -- but they belong to the link, and the link outlives the
+    // tree by design (see below, and the module block at the top). Clearing
+    // them meant that the moment the app was closed, the retry loop, the scan
+    // and the data watchdog all stopped: the band could drop out of range and
+    // nothing was left in the process to notice, or to reconnect when it came
+    // back. Reopening the app was the only thing that ever relinked it.
+    //
+    // A dead tree's setStatus is a no-op, so nothing here fires "into" it; the
+    // next mount adopts the link and re-registers its own listeners.
 
-    // The link deliberately does NOT come down here. Unmount means "Android
+    // The link deliberately does NOT come down here either. Unmount means "Android
     // took the activity away", which happens on a rotation, on a config change,
     // and every time the app leaves the screen while the foreground service
     // holds the process open. Hanging up the GATT connection at that moment is
@@ -631,8 +752,11 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // the next scan would never find it and the UI would sit on "connect to
     // band" with the band already in use.
     if (__DEV__) {
-      wantsConnection.current = false;
-      connecting.current = false;
+      wantsLink = false;
+      connecting = false;
+      clearTimeout(retryTimer); retryTimer = null;
+      clearTimeout(scanTimer); scanTimer = null;
+      clearInterval(dataTimer); dataTimer = null;
       try { notifySub?.remove(); } catch { /* never registered */ }
       try { dropSub?.remove(); } catch { /* never registered */ }
       notifySub = null;

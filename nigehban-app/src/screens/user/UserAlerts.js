@@ -14,7 +14,7 @@ const KIND = {
   snatch:         { title: 'Band torn off',       icon: 'alert-octagon' },
   fall:           { title: 'Fall detected',       icon: 'trending-down' },
   checkin_missed: { title: 'Missed check-in',     icon: 'clock' },
-  watch_lost:     { title: 'Watch stopped',       icon: 'wifi-off' },
+  watch_lost:     { title: 'Went quiet while armed', icon: 'wifi-off' },
   going_dark:     { title: 'Phone about to die',  icon: 'battery' },
   checkin_req:    { title: 'Check-in asked',      icon: 'help-circle' },
   checkin_ack:    { title: 'Checked in — fine',   icon: 'check-circle' },

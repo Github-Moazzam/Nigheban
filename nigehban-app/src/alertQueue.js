@@ -14,15 +14,26 @@
  * The state machine lives in state.js and does not need to know about this.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { call, TUNNEL_HEADERS } from './api';
+import { ALERT_TIMEOUT, call, loadSession } from './api';
 import { lastKnownFix } from './watch';
 
 const QUEUE_KEY = 'nigehban.alertQueue';
 
 let _counter = 0;
 
-/** A locally-unique id that survives no longer than the queue entry itself. */
-function localId() {
+/**
+ * The id of ONE press.
+ *
+ * Minted when the button goes down and carried on the first attempt and every
+ * retry of it, as `client_id`. The server has a unique index on it (migration
+ * 004), so a press that lands but whose reply never gets home can be sent
+ * again as many times as the network demands and still be one alert and one
+ * page to the family.
+ *
+ * It doubles as the queue entry's own id, so the row in storage, the id the
+ * SOS screen holds, and the key the server dedupes on are all the same string.
+ */
+export function pressId() {
   return `local-${Date.now()}-${++_counter}`;
 }
 
@@ -51,7 +62,10 @@ export async function getPending() {
  * distinction matters: the family needs to know where the danger was.
  */
 export async function enqueue(payload) {
-  const id = localId();
+  // The press already has an id if it came from `raise` -- reuse it rather
+  // than minting a second one, or the queue entry and the server's dedupe key
+  // stop being the same thing.
+  const id = payload?.client_id || pressId();
   const item = {
     localId: id,
     payload,
@@ -82,7 +96,35 @@ export async function clearQueue() {
   try { await AsyncStorage.removeItem(QUEUE_KEY); } catch { /* non-fatal */ }
 }
 
+/** How many alerts are still waiting. Cheap enough to call on every wake. */
+export async function pendingCount() {
+  return (await getPending()).length;
+}
+
 // -------------------------------------------------------------- flush ---
+
+// One flush at a time, for the whole app.
+//
+// App.js had an interlock, but it was a React ref -- so it covered the three
+// triggers inside the tree (socket rising edge, AppState, timer) and could not
+// see the fourth. The foreground service calls flushPending() from outside
+// that tree, on its own 60 s tick, and the two overlapping meant both read the
+// same queue and both sent it: `dequeue` re-reads and rewrites the whole array
+// per item, so the second flush was working from a list the first had not
+// finished emptying.
+//
+// The interlock belongs to the queue, not to a screen that may not be mounted.
+let _flushing = false;
+
+export async function flushQueue(session) {
+  if (_flushing) return { delivered: [], failed: [], skipped: true };
+  _flushing = true;
+  try {
+    return await _flush(session);
+  } finally {
+    _flushing = false;
+  }
+}
 
 /**
  * Tries to deliver every queued alert. Returns an object describing what
@@ -97,7 +139,7 @@ export async function clearQueue() {
  * phone is now (Point B, in the note). This costs nothing — the note field
  * already exists and the server stores it as free text.
  */
-export async function flushQueue(session) {
+async function _flush(session) {
   const queue = await getPending();
   if (!queue.length) return { delivered: [], failed: [] };
 
@@ -117,7 +159,7 @@ export async function flushQueue(session) {
         body.note = body.note ? `${body.note} | ${pointB}` : pointB;
       }
 
-      const r = await call(session, '/alert', { method: 'POST', body });
+      const r = await call(session, '/alert', { method: 'POST', body, timeout: ALERT_TIMEOUT });
       delivered.push({ localId: item.localId, response: r });
       await dequeue(item.localId);
     } catch {
@@ -126,4 +168,28 @@ export async function flushQueue(session) {
   }
 
   return { delivered, failed };
+}
+
+/**
+ * The same flush, for a caller with no React tree behind it.
+ *
+ * The app's flush hangs off the WebSocket's rising edge, which only exists
+ * while the UI is mounted. That left the worst case of all unhandled: SOS
+ * pressed in a dead zone, app swiped away, signal returns — and the alert sat
+ * on the phone until somebody thought to open the app, which is not something
+ * a person in trouble is going to do.
+ *
+ * So the Android foreground service's own 60 s tick calls this. It runs
+ * headless, reads the session off disk because there is no `session` prop out
+ * here, and delivers whatever is waiting. Doing nothing when the queue is
+ * empty is the normal case and must stay cheap — it is one AsyncStorage read.
+ */
+export async function flushPending() {
+  const queue = await getPending();
+  if (!queue.length) return { delivered: [], failed: [] };
+
+  const session = await loadSession();
+  if (!session?.token) return { delivered: [], failed: [] };
+
+  return flushQueue(session);
 }

@@ -35,6 +35,7 @@ import os
 import random
 import re
 import secrets
+import threading
 import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
@@ -44,7 +45,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager, closing, contextmanager
 from typing import Optional
 
 from fastapi import (
@@ -93,13 +94,98 @@ SWEEP_TICK_S     = 5
 
 
 # ------------------------------------------------------------------- db ---
+# One pool for the process, and it is not an optimisation.
+#
+# Supabase's session-mode pooler hands out FIFTEEN client connections to the
+# whole project, and the old db() opened a brand new one for every query. A
+# single SOS touches the database five or six times on its way out, so two
+# phones and the 5 s sweeper were enough to hit
+#
+#     FATAL: (EMAXCONNSESSION) max clients reached in session mode
+#
+# and once that starts, EVERY endpoint 500s -- including /me, so the app
+# cannot even sign in and retry. A cap below the ceiling turns that cliff into
+# a queue: the sixteenth caller waits a moment for a connection instead of
+# taking the server down with it. Keep DB_POOL_MAX under 15, and lower it
+# again if a second process (scripts/db.py, a test run, a stray uvicorn) is
+# sharing the same project.
+DB_POOL_MAX       = int(os.environ.get("DB_POOL_MAX", "8"))
+DB_POOL_TIMEOUT_S = float(os.environ.get("DB_POOL_TIMEOUT_S", "15"))
+
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:                                   # pragma: no cover
+    ConnectionPool = None
+
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def _pool():
+    """The process-wide pool, opened on first use."""
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                url = os.environ.get("DATABASE_URL")
+                if not url:
+                    raise Exception("DATABASE_URL not set in .env")
+                _POOL = ConnectionPool(
+                    url, name="nigehban",
+                    min_size=1, max_size=DB_POOL_MAX,
+                    timeout=DB_POOL_TIMEOUT_S, max_idle=120.0,
+                    kwargs={"row_factory": dict_row, "autocommit": True},
+                    open=True,
+                )
+    return _POOL
+
+
+class _Pooled:
+    """A borrowed connection that answers to `close()`.
+
+    Every call site in this file is `with closing(db()) as c:`, and that is the
+    right shape -- so rather than rewrite thirty-six of them, closing a pooled
+    connection hands it back instead of dropping the socket we want to keep.
+    Everything else is the psycopg connection, untouched.
+    """
+    __slots__ = ("_conn", "_pool", "_returned")
+
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+        self._returned = False
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    def close(self):
+        if not self._returned:
+            self._returned = True
+            self._pool.putconn(self._conn)
+
+
 def db():
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise Exception("DATABASE_URL not set in .env")
-    c = psycopg.connect(url, row_factory=dict_row)
-    c.autocommit = True
-    return c
+    if ConnectionPool is None:                        # pragma: no cover
+        # No pool installed: the old one-connection-per-query behaviour, which
+        # works against a local Postgres and falls over against the Supabase
+        # pooler. `pip install -r requirements.txt` fixes it.
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise Exception("DATABASE_URL not set in .env")
+        c = psycopg.connect(url, row_factory=dict_row)
+        c.autocommit = True
+        return c
+    p = _pool()
+    return _Pooled(p, p.getconn())
+
+
+def close_db():
+    """Give every connection back at shutdown, so a restart is not racing the
+    old process for the same fifteen slots."""
+    global _POOL
+    if _POOL is not None:
+        _POOL.close()
+        _POOL = None
 
 
 def init_db():
@@ -246,9 +332,25 @@ class Hub:
 HUB = Hub()
 
 
-def family_of(uid):
+@contextmanager
+def borrow(c=None):
+    """Use the caller's connection if there is one, else take one from the pool.
+
+    Every helper in this file used to open its own. That was free against a
+    Postgres on the same laptop and is not free against a pooler in Tokyo --
+    one SOS made nine trips, which is most of the 8 s the app waits before it
+    decides the alert never sent and raises it again.
+    """
+    if c is not None:
+        yield c
+    else:
+        with closing(db()) as fresh:
+            yield fresh
+
+
+def family_of(uid, c=None):
     """Everyone who receives uid's alerts."""
-    with closing(db()) as c:
+    with borrow(c) as c:
         return [r["member_id"] for r in
                 c.execute("SELECT member_id FROM links WHERE owner_id=%s", (uid,))]
 
@@ -306,6 +408,11 @@ class HeartbeatIn(BaseModel):
     # sends it that way, which is why neither is trusted to imply the other.
     phone_batt: Optional[int] = None
     band_batt: Optional[int] = None
+    # Which kind of band is behind band_link. In virtual mode the phone *is*
+    # the band, so there is no second cell and the family must not be shown
+    # one -- see migration 003. False by default, because a build old enough
+    # not to send this field only ever had a real band to talk about.
+    virtual: bool = False
     lat: Optional[float] = None
     lon: Optional[float] = None
 
@@ -322,6 +429,10 @@ class AlertIn(BaseModel):
     lon: Optional[float] = None
     accuracy: Optional[float] = None
     note: str = ""
+    # The phone's id for one press, sent on the first attempt and on every
+    # retry of it. Optional so an older build still works -- it just gets the
+    # old duplicate-on-retry behaviour, which is the thing to fix by updating.
+    client_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------- app ---
@@ -342,6 +453,13 @@ async def lifespan(_app):
             await task
         except BaseException:
             pass
+        # Detached deliveries are usually an Expo call with a 5 s timeout, and
+        # they are the last thing anyone wants dropped. Give them a moment to
+        # land, then close the pool -- in that order, or the pool goes away
+        # underneath a query still in flight.
+        if _BACKGROUND:
+            await asyncio.wait(set(_BACKGROUND), timeout=6)
+        close_db()
 
 
 app = FastAPI(title="Nigehban local server", lifespan=lifespan)
@@ -767,27 +885,59 @@ def alert_row(r, author):
 
 
 async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
-                     accuracy=None, note=""):
+                     accuracy=None, note="", client_id=None):
     """Write an alert and push it to the family. One path in, for everyone.
 
     The sweeper raises alerts nobody pressed a button for, and those have to be
     indistinguishable from a phone-raised one by the time they reach a family
     member -- same row, same severity, same socket frame. Two code paths would
     drift, and the one that drifts is the one that only runs at 3 a.m.
+
+    `client_id` is the phone's id for ONE press. A retry of that press finds
+    the row already there and returns it untouched: no second row, no second
+    page, no second alarm. See migration 004. Server-raised alerts pass None
+    and stay free to repeat, because two missed check-ins really are two
+    events.
+
+    What leaves this function on the fast path is the database write and the
+    socket fanout, and nothing else. The Expo calls and the samaritan sweep are
+    handed to a background task, because the phone that pressed the button is
+    holding a request open until this returns -- and it gives up after 8 s.
     """
     sev = SEVERITY.get(kind, 3)
     with closing(db()) as c:
+        # ON CONFLICT DO NOTHING returns no row when this press is already
+        # recorded, which is how a retry is recognised. RETURNING * saves the
+        # SELECT that used to follow: every round trip here is ~150 ms to
+        # ap-northeast-1 and the caller is counting them.
         cur = c.execute(
-            "INSERT INTO alerts (user_id,kind,severity,source,lat,lon,accuracy,note,created_at)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (uid, kind, sev, source, lat, lon, accuracy, note, time.time()))
-        new_id = cur.fetchone()["id"]
+            "INSERT INTO alerts"
+            " (user_id,kind,severity,source,lat,lon,accuracy,note,created_at,client_id)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT (user_id,client_id) WHERE client_id IS NOT NULL DO NOTHING"
+            " RETURNING *",
+            (uid, kind, sev, source, lat, lon, accuracy, note, time.time(), client_id))
+        row = cur.fetchone()
+        first_time = row is not None
+        if row is None and client_id is not None:
+            row = c.execute("SELECT * FROM alerts WHERE user_id=%s AND client_id=%s",
+                            (uid, client_id)).fetchone()
+        if row is None:
+            # Only reachable if the row vanished between the two statements.
+            raise HTTPException(500, "could not record the alert")
         c.commit()
-        row = c.execute("SELECT * FROM alerts WHERE id=%s", (new_id,)).fetchone()
         who = c.execute("SELECT id,name FROM users WHERE id=%s", (uid,)).fetchone()
+        targets = [] if kind in PRIVATE_KINDS else family_of(uid, c)
 
     name = who["name"] if who else uid
     payload = alert_row(row, {"id": uid, "name": name})
+
+    # The retry of a press that already landed. The family has been told;
+    # telling them again is the bug this exists to stop. Hand the app the same
+    # row it failed to hear about the first time and stop here.
+    if not first_time:
+        print(f"  [{kind}] from {name} ({uid}) -> retry of alert {row['id']}, already sent")
+        return payload, targets
 
     # A near-miss is written down and told to nobody: it is the wearer's own
     # record that the fall detector nearly fired, not an event.
@@ -795,16 +945,55 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
         print(f"  [{kind}] from {name} ({uid}) -> logged, nobody told")
         return payload, []
 
-    targets = family_of(uid)
     await HUB.fanout(targets, {"t": "alert", "alert": payload})
     print(f"  [{kind}] from {name} ({uid}) -> {len(targets)} family member(s), "
           f"{sum(HUB.online(t) for t in targets)} online")
 
+    # Everything below this line is slow, and none of it is something the
+    # sender waits for. Expo is three sequential HTTP calls at a 5 s timeout,
+    # and the samaritan sweep is a table scan plus a fourth -- up to 15 s of
+    # work behind a client that hangs up at 8. Detaching it is not an
+    # optimisation: a request that outlives the phone's patience gets retried,
+    # and a retried SOS used to mean a second row and a second page.
+    #
+    # The task is held in a module-level set. Without a reference asyncio is
+    # free to garbage-collect a running task, and the notification that goes
+    # missing is the one nobody is watching for.
+    _spawn(_deliver_out_of_band(payload, row, uid, name, kind, sev, lat, lon, targets),
+           f"deliver:{row['id']}")
+
+    return payload, targets
+
+
+_BACKGROUND = set()
+
+
+def _spawn(coro, name):
+    """Run a coroutine detached, keep a reference, and never let it die quietly."""
+    task = asyncio.create_task(coro, name=name)
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+    def _shout(t):
+        if t.cancelled():
+            return
+        e = t.exception()
+        if e:
+            # A push that fails silently looks exactly like a push that worked.
+            print(f"  [background:{name}] {type(e).__name__}: {e}")
+
+    task.add_done_callback(_shout)
+    return task
+
+
+async def _deliver_out_of_band(payload, row, uid, name, kind, sev, lat, lon, targets):
+    """The slow half of emit_alert, with nobody waiting on it."""
     # Send Remote System Push Notification via Expo Push Service API for closed/killed apps
     push_title = (f"EMERGENCY SOS - {name}" if sev >= 5
                   else f"{kind.replace('_', ' ').upper()} - {name}")
     push_body = "Tap immediately to open Nigehban for location and emergency details."
-    await send_expo_push_notifications(targets, push_title, push_body, {"alert_id": row["id"], "severity": sev})
+    await send_expo_push_notifications(targets, push_title, push_body,
+                                       {"alert_id": row["id"], "severity": sev})
 
     # N3.3: the lock-screen takeover needs the app's own code to run, and on a
     # killed app only a data-only push gets it there. Sent second and on top of
@@ -821,8 +1010,6 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
 
     if sev >= 5 and lat is not None and lon is not None:
         await ask_samaritans(row, uid, lat, lon)
-
-    return payload, targets
 
 
 async def ask_samaritans(row, uid, lat, lon):
@@ -858,7 +1045,7 @@ async def ask_samaritans(row, uid, lat, lon):
 async def raise_alert(b: AlertIn, u=Depends(me)):
     payload, targets = await emit_alert(
         u["id"], b.kind, source=b.source, lat=b.lat, lon=b.lon,
-        accuracy=b.accuracy, note=b.note)
+        accuracy=b.accuracy, note=b.note, client_id=b.client_id)
 
     # "I'm fine" is an answer, not just an event. Without this the ward can
     # press the key, the family can see the acknowledgement, and the sweeper
@@ -1251,11 +1438,18 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
         # COALESCE on the batteries for the same reason as the position: an
         # older build sends no band_batt at all, and a null from it must not
         # erase a good reading the family is looking at.
-        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, "
-                  "phone_batt=COALESCE(%s,phone_batt), band_batt=COALESCE(%s,band_batt), "
+        #
+        # Virtual mode is the one case where a null *is* the reading: the phone
+        # is the band, there is no second cell, and COALESCE would otherwise
+        # keep showing whatever a real band last said -- for as long as the
+        # account exists. So that case clears the column outright.
+        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, band_virtual=%s, "
+                  "phone_batt=COALESCE(%s,phone_batt), "
+                  "band_batt=CASE WHEN %s THEN NULL ELSE COALESCE(%s,band_batt) END, "
                   "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
                   "lost_notified=FALSE WHERE user_id=%s",
-                  (now, bool(b.band_link), b.phone_batt, b.band_batt,
+                  (now, bool(b.band_link), bool(b.virtual), b.phone_batt,
+                   bool(b.virtual), b.band_batt,
                    b.lat, b.lon, u["id"]))
         # The mode is the server's to hold, not the phone's to declare -- the
         # phone may have been restarted and forgotten. It may only *raise* to
@@ -1289,6 +1483,9 @@ def watch_of(member_id: str, u=Depends(me)):
         "online": HUB.online(member_id),
         "mode": w["mode"] if w else "idle",
         "band_link": bool(w["band_link"]) if w else False,
+        # The family screen has to say which device it is looking at. Without
+        # this it showed "band connected" for a phone standing in for one.
+        "band_virtual": bool(w["band_virtual"]) if w else False,
         "phone_batt": w["phone_batt"] if w else None,
         "band_batt": w["band_batt"] if w else None,
         "last_beat": w["last_beat"] if w else None,
@@ -1435,9 +1632,22 @@ async def sweep_once(now):
     for w in lost:
         # The last known position is the most useful thing there is here: the
         # phone has stopped reporting, so this is where it stopped.
+        #
+        # The wording is the alert. "Watch stopped reporting" reads like a
+        # gadget fault, and that is how a family treats it -- but the watch was
+        # ARMED, which is the one state where going quiet is itself the thing
+        # worth waking someone over. So the note says the three causes the
+        # server can honestly distinguish between (it cannot tell them apart)
+        # and names the one that matters, rather than describing the sensor.
+        silent_s = int(now - w["last_beat"])
+        mins = max(1, round(silent_s / 60))
         await emit_alert(w["user_id"], "watch_lost", source="server",
                          lat=w["last_lat"], lon=w["last_lon"],
-                         note=f"phone silent for {int(now - w['last_beat'])}s while armed")
+                         note=(f"Armed, then went quiet {mins} min ago. "
+                               "The phone lost signal, was switched off, or the app "
+                               "was stopped — Nigehban cannot tell which. "
+                               "The pin is where it last reported. "
+                               "Try calling; if there is no answer, treat this as real."))
 
     LIMIT.sweep()
     return {"missed": len(due), "buzzed": len(buzz), "lost": len(lost)}

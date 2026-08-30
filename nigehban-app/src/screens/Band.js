@@ -156,16 +156,23 @@ export default function Band({ band, serverOnline }) {
           {/* ---- what the band thinks ---- */}
           <Card>
             <Txt variant="h2">Band state</Txt>
+            {/* Two rows rather than one, because this console is where the two
+                batteries are easiest to confuse. What the firmware calls its
+                cell is, here, this phone's own -- expo-battery standing in for
+                the ADC pin. Labelling that "Battery" is how the number ends up
+                on a family screen as a wristband's charge. */}
             <View style={s.statRow}>
-              <Stat label="Battery" icon="battery" value={`${Math.round(v.battery)}%`}
-                    sub={v.batteryAvailable ? 'this phone' : 'simulated drain'}
+              <Stat label="Phone battery" icon="battery" value={`${Math.round(v.battery)}%`}
+                    sub={v.batteryAvailable ? 'read from this phone' : 'simulated drain'}
                     tone={v.battery <= 20 ? C.amber : C.text} />
+              <Stat label="Band battery" icon="watch" value="N/A"
+                    sub="no wristband — this phone is it" tone={C.dim} />
               <Stat label="High alert" icon="shield" value={v.highAlert ? 'On' : 'Off'}
                     tone={v.highAlert ? C.amber : C.dim} />
-              <Stat label="Last event" icon="activity"
-                    value={band.lastSeen ? fmtAgo(band.lastSeen / 1000) : '—'} />
             </View>
             <View style={s.statRow}>
+              <Stat label="Last event" icon="activity"
+                    value={band.lastSeen ? fmtAgo(band.lastSeen / 1000) : '—'} />
               <Stat label="Accelerometer" icon="cpu" value={v.imu}
                     tone={v.imu === 'live' ? C.green : C.dim} />
               <Stat label="Fall state" icon="trending-down" value={v.fallStage}

@@ -19,10 +19,17 @@ const SILENT_S = 180;   // the server's BEAT_LOST_S; the tile must agree with it
  * as the phone's, so this tile said "Phone battery 4%" about a wristband. The
  * band's now sits beside the band's own link status, where it is unambiguous.
  */
-export default function WatchStatusTile({ watchState = {}, isVirtual = false, style }) {
+export default function WatchStatusTile({ watchState = {}, isVirtual, style }) {
   const { mode = 'idle', band_link: bandLink = false,
+          band_virtual: bandVirtual = false,
           phone_batt: batt = null, band_batt: bandBatt = null,
           last_beat: lastBeat = null } = watchState;
+
+  // The server says which device this is (migration 003). The prop is kept for
+  // callers that already knew locally, but it is no longer the only source --
+  // a phone standing in for a band still reports band_link=true, so callers
+  // were guessing from that and guessing wrong.
+  const virtual = isVirtual ?? bandVirtual;
 
   const [, force] = useState(0);
   useEffect(() => {
@@ -36,12 +43,17 @@ export default function WatchStatusTile({ watchState = {}, isVirtual = false, st
   // The band's charge rides on the band's own row. A null is "not reported"
   // -- virtual mode has no second cell, and an older build sends none -- which
   // must not read as a band at zero.
-  const link = bandLink
-    ? { text: bandBatt == null ? 'connected' : `connected · ${bandBatt}%`,
-        tone: bandBatt != null && bandBatt <= 20 ? C.amber : C.green }
-    : isVirtual
-      ? { text: 'phone as band', tone: C.dim }
-      : { text: 'no band', tone: C.amber };
+  //
+  // Virtual is checked before the link, not after it. A phone standing in for
+  // a band reports band_link=true, so the old order fell into the first branch
+  // and drew a wristband battery that did not exist.
+  const link = virtual
+    ? { text: 'phone as band', sub: 'Band battery N/A', tone: C.dim }
+    : bandLink
+      ? { text: bandBatt == null ? 'connected' : `connected · ${bandBatt}%`,
+          sub: bandBatt == null ? 'battery not reported yet' : null,
+          tone: bandBatt != null && bandBatt <= 20 ? C.amber : C.green }
+      : { text: 'no band', sub: null, tone: C.amber };
 
   const battTone = batt == null ? C.dim
                  : batt <= 5 ? C.red
@@ -60,7 +72,7 @@ export default function WatchStatusTile({ watchState = {}, isVirtual = false, st
       </View>
 
       <View style={s.row}>
-        <Metric label="Band" value={link.text} tone={link.tone} />
+        <Metric label="Band" value={link.text} sub={link.sub} tone={link.tone} />
         <Metric label="Phone battery" value={batt == null ? '—' : `${batt}%`} tone={battTone} />
         <Metric label="High alert"
                 value={mode === 'high_alert' ? 'Armed' : mode === 'sos' ? 'SOS' : 'Off'}
@@ -80,11 +92,14 @@ export default function WatchStatusTile({ watchState = {}, isVirtual = false, st
   );
 }
 
-function Metric({ label, value, tone }) {
+function Metric({ label, value, sub, tone }) {
   return (
     <View style={s.metric}>
       <Label>{label}</Label>
       <Text style={[T.title, { color: tone }]} numberOfLines={1}>{value}</Text>
+      {sub ? (
+        <Text style={[T.meta, { color: C.faint }]} numberOfLines={1}>{sub}</Text>
+      ) : null}
     </View>
   );
 }

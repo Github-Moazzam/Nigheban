@@ -4,8 +4,8 @@ import {
   ActivityIndicator, AppState, Linking, Modal, Pressable, StyleSheet, Text,
   Vibration, View,
 } from 'react-native';
-import { call, clearSession, loadSession, saveSession, useLive } from './src/api';
-import { enqueue, flushQueue, clearQueue } from './src/alertQueue';
+import { ALERT_TIMEOUT, call, clearSession, loadSession, saveSession, useLive } from './src/api';
+import { clearQueue, dequeue, enqueue, flushQueue, pendingCount, pressId } from './src/alertQueue';
 import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
@@ -29,6 +29,7 @@ import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
 import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
+import { runFirstRunAsks } from './src/permissions';
 import {
   DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
   setupNotificationChannels, subscribeNotificationTaps,
@@ -44,7 +45,10 @@ const TABS = [
 
 const TAKEOVER_TITLE = {
   sos: 'SOS', snatch: 'BAND TORN OFF', fall: 'FALL DETECTED',
-  checkin_missed: 'MISSED CHECK-IN', watch_lost: 'WATCH STOPPED REPORTING',
+  // Not "watch stopped reporting". That reads as a gadget fault, and a family
+  // triages it like one; the fact worth acting on is that the phone went quiet
+  // *while armed*, which is the state where silence is the signal.
+  checkin_missed: 'MISSED CHECK-IN', watch_lost: 'WENT QUIET WHILE ARMED',
   going_dark: 'PHONE ABOUT TO DIE',
 };
 
@@ -207,6 +211,15 @@ function Main() {
     })();
   }, [pendingAlertId, session]);
 
+  // Ask for what the app needs at the point somebody has an account and is
+  // looking at the screen -- not on a Setup tab they may never open. Two rungs,
+  // once per install; runFirstRunAsks says what is deliberately left out of it
+  // and who asks for those instead.
+  useEffect(() => {
+    if (!session?.token) return;
+    runFirstRunAsks();
+  }, [session?.token]);
+
   // Keyed on the session rather than done once at boot. Registering only on
   // mount meant somebody who had just signed in had no push token on the
   // server until they next launched the app -- so the first alert after
@@ -261,21 +274,30 @@ function Main() {
     // This is where the emergency happened, not wherever the phone drifts
     // to while waiting for signal.
     const at = fix || await lastKnownFix();
-    const body = { lat: at?.lat, lon: at?.lon, accuracy: at?.acc, ...payload };
+
+    // The id of this press, minted here and not one line later. It goes out on
+    // the FIRST attempt, which is the one that matters: the duplicate SOS came
+    // from an attempt that reached the server, inserted the row and paged the
+    // family, and then took longer to answer than the phone was willing to
+    // wait. Every retry now carries the same id and the server recognises it.
+    const clientId = pressId();
+    const body = {
+      lat: at?.lat, lon: at?.lon, accuracy: at?.acc, client_id: clientId, ...payload,
+    };
     const isEmergency = ['sos', 'snatch', 'fall'].includes(payload.kind);
 
     // LOCAL-FIRST: fire the state machine and vibrate immediately, before
     // the network call. The user must know their button press registered,
     // and the SOS screen must appear even with no connectivity at all.
+    const localAlert = {
+      id: `pending-${Date.now()}`,
+      kind: payload.kind,
+      source: payload.source || 'app',
+      created_at: Date.now() / 1000,
+      lat: at?.lat, lon: at?.lon,
+      _local: true,  // marker: not yet confirmed by the server
+    };
     if (isEmergency) {
-      const localAlert = {
-        id: `pending-${Date.now()}`,
-        kind: payload.kind,
-        source: payload.source || 'app',
-        created_at: Date.now() / 1000,
-        lat: at?.lat, lon: at?.lon,
-        _local: true,  // marker: not yet confirmed by the server
-      };
       dispatch('SOS_RAISED', { alert: localAlert });
       setDeliveredTo(null);
       setDeliveryStatus('queued');
@@ -284,7 +306,9 @@ function Main() {
 
     // Now try the network call.
     try {
-      const r = await call(session, '/alert', { method: 'POST', body });
+      const r = await call(session, '/alert', {
+        method: 'POST', body, timeout: ALERT_TIMEOUT,
+      });
       if (isEmergency) {
         // Replace the local placeholder with the real server alert.
         dispatch('SOS_RAISED', { alert: r.alert });
@@ -302,7 +326,14 @@ function Main() {
       if (isEmergency) {
         // Network failed — queue for retry. The SOS screen is already live
         // from the local-first dispatch above.
-        await enqueue(body);
+        //
+        // The queue's own id becomes the alert's id from here on. Without that
+        // the screen held a `pending-…` id with no way back to the row in
+        // storage, so cancelling had nothing to aim at and cleared the entire
+        // queue -- a queued fall plus a queued SOS meant standing down either
+        // one silently threw away the other.
+        const queuedId = await enqueue(body);
+        dispatch('SOS_RAISED', { alert: { ...localAlert, id: queuedId } });
         setDeliveryStatus('queued');
         setToast('No signal — your alert is saved and will send automatically when connection returns');
       } else {
@@ -315,7 +346,11 @@ function Main() {
   const resolve = useCallback(async (id) => {
     try {
       if (!id || String(id).startsWith('pending-') || String(id).startsWith('local-')) {
-        await clearQueue();
+        // One item, not the lot. `local-…` is a real row in the queue and is
+        // removed by id; `pending-…` never reached storage at all, so there is
+        // nothing to remove and anything else waiting there belongs to a
+        // different emergency.
+        if (String(id).startsWith('local-')) await dequeue(id);
         dispatch('SOS_CLEARED');
         setDeliveredTo(null);
         setDeliveryStatus(null);
@@ -546,6 +581,7 @@ function Main() {
     // cell, so bandBatt is null rather than a copy of the phone's reading.
     bandBatt: band.mode === MODES.BLE ? band.battery : null,
     phoneBatt,
+    virtual: band.mode !== MODES.BLE,
   });
 
   // Presence is what makes the Good Samaritan fan-out possible at all: it is
@@ -626,34 +662,84 @@ function Main() {
     family_added: (m) => { setToast(`${m.user.name} is now in your family`); bump(); },
   });
 
-  // ---- offline queue: flush on reconnect ----------------------------------
-  // When the WebSocket comes back online after being down, try to deliver any
-  // alerts that were queued while offline. The serverOnline flag is driven by
-  // useLive's onopen/onclose, so this fires on the natural reconnect.
+  // ---- offline queue: every chance to flush it ----------------------------
+  //
+  // The rising edge of the WebSocket was the only trigger, and it is the one
+  // that cannot fire when it matters most: the socket lives in this tree, so a
+  // phone whose app is off screen when signal returns reconnects nothing and
+  // delivers nothing until somebody opens it. Four triggers now, because each
+  // covers a case the others cannot:
+  //
+  //   1. the socket's rising edge   -- app open, signal returns
+  //   2. coming back to the app     -- reopened after being backgrounded
+  //   3. a timer while anything is queued -- app open but the socket is not
+  //      the thing that came back (captive portal, server restarted)
+  //   4. the foreground service's tick -- app closed entirely; see bgService
+  //
+  // Two of these firing together would send the same alert twice, and a family
+  // paged twice for one press is how a real one gets ignored. There are two
+  // guards against that now, at different depths: `flushing` below keeps this
+  // screen from doing redundant work, the queue's own interlock covers the
+  // background service that this ref cannot see, and `client_id` makes a
+  // duplicate that gets through harmless at the server. The last one is the
+  // only one that survives the app being killed mid-send.
+  const flushing = useRef(false);
+  const flushNow = useCallback(async () => {
+    if (!session || flushing.current) return;
+    flushing.current = true;
+    try {
+      const { delivered } = await flushQueue(session);
+      if (delivered.length > 0) {
+        const last = delivered[delivered.length - 1];
+        const count = last.response?.delivered_to;
+        // Replace the local placeholder with the real server alert.
+        if (last.response?.alert) {
+          dispatch('SOS_RAISED', { alert: last.response.alert });
+        }
+        setDeliveredTo(count ?? null);
+        setDeliveryStatus('delivered');
+        setToast(count
+          ? `Your alert has been delivered to ${count} family member${count === 1 ? '' : 's'}`
+          : 'Your alert has been sent to the server');
+        bump();
+        return;
+      }
+      // Nothing delivered here does not mean nothing was delivered. The
+      // background flush may have emptied the queue while this screen was
+      // gone, and a live SOS screen still reading "waiting for signal" after
+      // the alert has actually gone out is the wrong kind of wrong.
+      if ((await pendingCount()) === 0) {
+        setDeliveryStatus((cur) => (cur === 'queued' ? 'delivered' : cur));
+      }
+    } finally {
+      flushing.current = false;
+    }
+  }, [session, dispatch, bump]);
+
   const prevOnline = useRef(false);
   useEffect(() => {
-    if (serverOnline && !prevOnline.current && session) {
-      // Just reconnected. Flush the queue.
-      (async () => {
-        const { delivered } = await flushQueue(session);
-        if (delivered.length > 0) {
-          const last = delivered[delivered.length - 1];
-          const count = last.response?.delivered_to;
-          // Replace the local placeholder with the real server alert.
-          if (last.response?.alert) {
-            dispatch('SOS_RAISED', { alert: last.response.alert });
-          }
-          setDeliveredTo(count ?? null);
-          setDeliveryStatus('delivered');
-          setToast(count
-            ? `Your alert has been delivered to ${count} family member${count === 1 ? '' : 's'}`
-            : 'Your alert has been sent to the server');
-          bump();
-        }
-      })();
-    }
+    if (serverOnline && !prevOnline.current) flushNow();
     prevOnline.current = serverOnline;
-  }, [serverOnline, session, dispatch, bump]);
+  }, [serverOnline, flushNow]);
+
+  // A cold start with something still in the queue, and every return to the
+  // foreground after that.
+  useEffect(() => {
+    flushNow();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') flushNow();
+    });
+    return () => sub.remove();
+  }, [flushNow]);
+
+  // While the screen still says "waiting for signal", keep trying. With no
+  // network that is one failed fetch every thirty seconds; once the queue is
+  // empty the effect stops entirely.
+  useEffect(() => {
+    if (deliveryStatus !== 'queued') return undefined;
+    const id = setInterval(flushNow, 30000);
+    return () => clearInterval(id);
+  }, [deliveryStatus, flushNow]);
 
   const signOut = async () => {
     await stopBackgroundWatch();

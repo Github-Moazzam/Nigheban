@@ -95,9 +95,9 @@ export async function lastKnownFix() {
  * would cost more battery than the feature is worth. It is there so that
  * `watch_lost` can tell the family where the phone was when it went quiet.
  */
-export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt }) {
-  const state = useRef({ mode, bandLink, bandBatt, phoneBatt });
-  state.current = { mode, bandLink, bandBatt, phoneBatt };
+export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt, virtual }) {
+  const state = useRef({ mode, bandLink, bandBatt, phoneBatt, virtual });
+  state.current = { mode, bandLink, bandBatt, phoneBatt, virtual };
 
   useEffect(() => {
     if (!session?.token || mode === 'idle') return undefined;
@@ -121,6 +121,11 @@ export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt }) {
             // a band at zero.
             phone_batt: cur.phoneBatt == null ? null : Math.round(cur.phoneBatt),
             band_batt: cur.bandBatt == null ? null : Math.round(cur.bandBatt),
+            // Which device band_link is about. A null band_batt is ambiguous on
+            // its own -- it is also what a real band sends before its first
+            // reading -- so the server is told outright, and clears any reading
+            // an earlier real band left behind. See migration 003.
+            virtual: !!cur.virtual,
             lat: pos?.coords?.latitude ?? null,
             lon: pos?.coords?.longitude ?? null,
           },

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Linking, Platform, RefreshControl, ScrollView, StyleSheet, Text, View,
+  RefreshControl, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import {
   backgroundWatchDiagnostics, isBackgroundWatchRunning, startBackgroundWatch,
@@ -10,16 +10,16 @@ import {
   alarmCapability, fullScreenIntentAllowed, openFullScreenIntentSettings,
   presentAlarm, stopAlarm,
 } from '../alarm';
+import {
+  OEM, askPermission, ladderRows, openActivity, openBatterySettings,
+  readPermissions, vendorKey,
+} from '../permissions';
 import { DEFAULT_CHANNEL_ID, pushDiagnostics, registerPushToken } from '../notifications';
 import { C, S, T } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Label, Txt } from '../ui';
 
-let Location = null;
 let Notifications = null;
-let IntentLauncher = null;
-try { Location = require('expo-location'); } catch { /* degrades below */ }
 try { Notifications = require('expo-notifications'); } catch { /* degrades below */ }
-try { IntentLauncher = require('expo-intent-launcher'); } catch { /* degrades below */ }
 
 /**
  * U5.1 + U5.2 — the setup screen, which is the difference between an app that
@@ -39,96 +39,15 @@ try { IntentLauncher = require('expo-intent-launcher'); } catch { /* degrades be
  *      on screen.
  */
 
-// Execution plan §7. Vendor, activity, and what the screen is called there.
-const OEM = {
-  xiaomi: {
-    label: 'Xiaomi / Redmi / POCO',
-    pkg: 'com.miui.securitycenter',
-    cls: 'com.miui.permcenter.autostart.AutoStartManagementActivity',
-    how: 'Find Nigehban in the Autostart list and switch it on.',
-  },
-  huawei: {
-    label: 'Huawei / Honor',
-    pkg: 'com.huawei.systemmanager',
-    cls: 'com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity',
-    how: 'Turn off "Manage automatically" for Nigehban, then allow all three switches.',
-  },
-  oppo: {
-    label: 'Oppo / Realme',
-    pkg: 'com.coloros.safecenter',
-    cls: 'com.coloros.safecenter.permission.startup.StartupAppListActivity',
-    how: 'Allow Nigehban to start in the background.',
-  },
-  vivo: {
-    label: 'Vivo / iQOO',
-    pkg: 'com.vivo.permissionmanager',
-    cls: 'com.vivo.permissionmanager.activity.BgStartUpManagerActivity',
-    how: 'Allow background start, then set battery use to unrestricted.',
-  },
-  samsung: {
-    label: 'Samsung',
-    pkg: 'com.samsung.android.lool',
-    cls: 'com.samsung.android.sm.ui.battery.BatteryActivity',
-    how: 'Add Nigehban to "Never sleeping apps".',
-  },
-};
-
-function vendorKey() {
-  const m = (Platform.constants?.Manufacturer || Platform.constants?.Brand || '').toLowerCase();
-  if (/xiaomi|redmi|poco/.test(m)) return 'xiaomi';
-  if (/huawei|honor/.test(m)) return 'huawei';
-  if (/oppo|realme/.test(m)) return 'oppo';
-  if (/vivo|iqoo/.test(m)) return 'vivo';
-  if (/samsung/.test(m)) return 'samsung';
-  return null;
-}
-
-async function openActivity(pkg, cls) {
-  if (Platform.OS !== 'android') return false;
-  try {
-    await IntentLauncher.startActivityAsync('android.intent.action.MAIN', {
-      packageName: pkg, className: cls,
-    });
-    return true;
-  } catch {
-    try { await Linking.openSettings(); } catch { /* nothing left to try */ }
-    return false;
-  }
-}
-
-async function openBatterySettings() {
-  if (Platform.OS !== 'android') return false;
-  try {
-    await IntentLauncher.startActivityAsync(
-      'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS');
-    return true;
-  } catch {
-    try { await Linking.openSettings(); } catch { /* nothing left to try */ }
-    return false;
-  }
-}
-
-/**
- * What is still missing, for the nudge on the Home screen. Returns the number
- * of permissions not yet granted; unknown counts as granted, because a build
- * without the module cannot be fixed from here and nagging about it is noise.
- */
-export async function pendingPermissions() {
-  const checks = [
-    async () => (await Notifications?.getPermissionsAsync())?.granted,
-    async () => (await Location?.getForegroundPermissionsAsync())?.granted,
-    async () => (await Location?.getBackgroundPermissionsAsync())?.granted,
-  ];
-  let missing = 0;
-  for (const check of checks) {
-    try { if ((await check()) === false) missing += 1; } catch { /* unknown */ }
-  }
-  return missing;
-}
+// The OEM table, the vendor lookup, the settings openers and the ladder copy
+// now live in ../permissions, because the end-user shell needs every one of
+// them and had none of them. Re-exported so the existing import in Home.js
+// keeps working.
+export { pendingPermissions } from '../permissions';
 
 
 export default function Setup({ onDone, session }) {
-  const [perm, setPerm] = useState({ notif: null, loc: null, bg: null });
+  const [perm, setPerm] = useState({ notif: null, loc: null, bg: null, fsi: null });
   const [checking, setChecking] = useState(true);
   const [diag, setDiag] = useState({
     bgModules: null, bgRunning: null, bgError: null,
@@ -142,11 +61,7 @@ export default function Setup({ onDone, session }) {
 
   const refresh = useCallback(async () => {
     setChecking(true);
-    const next = { notif: null, loc: null, bg: null };
-    try { next.notif = (await Notifications?.getPermissionsAsync())?.granted ?? null; } catch { /* unknown */ }
-    try { next.loc = (await Location?.getForegroundPermissionsAsync())?.granted ?? null; } catch { /* unknown */ }
-    try { next.bg = (await Location?.getBackgroundPermissionsAsync())?.granted ?? null; } catch { /* unknown */ }
-    setPerm(next);
+    setPerm(await readPermissions());
     setChecking(false);
   }, []);
 
@@ -257,36 +172,11 @@ export default function Setup({ onDone, session }) {
   };
 
   const ask = async (which) => {
-    try {
-      if (which === 'notif') await Notifications?.requestPermissionsAsync();
-      if (which === 'loc') await Location?.requestForegroundPermissionsAsync();
-      if (which === 'bg') await Location?.requestBackgroundPermissionsAsync();
-    } catch { /* the refresh below reports whatever actually happened */ }
+    await askPermission(which);
     refresh();
   };
 
-  const ladder = [
-    {
-      key: 'notif', icon: 'bell', title: 'Alerts that make a sound',
-      why: 'Without this, an SOS from your family arrives silently — which is the '
-         + 'same as not arriving.',
-      granted: perm.notif, action: 'ALLOW NOTIFICATIONS',
-    },
-    {
-      key: 'loc', icon: 'map-pin', title: 'Your location',
-      why: 'Attached to every alert you raise, so your family gets a map pin '
-         + 'rather than a guess.',
-      granted: perm.loc, action: 'ALLOW LOCATION',
-    },
-    {
-      key: 'bg', icon: 'navigation', title: 'Location while the app is closed',
-      why: 'This is what keeps the watch running in your pocket. Choose "Allow all '
-         + 'the time" on the screen Android shows next.',
-      granted: perm.bg, action: 'ALLOW IN BACKGROUND',
-      blocked: perm.loc === false,
-    },
-  ];
-
+  const ladder = ladderRows(perm);
   const remaining = ladder.filter((r) => r.granted !== true).length;
 
   return (
@@ -298,7 +188,7 @@ export default function Setup({ onDone, session }) {
         <Label>Setup</Label>
         <Txt variant="h1">Make sure Nigehban survives your phone</Txt>
         <Text style={[T.body, { color: C.dim }]}>
-          Four steps, once. Every one of them is something Android will otherwise
+          A few steps, once. Every one of them is something Android will otherwise
           switch off quietly, on the day it matters.
         </Text>
       </View>
@@ -346,7 +236,7 @@ export default function Setup({ onDone, session }) {
         <Card tone={C.amber}>
           <View style={s.stepHead}>
             <View style={s.num}>
-              <Text style={[T.title, { color: C.dim }]}>4</Text>
+              <Text style={[T.title, { color: C.dim }]}>{ladder.length + 1}</Text>
             </View>
             <View style={{ flex: 1, gap: 3 }}>
               <Txt variant="h2">Let it run in the background</Txt>
@@ -393,7 +283,7 @@ export default function Setup({ onDone, session }) {
         <Card>
           <View style={s.stepHead}>
             <View style={s.num}>
-              <Text style={[T.title, { color: C.dim }]}>5</Text>
+              <Text style={[T.title, { color: C.dim }]}>{ladder.length + 2}</Text>
             </View>
             <View style={{ flex: 1, gap: 3 }}>
               <Txt variant="h2">Is it actually working?</Txt>
