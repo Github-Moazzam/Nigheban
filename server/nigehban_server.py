@@ -891,12 +891,42 @@ def nearby_strangers(uid, lat, lon, now=None):
     return sorted(out, key=lambda x: x[1])
 
 
-def alert_row(r, author):
+def acks_for(alert_ids, c):
+    """Who has answered each of these alerts, oldest first.
+
+    One query for every alert in the response rather than one per row: the app
+    asks for five at a time and each round trip to the pooler is ~150 ms.
+
+    This exists because the answer used to live only in the websocket frame
+    `/alert/{id}/ack` sends. A phone whose app was closed at that moment never
+    heard it and had no way to ask afterwards, so reopening said "waiting for
+    someone to answer" while somebody was already driving over -- BUG-008.
+    The database always knew; nothing ever read it back.
+    """
+    ids = list(alert_ids)
+    if not ids:
+        return {}
+    rows = c.execute(
+        "SELECT k.alert_id, k.user_id, k.at, u.name FROM acks k"
+        " JOIN users u ON u.id = k.user_id"
+        " WHERE k.alert_id = ANY(%s) ORDER BY k.at", (ids,)).fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["alert_id"], []).append(
+            {"id": r["user_id"], "name": r["name"], "at": r["at"]})
+    return out
+
+
+def alert_row(r, author, acks=()):
     return {"id": r["id"], "kind": r["kind"], "severity": r["severity"],
             "source": r["source"], "lat": r["lat"], "lon": r["lon"],
             "accuracy": r["accuracy"], "note": r["note"],
             "created_at": r["created_at"], "resolved_at": r["resolved_at"],
             "user": author,
+            # Always present, even when empty. The app replays these on every
+            # restore, and "the key is missing" and "nobody has answered" have
+            # to be the same thing to it or a stale build reads as a silence.
+            "acks": list(acks),
             "maps": (f"https://maps.google.com/?q={r['lat']:.6f},{r['lon']:.6f}"
                      if r["lat"] is not None else None)}
 
@@ -1100,6 +1130,69 @@ async def resolve(alert_id: int, u=Depends(me)):
     return {"ok": True}
 
 
+# The channel the app files "somebody answered" under: it vibrates, and it makes
+# no sound. Named here rather than inlined because both ack paths use it and it
+# has to match `RESPONDER_CHANNEL_ID` in the app's notifications.js exactly -- a
+# channel id Android does not recognise silently demotes the notification.
+RESPONDER_CHANNEL_ID = "nigehban_sos_responder"
+
+
+async def notify_owner_of_ack(row, responder, total, samaritan=False):
+    """Tell the person in trouble that somebody is coming.
+
+    The websocket frame above only lands if their app is open. It usually is
+    not: the phone is in a pocket, the screen is off, and on Android the app may
+    have been killed the moment it left the foreground. That was BUG-008 -- the
+    answer existed on the server and reached the wearer nowhere.
+
+    A visible push is the only delivery path that survives a terminated app, so
+    it is the one used here. Deliberately NOT the silent/data push the family's
+    siren rides on: that one exists to wake the app so it can take the lock
+    screen over, and nothing here should take a screen over.
+
+    Two things this must not do, both because the wearer may be in the middle of
+    the emergency this is about:
+
+      - No sound. Same reasoning as the wearer's own SOS notification: it could
+        give away the position of somebody hiding from whoever they pressed the
+        button about. The channel vibrates and stays quiet.
+      - No band buzz. The wristband vibrating means exactly one thing already --
+        "someone is checking on you, press the button to answer" -- and a person
+        in danger must not be handed a button to press. Reusing that buzz for
+        good news would make both meanings unreliable.
+    """
+    if row["resolved_at"]:
+        # The emergency is over. Somebody acking a stood-down alert is tidying
+        # up, not responding, and the wearer does not need to be told.
+        return
+    if responder["id"] == row["user_id"]:
+        return
+
+    name = responder["name"] or "Someone"
+    title = (f"{name} is nearby and on the way" if samaritan
+             else f"{name} is on the way")
+    body = "They answered your SOS and can see your location."
+    if total > 1:
+        # The count is the reassuring part, and it is the part a single
+        # notification cannot carry. Each responder gets their own push -- the
+        # server cannot reach back and edit one already sitting on a locked
+        # phone -- so each one says where things now stand.
+        body = f"They answered your SOS. {total} people are on their way."
+
+    await send_expo_push_notifications(
+        [row["user_id"]], title, body,
+        # severity stays low on purpose. The app routes >= 4 to the siren
+        # channel and its background task fires the full-screen takeover at
+        # >= 4, and neither belongs on the phone of the person who raised it.
+        {"alert_id": row["id"], "responder": name, "severity": 1,
+         "responders": total, "t": "ack"},
+        channel=RESPONDER_CHANNEL_ID,
+        # Same freshness rule as an emergency push. "Someone is on the way"
+        # delivered half an hour late describes a situation that has moved on.
+        ttl=300,
+        sound=None)
+
+
 @app.post("/alert/{alert_id}/ack")
 async def ack(alert_id: int, u=Depends(me)):
     """A family member saying 'I've seen this, I'm on it.'"""
@@ -1107,12 +1200,27 @@ async def ack(alert_id: int, u=Depends(me)):
         row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
         if not row:
             raise HTTPException(404, "no such alert")
-        c.execute("INSERT INTO acks VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                  (alert_id, u["id"], time.time()))
+        # RETURNING tells a first ack apart from the same person tapping twice.
+        # Without it a double tap sends a second push saying somebody new is
+        # coming, which on a safety device is a lie, not a duplicate.
+        at = time.time()
+        first = c.execute(
+            "INSERT INTO acks VALUES (%s,%s,%s) ON CONFLICT DO NOTHING"
+            " RETURNING alert_id",
+            (alert_id, u["id"], at)).fetchone() is not None
         c.commit()
+        total = len(acks_for([alert_id], c).get(alert_id, ()))
 
-    await HUB.to(row["user_id"], {"t": "ack", "alert_id": alert_id,
+    # `at` travels with the frame so the socket and the restore path agree.
+    # Without it the app stamped arrival time, and a responder from ten minutes
+    # ago redrew as "just now" the moment anything re-rendered.
+    await HUB.to(row["user_id"], {"t": "ack", "alert_id": alert_id, "at": at,
                                   "by": {"id": u["id"], "name": u["name"]}})
+    # Detached: Expo is a 5 s HTTP call and the family member who just tapped
+    # "I'm on it" is holding this request open waiting for it to return.
+    if first:
+        _spawn(notify_owner_of_ack(row, {"id": u["id"], "name": u["name"]}, total),
+               f"ack-push:{alert_id}:{u['id']}")
     return {"ok": True}
 
 
@@ -1130,7 +1238,11 @@ def list_alerts(scope: str = "incoming", limit: int = 50, u=Depends(me)):
                 "WHERE a.user_id IN (SELECT owner_id FROM links WHERE member_id=%s) "
                 "ORDER BY a.created_at DESC LIMIT %s",
                 (u["id"], limit)).fetchall()
-    return [alert_row(r, {"id": r["user_id"], "name": r["uname"]}) for r in rows]
+        # Same connection, one extra round trip for the whole page.
+        acks = acks_for([r["id"] for r in rows], c)
+    return [alert_row(r, {"id": r["user_id"], "name": r["uname"]},
+                      acks.get(r["id"], ()))
+            for r in rows]
 
 
 # ---- devices ------------------------------------------------------------
@@ -1189,7 +1301,8 @@ def forget_push_tokens(tokens):
     print(f"  [expo push] forgot {len(tokens)} unregistered token(s)")
 
 
-async def send_expo_push_notifications(uids, title, body, data=None, silent=False):
+async def send_expo_push_notifications(uids, title, body, data=None, silent=False,
+                                       channel=None, ttl=None, sound="default"):
     """Send Hardware Remote Push Notification via Expo Push Service API.
 
     Delivers notifications directly to Android system push framework even when
@@ -1203,6 +1316,17 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
     takeover can only be reached this way, and a severity-4-or-worse alert
     therefore goes out twice: once visibly, so something appears even if the
     silent one is dropped, and once silently, to start the siren.
+
+    `channel`, `ttl` and `sound` override what severity would otherwise decide.
+    They exist for the one push that travels the other way -- to the person in
+    trouble rather than to the people being called. "Somebody answered" must not
+    be filed on the DND-bypassing siren channel, and it stops being worth
+    delivering long before the informational hour is up.
+
+    On Android 8+ the channel owns the sound and `sound` here is redundant, but
+    it is sent anyway: a phone whose channel was somehow created by an older
+    build would otherwise fall back to "default" and make a noise next to
+    somebody hiding.
     """
     tokens = push_tokens_for(uids)
     if not tokens:
@@ -1231,7 +1355,7 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
     # a situation that has already moved on. It is deliberately not 0: "deliver
     # this instant or discard" would throw away real alerts over a two-second
     # network blip. An hour for the rest, which are informational.
-    ttl = 300 if sev >= 4 else 3600
+    ttl = ttl if ttl is not None else (300 if sev >= 4 else 3600)
 
     payloads = []
     sent_tokens = []
@@ -1255,11 +1379,12 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
                     "to": token,
                     "title": title,
                     "body": body,
-                    "sound": "default",
+                    "sound": sound,
                     "priority": "high",
                     "ttl": ttl,
                     "data": data or {},
-                    "channelId": "nigehban_emergency_alarm" if sev >= 4 else "nigehban_default"
+                    "channelId": channel or ("nigehban_emergency_alarm" if sev >= 4
+                                             else "nigehban_default")
                 })
             sent_tokens.append(token)
 
@@ -1548,19 +1673,27 @@ async def samaritan_respond(alert_id: int, u=Depends(me)):
             raise HTTPException(403, "only a severity-5 alert asks for strangers")
         if row["resolved_at"]:
             raise HTTPException(410, "that alert has been stood down")
+        at = time.time()
         c.execute("INSERT INTO samaritans VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                  (alert_id, u["id"], time.time()))
-        c.execute("INSERT INTO acks VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                  (alert_id, u["id"], time.time()))
+                  (alert_id, u["id"], at))
+        first = c.execute(
+            "INSERT INTO acks VALUES (%s,%s,%s) ON CONFLICT DO NOTHING"
+            " RETURNING alert_id",
+            (alert_id, u["id"], at)).fetchone() is not None
         c.commit()
         who = c.execute("SELECT id,name FROM users WHERE id=%s", (row["user_id"],)).fetchone()
+        acks = acks_for([alert_id], c).get(alert_id, [])
 
-    payload = alert_row(row, {"id": row["user_id"], "name": who["name"] if who else row["user_id"]})
+    payload = alert_row(row, {"id": row["user_id"], "name": who["name"] if who else row["user_id"]},
+                        acks)
     responder = {"id": u["id"], "name": u["name"]}
-    await HUB.to(row["user_id"], {"t": "ack", "alert_id": alert_id, "by": responder,
-                                  "samaritan": True})
+    await HUB.to(row["user_id"], {"t": "ack", "alert_id": alert_id, "at": at,
+                                  "by": responder, "samaritan": True})
     await HUB.fanout(family_of(row["user_id"]),
                      {"t": "samaritan_on_way", "alert_id": alert_id, "by": responder})
+    if first:
+        _spawn(notify_owner_of_ack(row, responder, len(acks), samaritan=True),
+               f"ack-push:{alert_id}:{u['id']}")
     return {"ok": True, "alert": payload}
 
 

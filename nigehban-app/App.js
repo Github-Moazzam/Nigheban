@@ -773,7 +773,9 @@ function Main() {
       bump();
     },
     ack: (m) => {
-      dispatch('RESPONDER', { by: m.by });
+      // `m.at` is the server's clock. Falling back to arrival time is only for
+      // a phone talking to a server older than this change.
+      dispatch('RESPONDER', { by: m.by, at: m.at });
       setToast(m.samaritan
         ? `${m.by.name} is nearby and on the way`
         : `${m.by.name} has seen your alert and is responding`);
@@ -900,19 +902,30 @@ function Main() {
   // 10:00, not a countdown restarting from zero.
   const restoreLiveSos = useCallback(async () => {
     if (!session) return;
-    // This tree already knows. Re-dispatching would reset the responder list
-    // the socket has been filling in since.
-    if (ctxRef.current.activeSos) return;
     try {
       const mine = await call(session, '/alerts?scope=mine&limit=5');
       const live = (mine || []).find(
         (a) => !a.resolved_at && ['sos', 'snatch', 'fall'].includes(a.kind));
       if (!live) return;
+
+      const known = ctxRef.current.activeSos;
+      // Leave alone anything this tree is holding that is not this row: an
+      // alert still sitting in the offline queue is owned by the flush, and
+      // overwriting it here would swap the id the stand-down button aims at --
+      // the same failure BUG-005's queue-id fix exists to prevent.
+      if (known && (known._local || String(known.id) !== String(live.id))) return;
+
+      // Dispatched even when this tree already knows about the emergency,
+      // which the early return here used to prevent. The row now carries the
+      // acks with it and SOS_RAISED merges rather than blanking, so this is
+      // the top-up for the case the socket cannot cover: the app backgrounded
+      // rather than killed, its websocket quietly dead, someone answering in
+      // the meantime. Coming back to the foreground now collects that.
       dispatch('SOS_RAISED', { alert: live });
       setDeliveryStatus('delivered');
       // The process may have been killed since, taking the notification with
       // it. Putting it back is what keeps the lock screen honest.
-      showOwnSosNotification(live);
+      showOwnSosNotification(live, live.acks || []);
     } catch {
       // Offline. The queue flush and the live socket still cover their own
       // cases, and a failed lookup must never look like "no emergency".
@@ -929,6 +942,23 @@ function Main() {
     });
     return () => sub.remove();
   }, [flushNow, restoreLiveSos]);
+
+  // Keep the sticky "SOS is active" notification honest about who is coming.
+  //
+  // The server pushes its own notification the instant somebody answers, and
+  // that is the one that gets noticed -- it arrives on a locked phone with this
+  // app long dead. This is the other half: the line the wearer re-reads
+  // afterwards, which would otherwise still say "your family can see your
+  // location" an hour after two of them arrived.
+  //
+  // Only while this tree is alive, which is exactly when it can be done at all.
+  const responderCount = ctx.responders.length;
+  useEffect(() => {
+    if (!ctx.activeSos || !responderCount) return;
+    showOwnSosNotification(ctx.activeSos, ctx.responders);
+    // Keyed on the count, not the array: the identity changes on every reducer
+    // pass and re-posting a notification for no reason is how a shade fills up.
+  }, [ctx.activeSos, responderCount]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // While the screen still says "waiting for signal", keep trying. With no
   // network that is one failed fetch every thirty seconds; once the queue is

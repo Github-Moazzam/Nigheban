@@ -67,25 +67,25 @@ about it.
 
 ### What was changed
 
-- **[band.js:46-75](nigehban-app/src/band.js#L46-L75)** — `manager`, `linked`,
+- **[band.js:46-75](../nigehban-app/src/band.js#L46-L75)** — `manager`, `linked`,
   `notifySub` and `dropSub` moved to **module scope**, which has the same
   lifetime as the link itself. Released by `disconnect()`, or by Android when
   the process finally dies, and by nothing else.
-- **[band.js:520-548](nigehban-app/src/band.js#L520-L548)** — a new tree
+- **[band.js:520-548](../nigehban-app/src/band.js#L520-L548)** — a new tree
   *adopts* an existing live link instead of building a new one, after checking
   `isConnected()` (the device object can outlive the connection it describes).
-- **[band.js:33](nigehban-app/src/band.js#L33), [band.js:408-425](nigehban-app/src/band.js#L408-L425)** —
+- **[band.js:33](../nigehban-app/src/band.js#L33), [band.js:408-425](../nigehban-app/src/band.js#L408-L425)** —
   the band id is persisted under `nigehban.band.id` on the first link and cleared
   only on an explicit DISCONNECT. Its presence is the standing instruction *"this
   phone wants that band"*. A reconnect now goes **straight at the known id**
   (6 s cap) before falling back to the 10 s scan — which matters because a band
   that just went back to advertising is usually not in the OS scan cache.
-- **[band.js:550-567](nigehban-app/src/band.js#L550-L567)** — cold-start
+- **[band.js:550-567](../nigehban-app/src/band.js#L550-L567)** — cold-start
   auto-relink, gated on `autoLink`.
-- **[bandLink.js:53-59](nigehban-app/src/bandLink.js#L53-L59)** — `autoLink` waits
+- **[bandLink.js:53-59](../nigehban-app/src/bandLink.js#L53-L59)** — `autoLink` waits
   for the stored mode to load. BLE is not the default, so before that read lands
   every launch looks like virtual mode and the relink would never fire.
-- **[App.js:353-356](nigehban-app/App.js#L353-L356)** — the foreground service now
+- **[App.js:353-356](../nigehban-app/App.js#L353-L356)** — the foreground service now
   starts whenever BLE is the chosen mode, not only after sign-in.
 - **Stale GATT cache is now detected** rather than reported as success. Android
   caches a bonded device's service table, so after a firmware change it hands
@@ -105,17 +105,17 @@ much. See §7.
 
 These are not the fix; they are what made the rest of the fix findable.
 
-- **[scripts/push_doctor.py](scripts/push_doctor.py)** — the server logs stopped at
+- **[scripts/push_doctor.py](../scripts/push_doctor.py)** — the server logs stopped at
   *"accepted by Expo"*, which only means Expo **queued** the message. Whether FCM
   actually delivered it lives in the push *receipt*, a second call the server
   never makes. This script makes it: `list`, `list --user Ali`, `send --user Ali`.
-- **[scripts/bench.py](scripts/bench.py)** — endpoint latency, n iterations.
-- **[scripts/db.py](scripts/db.py)** *(new, untracked)* — one SQL statement against
+- **[scripts/bench.py](../scripts/bench.py)** — endpoint latency, n iterations.
+- **[scripts/db.py](../scripts/db.py)** *(new, untracked)* — one SQL statement against
   the database **the server actually uses**, reading `DATABASE_URL` from the
   repo's own `.env`. There is no second connection string to keep in sync.
   Pointing a query at the wrong database was otherwise easy to do and hard to
   notice, because both databases answer.
-- **[scripts/dev-tunnel.ps1:105-127](scripts/dev-tunnel.ps1#L105-L127)** — the
+- **[scripts/dev-tunnel.ps1:105-127](../scripts/dev-tunnel.ps1#L105-L127)** — the
   dependency check itself was the bug. It ran all four imports in one
   `python -c`, so the message could not name what was missing; worse, Windows
   PowerShell wraps a native command's redirected stderr in `ErrorRecord`s, which
@@ -160,12 +160,12 @@ for.
 
 - **[.gitignore:52-56](.gitignore#L52-L56)** — the unanchored `android/` and `ios/`
   removed. The generated folders are still ignored by
-  [nigehban-app/.gitignore:40-41](nigehban-app/.gitignore#L40-L41), where `/ios`
+  [nigehban-app/.gitignore:40-41](../nigehban-app/.gitignore#L40-L41), where `/ios`
   and `/android` are **anchored to the app directory**. The reasoning is written
   into the file so nobody re-adds them.
-- **[NigehbanAlarmModule.kt](nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt)**
+- **[NigehbanAlarmModule.kt](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt)**
   (348 lines) + `build.gradle` + module manifest now actually in git.
-- **[plugins/withNativeModuleGuard.js](nigehban-app/plugins/withNativeModuleGuard.js)** —
+- **[plugins/withNativeModuleGuard.js](../nigehban-app/plugins/withNativeModuleGuard.js)** —
   a config plugin that **fails the build** when a module under `modules/`
   declares Android native code that is not present to compile. It runs inside a
   `withDangerousMod`, so it fires during `expo prebuild` — which is what EAS runs,
@@ -173,8 +173,8 @@ for.
   observable: the same check on the authoring machine passes, because there the
   sources are sitting right there. `expo start` is deliberately left alone, so a
   missing native module never blocks JS work. Registered at
-  [app.json:80](nigehban-app/app.json#L80).
-- **[app.json:39-41](nigehban-app/app.json#L39-L41)** — `ACCESS_BACKGROUND_LOCATION`,
+  [app.json:80](../nigehban-app/app.json#L80).
+- **[app.json:39-41](../nigehban-app/app.json#L39-L41)** — `ACCESS_BACKGROUND_LOCATION`,
   `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION` added.
 
 ### How the Kotlin works (four decisions worth not re-litigating)
@@ -201,7 +201,7 @@ for.
 
 ## 5. EAS project moved to the new account — `11fd9a4`
 
-[app.json:88-96](nigehban-app/app.json#L88-L96): `owner` `moaxxx` → **`srk1122`**,
+[app.json:88-96](../nigehban-app/app.json#L88-L96): `owner` `moaxxx` → **`srk1122`**,
 `extra.eas.projectId` `ac29701a…` → **`c9294627-3ef6-4ff8-91b6-9ecf73bad0c0`**.
 
 **This has a consequence that is easy to miss, and it is now an open item — see
@@ -218,7 +218,7 @@ gets the push, not just the stale phone.
 
 ### 6.1 The silent push woke the app and then did nothing
 
-**[bgNotifications.js:65-113](nigehban-app/src/bgNotifications.js#L65-L113)** —
+**[bgNotifications.js:65-113](../nigehban-app/src/bgNotifications.js#L65-L113)** —
 this is the defect that made the whole killed-app path a no-op.
 
 `extractAlert` picked a payload shape with a `??` chain:
@@ -247,7 +247,7 @@ alert id** instead of trusting the first non-null one.
 
 ### 6.2 A floor under a takeover that did not happen
 
-**[bgNotifications.js:115-147](nigehban-app/src/bgNotifications.js#L115-L147)** —
+**[bgNotifications.js:115-147](../nigehban-app/src/bgNotifications.js#L115-L147)** —
 `presentAlarm` returning `false` means the native module was not in this binary,
 so all it managed was `Vibration.vibrate` — and a vibration started from a
 headless task stops when Android tears that task down seconds later. Without a
@@ -269,20 +269,20 @@ necessary and **not sufficient**. When it is missing, `setFullScreenIntent` does
 not fail; it degrades to an ordinary heads-up notification, which is
 indistinguishable from the alarm simply not working.
 
-- **[NigehbanAlarmModule.kt:147-163](nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt#L147-L163)** —
+- **[NigehbanAlarmModule.kt:147-163](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt#L147-L163)** —
   `canUseFullScreenIntent()` and `openFullScreenIntentSettings()`.
-- **[alarm.js:51-68](nigehban-app/src/alarm.js#L51-L68)** — JS wrappers returning
+- **[alarm.js:51-68](../nigehban-app/src/alarm.js#L51-L68)** — JS wrappers returning
   `true` / `false` / `null`, where `null` means *the question does not apply*
   (Android 13 and below, Expo Go, web) so a caller can tell "not allowed" from
   "not asked".
-- **[Setup.js:463-479](nigehban-app/src/screens/Setup.js#L463-L479)** — a red
+- **[Setup.js:463-479](../nigehban-app/src/screens/Setup.js#L463-L479)** — a red
   **"Full-screen permission: blocked"** row with an **ALLOW FULL-SCREEN ALERTS**
   button. Only `false` gets a row, and it is a loud one: every other diagnostic
   on that screen can read green while the takeover is being held back.
 
 ### 6.4 The server now says *why* a push failed
 
-**[nigehban_server.py:1089-1101](server/nigehban_server.py#L1089-L1101)** — a bare
+**[nigehban_server.py:1089-1101](../server/nigehban_server.py#L1089-L1101)** — a bare
 `HTTP Error 400: Bad Request` says nothing, and this is the one failure mode
 where Expo does explain itself: a 4xx body is JSON carrying a `code` and a
 `message`. The handler prints the body. This is what makes §5's

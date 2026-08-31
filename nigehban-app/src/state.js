@@ -99,9 +99,48 @@ function reduce(cur, action) {
   return { state, context };
 }
 
+/**
+ * Fold the server's list of who has answered into the one we already hold.
+ *
+ * The socket's `ack` frame and the alert row's `acks` describe the same event
+ * and arrive by different routes, so this is a union keyed on id rather than a
+ * replacement: whichever got here first, nobody is listed twice and nobody is
+ * dropped. The server's timestamp wins where there is one, because the socket
+ * path stamps `Date.now()` on arrival and a restore hours later would otherwise
+ * render "5 seconds ago" for an answer given at the start of the emergency.
+ */
+function mergeResponders(existing, acks) {
+  const out = [...(existing || [])];
+  for (const a of acks || []) {
+    if (!a || a.id == null) continue;
+    const i = out.findIndex((r) => r.id === a.id);
+    if (i === -1) out.push({ id: a.id, name: a.name, at: a.at });
+    else out[i] = { ...out[i], name: a.name ?? out[i].name, at: a.at ?? out[i].at };
+  }
+  return out.sort((x, y) => (x.at || 0) - (y.at || 0));
+}
+
 /** What each transition does to the context. Kept next to the table on purpose. */
 const APPLY = {
-  SOS_RAISED:     (c, a) => ({ ...c, activeSos: a.alert || c.activeSos, fall: null, responders: [] }),
+  // Responders are seeded from the alert itself, not blanked.
+  //
+  // This is the whole of BUG-008 on the app side. `restoreLiveSos` dispatches
+  // this with a row fetched from the server, and that row now carries everyone
+  // who answered while the app was closed -- so the list comes back with the
+  // emergency instead of the screen claiming nobody has replied.
+  //
+  // A locally-raised alert has no `acks` key and seeds to empty, which is
+  // correct: the server has not even seen the press yet.
+  SOS_RAISED:     (c, a) => {
+    const alert = a.alert || c.activeSos;
+    // Same emergency, better information -- the local placeholder being
+    // replaced by the confirmed server row, or a restore of one already on
+    // screen. A genuinely different alert starts from nobody.
+    const same = alert && c.activeSos
+      && (String(alert.id) === String(c.activeSos.id) || c.activeSos._local);
+    return { ...c, activeSos: alert, fall: null,
+             responders: mergeResponders(same ? c.responders : [], alert?.acks) };
+  },
   SOS_CLEARED:    (c)    => ({ ...c, activeSos: null, responders: [] }),
   FALL_DETECTED:  (c, a) => ({ ...c, fall: { severity: a.severity ?? 4, endsAt: a.endsAt, note: a.note || '' } }),
   FALL_CANCELLED: (c)    => ({ ...c, fall: null }),
@@ -118,9 +157,15 @@ const CONTEXT_ONLY = {
   CHECKIN_EXPIRED: (c) => (c.checkin ? { ...c, checkin: { ...c.checkin, expired: true } } : c),
   NEXT_BUZZ:  (c, a) => ({ ...c, nextBuzzAt: a.at ?? null }),
   BATTERY:    (c, a) => ({ ...c, battery: { level: a.level, low: a.low, goingDark: a.goingDark } }),
+  // `at` is the server's ack time. Both routes carry it now -- the socket frame
+  // and the restored row -- and arrival time is only the fallback for a phone
+  // talking to a server older than this. Stamping `Date.now()` unconditionally
+  // is what made a responder from ten minutes ago redraw as "just now".
   RESPONDER:  (c, a) => (c.responders.some((r) => r.id === a.by.id)
                           ? c
-                          : { ...c, responders: [...c.responders, { ...a.by, at: Date.now() / 1000 }] }),
+                          : { ...c,
+                              responders: [...c.responders,
+                                           { ...a.by, at: a.at ?? a.by.at ?? Date.now() / 1000 }] }),
   SYNC:       (c, a) => ({ ...c, ...a.patch }),
 };
 

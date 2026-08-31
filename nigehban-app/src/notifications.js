@@ -21,6 +21,10 @@ export const DEFAULT_CHANNEL_ID = 'nigehban_default';
 // not a family member's siren, and not a check-in. Its own channel so that
 // muting check-ins cannot take away the one indicator saying help is coming.
 export const SOS_STATUS_CHANNEL_ID = 'nigehban_sos_status';
+// "Somebody answered your SOS." Pushed by the server, so the id has to match
+// RESPONDER_CHANNEL_ID in nigehban_server.py exactly — Android silently files a
+// push naming an unknown channel under the default one instead.
+export const RESPONDER_CHANNEL_ID = 'nigehban_sos_responder';
 
 const INSTALL_ID_KEY = 'nigehban.installId';
 
@@ -184,6 +188,39 @@ export async function setupNotificationChannels() {
         enableVibrate: false,
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       });
+
+      // "Ali is on the way."
+      //
+      // The one piece of good news this app has to deliver, and the wearer is
+      // the least able of anyone to go looking for it: the phone is in a
+      // pocket, the screen is off, and the app was killed when it left the
+      // foreground. So it arrives as a push from the server, and it has to be
+      // felt without being heard.
+      //
+      // DEFAULT importance rather than LOW, because unlike the status
+      // notification above this is news and it is worth a buzz. `sound: null`
+      // rather than the channel default, because the person it reaches may be
+      // hiding from whoever they pressed the button about -- the same reason
+      // the SOS channel above is silent. Vibration is felt by one person;
+      // a notification tone is heard by the room.
+      //
+      // The band is deliberately NOT buzzed for this. On the wrist a vibration
+      // already means "someone is checking on you, press the button to answer",
+      // and somebody in the middle of an emergency must not be handed a button
+      // to press -- nor be left unable to trust what a buzz means.
+      await Notifications.setNotificationChannelAsync(RESPONDER_CHANNEL_ID, {
+        name: 'Someone is coming',
+        description: 'Tells you when a family member or a neighbour has answered your SOS.',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        vibrationPattern: [0, 200, 100, 200],
+        enableVibrate: true,
+        // Documented as the way to keep a channel silent (SDK 57
+        // NotificationChannelInput: `sound: string | null`). A channel cannot be
+        // reconfigured after Android creates it -- only its name and
+        // description -- so changing this later needs a new channel id.
+        sound: null,
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      });
     }
 
     // Configure notification handler for foreground/background behavior
@@ -191,11 +228,17 @@ export async function setupNotificationChannels() {
       handleNotification: async (notification) => {
         const data = notification.request.content.data;
         const isEmergency = data && data.severity >= 5;
+        // The wearer's own two notifications -- "your SOS is active" and
+        // "somebody answered" -- are silent by channel. This handler runs only
+        // in the foreground and overrides the channel, so without naming them
+        // here the one case where the wearer is holding the phone is the one
+        // case it makes a noise.
+        const isOwn = data && (data.ownSos || data.t === 'ack');
 
         return {
           shouldShowBanner: true,
           shouldShowList: true,
-          shouldPlaySound: true,
+          shouldPlaySound: !isOwn,
           shouldSetBadge: false,
           priority: isEmergency
             ? Notifications.AndroidNotificationPriority.MAX
@@ -268,7 +311,7 @@ let ownSosNotificationId = null;
  * the answer to "did it actually send, and when" is readable from the lock
  * screen without opening anything.
  */
-export async function showOwnSosNotification(alert) {
+export async function showOwnSosNotification(alert, responders = []) {
   if (!Notifications || Platform.OS === 'web') return false;
 
   try {
@@ -278,6 +321,14 @@ export async function showOwnSosNotification(alert) {
       : alert?.kind === 'fall' ? 'Fall detected'
       : 'SOS';
 
+    // Who is coming, once anyone is. The server pushes its own notification the
+    // moment somebody answers, and that is what actually gets noticed; this is
+    // the line the wearer re-reads afterwards, so it has to stay current rather
+    // than still saying nobody has replied twenty minutes later.
+    const coming = responders.length === 0 ? ''
+      : responders.length === 1 ? ` ${responders[0].name} is on the way.`
+      : ` ${responders.length} people are on their way.`;
+
     // One notification per emergency, replaced rather than stacked. Raising,
     // the server confirming and a responder answering are all the same event,
     // and three entries to read at speed is worse than one that is current.
@@ -286,7 +337,9 @@ export async function showOwnSosNotification(alert) {
     ownSosNotificationId = await Notifications.scheduleNotificationAsync({
       content: {
         title: `${what} is active`,
-        body: `Sent at ${at}. Your family can see your location. Tap to open.`,
+        body: coming
+          ? `Sent at ${at}.${coming} Tap to open.`
+          : `Sent at ${at}. Your family can see your location. Tap to open.`,
         // Android's isOngoing: it cannot be swiped away while the alert is live.
         sticky: true,
         // Tapping opens the app; it must not look like the emergency is over.
