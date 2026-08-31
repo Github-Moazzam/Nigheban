@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import { presentAlarm } from './alarm';
-import { sendEmergencyAlarmNotification } from './notifications';
+import { sendEmergencyAlarmIfNothingShown } from './notifications';
 
 /**
  * The killed-app half of N3.3.
@@ -112,39 +112,20 @@ function extractAlert(payload) {
   return null;
 }
 
-/**
- * The floor under a takeover that did not happen.
+/*
+ * The floor under a takeover that did not happen is
+ * `sendEmergencyAlarmIfNothingShown`, which now lives in notifications.js.
  *
  * `presentAlarm` returning false means the native module was not in this
  * binary, so all it managed was `Vibration.vibrate` -- and a vibration started
  * from a headless task stops when Android tears that task down a few seconds
- * later. Without this, the killed-app path could end in nothing at all, which
- * is the one outcome the whole feature exists to prevent.
+ * later. Without the call below, the killed-app path could end in nothing at
+ * all, which is the one outcome the whole feature exists to prevent.
  *
- * It checks what is already on screen rather than firing blind. The server
- * sends a visible push alongside the silent one precisely so something appears
- * when this task does not run, and both land on the same emergency channel --
- * posting unconditionally would give one emergency two identical
- * notifications.
- *
- * The check can still lose a race, because the two pushes arrive independently
- * and the visible one may not be posted yet. That is the direction chosen on
- * purpose: when it is not knowable, a duplicate is preferred over a silence.
- * Two notifications is a nuisance; none is the product failing.
+ * It moved because guarding only this task was half a fix: the websocket path
+ * in App.js posted with no such check, so one alert arrived two and three times
+ * over whenever the app was open. One helper, used by both.
  */
-async function notifyIfNothingShown(alert) {
-  try {
-    const presented = await Notifications.getPresentedNotificationsAsync();
-    const already = presented.some((n) => {
-      const d = n?.request?.content?.data ?? {};
-      return String(d.alert_id ?? d.alertId ?? '') === String(alert.id);
-    });
-    if (already) return;
-  } catch {
-    /* cannot tell what is on screen -- fall through and post */
-  }
-  await sendEmergencyAlarmNotification(alert);
-}
 
 if (TaskManager && Notifications) {
   try {
@@ -161,7 +142,7 @@ if (TaskManager && Notifications) {
         if (!alert || alert.severity < 4) return;
         lastFiredAt = Date.now();
         if (await presentAlarm(alert)) return;
-        await notifyIfNothingShown(alert);
+        await sendEmergencyAlarmIfNothingShown(alert);
       } catch (e) {
         lastError = e?.message || String(e);
       }

@@ -17,6 +17,10 @@ try {
 
 export const EMERGENCY_CHANNEL_ID = 'nigehban_emergency_alarm';
 export const DEFAULT_CHANNEL_ID = 'nigehban_default';
+// The wearer's own live SOS, which is a different thing from both of the above:
+// not a family member's siren, and not a check-in. Its own channel so that
+// muting check-ins cannot take away the one indicator saying help is coming.
+export const SOS_STATUS_CHANNEL_ID = 'nigehban_sos_status';
 
 const INSTALL_ID_KEY = 'nigehban.installId';
 
@@ -163,6 +167,23 @@ export async function setupNotificationChannels() {
         vibrationPattern: [0, 200, 100, 200],
         enableVibrate: true,
       });
+
+      // The wearer's own live SOS.
+      //
+      // Deliberately silent, and deliberately NOT the emergency channel above.
+      // That one is a DND-bypassing siren built to wake a family member across
+      // town; firing it at the person already holding the phone -- who felt it
+      // vibrate when they pressed the button -- adds nothing and could give
+      // away the position of somebody hiding from whoever they pressed it
+      // about. LOW importance is Android's own definition of a status
+      // notification: always in the shade, never a sound, never a heads-up.
+      await Notifications.setNotificationChannelAsync(SOS_STATUS_CHANNEL_ID, {
+        name: 'Your live SOS',
+        description: 'Stays in the notification shade while an SOS you raised is still active.',
+        importance: Notifications.AndroidImportance.LOW,
+        enableVibrate: false,
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      });
     }
 
     // Configure notification handler for foreground/background behavior
@@ -227,6 +248,83 @@ export function subscribeNotificationTaps(onAlertId) {
   return () => sub.remove();
 }
 
+// The wearer's own live-SOS notification, so it can be replaced and taken down
+// again. Module scope, not React state: the notification outlives the screen
+// that raised it, which is the entire point of it existing.
+let ownSosNotificationId = null;
+
+/**
+ * "Your SOS is active", in the wearer's own notification shade.
+ *
+ * The app's emergency state lives in a React reducer, and Android destroys that
+ * whole tree when the app is swiped out of Recents. The SOS still goes out from
+ * the surviving process -- the phone vibrates, the family is paged -- but there
+ * was then nothing anywhere on the phone saying so: no screen, and no
+ * notification, because the only one the app could produce was the siren meant
+ * for a family member receiving somebody else's alert.
+ *
+ * This is the piece that survives. It is sticky, so it cannot be swiped away
+ * while help is still coming, and it carries the time the alert was raised so
+ * the answer to "did it actually send, and when" is readable from the lock
+ * screen without opening anything.
+ */
+export async function showOwnSosNotification(alert) {
+  if (!Notifications || Platform.OS === 'web') return false;
+
+  try {
+    const raisedAt = alert?.created_at ? new Date(alert.created_at * 1000) : new Date();
+    const at = raisedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const what = alert?.kind === 'snatch' ? 'Band torn off'
+      : alert?.kind === 'fall' ? 'Fall detected'
+      : 'SOS';
+
+    // One notification per emergency, replaced rather than stacked. Raising,
+    // the server confirming and a responder answering are all the same event,
+    // and three entries to read at speed is worse than one that is current.
+    const previous = ownSosNotificationId;
+
+    ownSosNotificationId = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: `${what} is active`,
+        body: `Sent at ${at}. Your family can see your location. Tap to open.`,
+        // Android's isOngoing: it cannot be swiped away while the alert is live.
+        sticky: true,
+        // Tapping opens the app; it must not look like the emergency is over.
+        autoDismiss: false,
+        priority: Notifications.AndroidNotificationPriority.HIGH,
+        data: { ownSos: true, alertId: alert?.id },
+      },
+      // Same rule as the siren below: in expo-notifications the channel is
+      // chosen by the TRIGGER, not by the content, and it still means "now".
+      trigger: { channelId: SOS_STATUS_CHANNEL_ID },
+    });
+
+    // Dismissed after the replacement is up, so the shade is never empty in
+    // between -- on a safety device the gap is the one thing worth avoiding.
+    if (previous) {
+      try { await Notifications.dismissNotificationAsync(previous); } catch { /* already gone */ }
+    }
+
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** The emergency is over: take the notification down with it. */
+export async function clearOwnSosNotification() {
+  if (!Notifications || Platform.OS === 'web') return false;
+  const id = ownSosNotificationId;
+  ownSosNotificationId = null;
+  if (!id) return false;
+  try {
+    await Notifications.dismissNotificationAsync(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Dispatch a high-priority Emergency Siren Notification for incoming Severity 5 SOS alerts.
  */
@@ -276,4 +374,40 @@ export async function sendEmergencyAlarmNotification(alert) {
   } catch (e) {
     return false;
   }
+}
+
+/**
+ * The same emergency notification, but only if this alert is not already on
+ * screen.
+ *
+ * One alert legitimately arrives up to three ways -- a visible push, a silent
+ * push that wakes the background task, and the websocket frame -- because the
+ * OS may drop the silent one in Doze and the visible push is the guaranteed
+ * floor under that. The redundancy is deliberate. Posting for each of them is
+ * not: a family member got the same SOS two and three times over, which is how
+ * the one notification that must be read becomes the one that gets swiped.
+ *
+ * This check used to live in bgNotifications.js and guarded only the background
+ * task, so the websocket path -- the one that runs exactly when the app is
+ * open -- posted blind. That is why the duplicates appeared with the app open
+ * and not with it killed.
+ *
+ * It can still lose a race, because the two pushes arrive independently and the
+ * visible one may not be posted yet. That direction is chosen on purpose: when
+ * it cannot be known, a duplicate beats a silence. Two notifications is a
+ * nuisance; none is the product failing.
+ */
+export async function sendEmergencyAlarmIfNothingShown(alert) {
+  if (!Notifications || Platform.OS === 'web') return false;
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    const already = presented.some((n) => {
+      const d = n?.request?.content?.data ?? {};
+      return String(d.alert_id ?? d.alertId ?? '') === String(alert?.id);
+    });
+    if (already) return false;
+  } catch {
+    /* cannot tell what is on screen -- fall through and post */
+  }
+  return sendEmergencyAlarmNotification(alert);
 }
