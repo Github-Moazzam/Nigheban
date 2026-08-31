@@ -1,0 +1,7 @@
+{
+  "name": "nigehban-bandwake",
+  "version": "1.0.0",
+  "description": "Wakes a killed app when the band advertises an SOS (Android 8+ PendingIntent BLE scan)",
+  "main": "index.js",
+  "private": true
+}

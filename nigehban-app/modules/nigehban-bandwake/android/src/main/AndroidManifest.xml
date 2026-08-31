@@ -1,0 +1,48 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    NOTE ON STYLE: no double hyphen anywhere in this comment. XML forbids it
+    inside a comment, and the rest of this codebase writes asides with one, so
+    the natural thing to type here is a build failure. It fails in
+    processReleaseManifest with "not well-formed (invalid token)", which names
+    the line but not the reason.
+
+    Scanning permissions are declared by the app, not here: app.json and
+    plugins/withNigehbanAndroid.js are the one place that decides them, and
+    `expo prebuild` regenerates the app manifest from those. This module needs
+    BLUETOOTH_SCAN (Android 12+), ACCESS_FINE_LOCATION (below it) and
+    ACCESS_BACKGROUND_LOCATION for a scan that has to keep matching while the
+    app is not in the foreground. All three are already declared.
+
+    The receivers belong here, beside the classes they name.
+
+    BandWakeReceiver is NOT exported. The only thing that reaches it is the
+    PendingIntent this module handed to the Bluetooth stack, which the system
+    delivers back into our own process. Nothing outside the app should be able
+    to fake a band emergency.
+
+    BandWakeBootReceiver IS exported, because it has to be: BOOT_COMPLETED and
+    the Bluetooth state change are broadcast by the system, and a non-exported
+    receiver never sees them. It reads no data from the intent beyond the
+    adapter state, and acts only on a standing instruction already in our own
+    storage, so being reachable buys an attacker the ability to re-register a
+    scan the user had already asked for.
+
+    Both of those actions are exempt from the Android 8 implicit-broadcast ban,
+    so a manifest receiver is still the right shape for them.
+  -->
+  <application>
+    <receiver
+      android:name="com.nigehban.bandwake.BandWakeReceiver"
+      android:exported="false" />
+
+    <receiver
+      android:name="com.nigehban.bandwake.BandWakeBootReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+        <action android:name="android.bluetooth.adapter.action.STATE_CHANGED" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>
