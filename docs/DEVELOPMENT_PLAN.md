@@ -94,7 +94,7 @@ Legend for every milestone below:
 
 The one-line base-URL swap in Phase 4 only exists if this lands on Day 1.
 
-- [x] U1.1 — In [api.js](nigehban-app/src/api.js): `normaliseUrl()` no longer forces `http` + `:8000`. A bare IPv4 is the laptop and gets the dev port; anything with a hostname is a public host and gets `https`. `wsUrl()` derives the socket scheme from it.
+- [x] U1.1 — In [api.js](../nigehban-app/src/api.js): `normaliseUrl()` no longer forces `http` + `:8000`. A bare IPv4 is the laptop and gets the dev port; anything with a hostname is a public host and gets `https`. `wsUrl()` derives the socket scheme from it.
 - [x] U1.2 — The subnet sweep is now labelled "FIND MY LAPTOP ON THIS WI-FI" and reads as the fallback it is.
 - [x] U1.3 — The Auth address box takes a tunnel URL and `probe()`s it before saving. This is where the ngrok URL goes each morning and the cloud hostname goes on Day 4.
 - [x] U1.4 — `TUNNEL_HEADERS` on every request and on `probe()`. Verified load-bearing: without it a browser-UA client gets ngrok's HTML interstitial instead of JSON.
@@ -109,9 +109,9 @@ The one-line base-URL swap in Phase 4 only exists if this lands on Day 1.
 Unblocks every other milestone while the hardware is missing. See
 [TESTING_WITHOUT_HARDWARE.md](TESTING_WITHOUT_HARDWARE.md).
 
-- [x] V1.1 — [virtualBand.js](nigehban-app/src/virtualBand.js): the `.ino`'s button engine, gesture map, event JSON and command handler, ported to JS. Only the radio is simulated.
-- [x] V1.2 — [bandLink.js](nigehban-app/src/bandLink.js): one seam, two radios. Real BLE and the virtual band expose the identical `useBand` surface, so App.js and Home.js are unchanged by the swap.
-- [x] V1.3 — [Band.js](nigehban-app/src/screens/Band.js): a BAND tab with the real gesture surface — you must actually double-tap and actually hold — plus a wire log of every line that would have crossed the characteristic.
+- [x] V1.1 — [virtualBand.js](../nigehban-app/src/virtualBand.js): the `.ino`'s button engine, gesture map, event JSON and command handler, ported to JS. Only the radio is simulated.
+- [x] V1.2 — [bandLink.js](../nigehban-app/src/bandLink.js): one seam, two radios. Real BLE and the virtual band expose the identical `useBand` surface, so App.js and Home.js are unchanged by the swap.
+- [x] V1.3 — [Band.js](../nigehban-app/src/screens/Band.js): a BAND tab with the real gesture surface — you must actually double-tap and actually hold — plus a wire log of every line that would have crossed the characteristic.
 - [x] V1.4 — Fall state machine on the phone accelerometer at 104 Hz, the firmware's active rate. Thresholds live in `FALL` and copy straight into the `.ino` at F3.
 - [x] V1.5 — Real phone battery feeds `bat`, so the 20 % and 5 % escalations are testable by unplugging rather than by faking.
 
@@ -125,8 +125,8 @@ the tunnel, with no band in the building. **Observed.**
 
 ### U2 · Client state machine · Owner M1 · Phase 0 · ~4 h
 
-- [x] U2.1 — [state.js](nigehban-app/src/state.js): `idle · high_alert · checkin_pending · fall_pending · sos_live`, with the legal transitions written as a table. A fifth state was needed: `fall_pending` is the countdown, and it is the one place a deadline is legitimately client-owned, because no server row exists to own it until the alert does.
-- [x] U2.2 — `bandEventToAction()` maps every band event, and each socket handler in [App.js](nigehban-app/App.js) dispatches exactly one action. An event that is illegal in the current state is dropped rather than applied — a `buzz_now` arriving behind a live SOS can no longer demote it to a check-in.
+- [x] U2.1 — [state.js](../nigehban-app/src/state.js): `idle · high_alert · checkin_pending · fall_pending · sos_live`, with the legal transitions written as a table. A fifth state was needed: `fall_pending` is the countdown, and it is the one place a deadline is legitimately client-owned, because no server row exists to own it until the alert does.
+- [x] U2.2 — `bandEventToAction()` maps every band event, and each socket handler in [App.js](../nigehban-app/App.js) dispatches exactly one action. An event that is illegal in the current state is dropped rather than applied — a `buzz_now` arriving behind a live SOS can no longer demote it to a check-in.
 - [x] U2.4 — `checkin_missed` is no longer silently dropped. 26 Aug 2026 — the band's local nag expiring now dispatches `CHECKIN_EXPIRED`, a context-only event that tells the wearer time is up **without** escalating (the sweeper already owns that deadline; a second alert would page the family twice for one silence, on two disagreeing clocks) and **without** closing the question (answering late still tells the family she is fine). See §14.
 - [x] U2.3 — Driven from the BAND tab, which produces real gestures.
 
@@ -141,38 +141,38 @@ reflects server-owned state; it must not own a deadline.
 Built against **mocked** WS messages first, wired to B2 when it lands.
 
 - [x] U3.1 — **Check-in countdown** — a sheet on arrival, a persistent banner once that is dismissed, both counting to the server's `due_at`. The deadline had to be put on the wire first: `checkin_req` and `buzz_now` carried only `window`, so a message that arrived late started a fresh ninety seconds.
-  - **Crash fixed 26 Aug 2026.** [CheckinBanner.js](nigehban-app/src/components/CheckinBanner.js) referenced `s.head` but never defined `s` — no `StyleSheet.create`, no import. Every render threw `ReferenceError`, and with no error boundary in the tree React unmounted the whole screen: pressing **ask for a check-in** blanked the family member's app. It had been unreachable-by-luck until the ask-sheet path started rendering it.
-- [x] U3.2 — **High Alert panel** — armed in one tap, disarmed behind four digits ([PinSheet.js](nigehban-app/src/components/PinSheet.js), keystore-backed). Arming never asks; that asymmetry is the feature. The next buzz is shown to the minute, because the interval is randomised precisely so that it cannot be timed.
-- [x] U3.3 — **Fall countdown** — [FallCountdown.js](nigehban-app/src/components/FallCountdown.js): 30 s at severity 4, 15 s at severity 5, vibrating through each of the last five seconds. "I'm fine" writes a `near_miss`, which the server records and tells nobody.
+  - **Crash fixed 26 Aug 2026.** [CheckinBanner.js](../nigehban-app/src/components/CheckinBanner.js) referenced `s.head` but never defined `s` — no `StyleSheet.create`, no import. Every render threw `ReferenceError`, and with no error boundary in the tree React unmounted the whole screen: pressing **ask for a check-in** blanked the family member's app. It had been unreachable-by-luck until the ask-sheet path started rendering it.
+- [x] U3.2 — **High Alert panel** — armed in one tap, disarmed behind four digits ([PinSheet.js](../nigehban-app/src/components/PinSheet.js), keystore-backed). Arming never asks; that asymmetry is the feature. The next buzz is shown to the minute, because the interval is randomised precisely so that it cannot be timed.
+- [x] U3.3 — **Fall countdown** — [FallCountdown.js](../nigehban-app/src/components/FallCountdown.js): 30 s at severity 4, 15 s at severity 5, vibrating through each of the last five seconds. "I'm fine" writes a `near_miss`, which the server records and tells nobody.
 - [x] U3.4 — **Battery states** — one alert per threshold crossing, latched and re-armed on charge (matrix #13, #14). The wearer sees a banner saying what her family was told. **Reworked 29 Aug 2026 — there are two batteries, and they were one number.** The app read `band.battery`, which in BLE mode is the *wristband's* ADC reading, sent it to the server as `phone_batt`, and told the family "phone about to die" — so a wearer at 4 % band and 90 % phone paged his family about the wrong device, and a wearer whose phone was genuinely dying said nothing, because the phone's own battery was never read outside `virtualBand.js`. Now: `low_battery` at phone 20 %, `going_dark` at phone 5 %, and a new **`band_battery`** (severity 1) at band 20 %. The split is not cosmetic — a flat band means the safety device is off the air while the phone is still reachable by push; a flat phone closes every path to the family, including that push. `usePhoneBattery()` in `watch.js` reads `expo-battery`; the heartbeat carries `phone_batt` and `band_batt` separately and never substitutes one for the other.
-- [x] U3.5 — **SOS live view** — [SosLiveView.js](nigehban-app/src/components/SosLiveView.js). Leads with how long it has been running and who has said "I'm on it", not with a delivery receipt; stand down from the app, or key 1 on the band.
+- [x] U3.5 — **SOS live view** — [SosLiveView.js](../nigehban-app/src/components/SosLiveView.js). Leads with how long it has been running and who has said "I'm on it", not with a delivery receipt; stand down from the app, or key 1 on the band.
 
 **Done when:** all five run end-to-end off mocked messages with no server changes.
 
 ### U4 · Family-side UI · Owner M1 · Phase 2–3 · ~6 h
 
-- [x] U4.1 — **Invite flow** — send · pending · accept · decline, in [Family.js](nigehban-app/src/screens/Family.js).
-- [x] U4.2 — **Watch-status tile** — [WatchStatusTile.js](nigehban-app/src/components/WatchStatusTile.js) reads `GET /watch/{member_id}` and turns amber at the same 180 s the server uses, so the screen and the sweeper never disagree in front of a user (matrix #19).
+- [x] U4.1 — **Invite flow** — send · pending · accept · decline, in [Family.js](../nigehban-app/src/screens/Family.js).
+- [x] U4.2 — **Watch-status tile** — [WatchStatusTile.js](../nigehban-app/src/components/WatchStatusTile.js) reads `GET /watch/{member_id}` and turns amber at the same 180 s the server uses, so the screen and the sweeper never disagree in front of a user (matrix #19).
 - [x] U4.3 — **Alert takeover hardening** — map link, "I'm on it" posting to `/alert/{id}/ack`, and the stand-down echo clearing the takeover on every family phone.
-  - **Alerts were going out with no position. Fixed 26 Aug 2026.** `raise()` read only the `fix` the Home screen feeds it, and Home only feeds it while that tab is mounted — so an SOS raised from the BAND tab, or from the band while the app was backgrounded (the normal case), carried no coordinates at all. The family got *EMERGENCY* and no map link, which is most of the value gone. It now falls back to `lastKnownFix()` in [watch.js](nigehban-app/src/watch.js) — the same cache the heartbeat has been reading every minute all along. Deliberately not a live GPS read: `getCurrentPositionAsync` can block for tens of seconds and an SOS has to leave the phone now.
-- [x] U4.4 — **Good Samaritan respond** — [SamaritanCall.js](nigehban-app/src/components/SamaritanCall.js), on top of B3.3 and B3.4 below. Before "I'm going" there is no name and the pin is snapped to a 300 m grid; saying yes releases the name and the exact position, and puts the responder's own name on the alert.
+  - **Alerts were going out with no position. Fixed 26 Aug 2026.** `raise()` read only the `fix` the Home screen feeds it, and Home only feeds it while that tab is mounted — so an SOS raised from the BAND tab, or from the band while the app was backgrounded (the normal case), carried no coordinates at all. The family got *EMERGENCY* and no map link, which is most of the value gone. It now falls back to `lastKnownFix()` in [watch.js](../nigehban-app/src/watch.js) — the same cache the heartbeat has been reading every minute all along. Deliberately not a live GPS read: `getCurrentPositionAsync` can block for tens of seconds and an SOS has to leave the phone now.
+- [x] U4.4 — **Good Samaritan respond** — [SamaritanCall.js](../nigehban-app/src/components/SamaritanCall.js), on top of B3.3 and B3.4 below. Before "I'm going" there is no name and the pin is snapped to a 300 m grid; saying yes releases the name and the exact position, and puts the responder's own name on the alert.
 
 **Done when:** matrix rows 1, 2, 7, 19, 20 pass on two phones.
 
 ### U5 · Onboarding & polish · Owner M1/M2 · Phase 3 · ~4 h
 
-- [x] U5.1 — **OEM onboarding** — [Setup.js](nigehban-app/src/screens/Setup.js), now the fifth tab. The vendor is read from `Platform.constants.Manufacturer` and only that vendor's instructions are shown; every deep link is wrapped, falls back to the app-settings page, and leaves the manual steps on screen for when a class name has moved.
+- [x] U5.1 — **OEM onboarding** — [Setup.js](../nigehban-app/src/screens/Setup.js), now the fifth tab. The vendor is read from `Platform.constants.Manufacturer` and only that vendor's instructions are shown; every deep link is wrapped, falls back to the app-settings page, and leaves the manual steps on screen for when a class name has moved.
 - [x] U5.2 — Permission ladder: notifications → location → background location → battery exemption, one rung at a time, each with one sentence of why and a granted/denied state. Home nudges to it while anything is outstanding.
 - [x] U5.3 — Empty, offline, loading and permission-denied states on every screen — including a server-offline banner that says plainly that an alert raised now would reach nobody.
-- [x] U5.4 — Contrast pass, folded into U6: every foreground/background pair in [theme.js](nigehban-app/src/theme.js) carries its measured ratio against `surface`, and body text never uses the `faint` tone.
+- [x] U5.4 — Contrast pass, folded into U6: every foreground/background pair in [theme.js](../nigehban-app/src/theme.js) carries its measured ratio against `surface`, and body text never uses the `faint` tone.
 
 ### U6 · Design system · Owner M1 · **done**
 
 Four screens that had each been styled once are now one system.
 
-- [x] U6.1 — [theme.js](nigehban-app/src/theme.js): semantic colour tokens, a type scale, a 4/8 spacing scale, three corner radii. No screen sets a raw hex or a raw font size.
-- [x] U6.2 — Type: **Outfit** for everything a person reads, **Space Grotesk** for headings, figures and countdowns. Loaded defensively in [fonts.js](nigehban-app/src/fonts.js) — a build without the font module falls back to the system face rather than showing nothing.
-- [x] U6.3 — [ui.js](nigehban-app/src/ui.js): one kit — card, button, chip, field, banner, empty state, progress bar, stat — with a 48 pt minimum target, press feedback that never moves layout, and an accessibility label on every icon-only control.
+- [x] U6.1 — [theme.js](../nigehban-app/src/theme.js): semantic colour tokens, a type scale, a 4/8 spacing scale, three corner radii. No screen sets a raw hex or a raw font size.
+- [x] U6.2 — Type: **Outfit** for everything a person reads, **Space Grotesk** for headings, figures and countdowns. Loaded defensively in [fonts.js](../nigehban-app/src/fonts.js) — a build without the font module falls back to the system face rather than showing nothing.
+- [x] U6.3 — [ui.js](../nigehban-app/src/ui.js): one kit — card, button, chip, field, banner, empty state, progress bar, stat — with a 48 pt minimum target, press feedback that never moves layout, and an accessibility label on every icon-only control.
 - [x] U6.4 — Every emoji gone, including from push titles and the foreground-service notification, replaced by one icon family (Feather, imported by path so the bundle carries 56 KB of icons rather than 3.4 MB).
 
 **Done when:** a fresh install on an untouched Xiaomi reaches a working armed state without anyone opening Settings manually.
@@ -201,7 +201,7 @@ Beyond the milestone, because they are the same bug:
 
 **Blocked:** nothing any more. **Unblocked:** U4.1, B2, N3.
 **Done when:** ~~curl proves an unaccepted invite moves no alerts in either direction.~~
-[tests/test_consent_and_sweeper.py](tests/test_consent_and_sweeper.py) — 49 checks, all passing.
+[tests/test_consent_and_sweeper.py](../tests/test_consent_and_sweeper.py) — 49 checks, all passing.
 
 ### B2 · The sweeper · Owner M3 · Phase 2 · ~5 h — ☑ **done 22 Aug 2026**
 
@@ -219,21 +219,21 @@ Pulled forward from B3 because B2 cannot be demonstrated without them:
 - [x] B3.1 — `POST /checkin/{member_id}` now writes a `checkins` row with `due_at`; `POST /checkin/{id}/ack` added. An `checkin_ack` alert from the band or app closes **every** open question, so one press of "I'm fine" cannot leave a second deadline running.
 - [x] B3.2 — `POST /watch/high_alert`. The band's hold-3s now arms a mode that outlives the app.
 
-App side: [src/watch.js](nigehban-app/src/watch.js) beats every 60 s while armed
+App side: [src/watch.js](../nigehban-app/src/watch.js) beats every 60 s while armed
 (foreground only until N2), and `buzz_now` drives the same check-in sheet a
 family member's request does.
 
 **Unblocked:** U3.1, U3.2, U4.2, and matrix rows 9, 15, 19.
 **Done when:** ~~with no phone connected at all, a check-in created by curl escalates on its own deadline.~~ It does — see the B2 section of
-[tests/test_consent_and_sweeper.py](tests/test_consent_and_sweeper.py), plus
-[tests/test_sockets.py](tests/test_sockets.py) for delivery on the live socket.
+[tests/test_consent_and_sweeper.py](../tests/test_consent_and_sweeper.py), plus
+[tests/test_sockets.py](../tests/test_sockets.py) for delivery on the live socket.
 
 ### B3 · Feature endpoints · Owner M3 · Phase 3 · ~6 h
 
 - [x] B3.1 — ~~`POST /checkin/{member_id}` reworked to write a `checkins` row with `due_at`; add `POST /checkin/{id}/ack` for band or app.~~ Shipped with B2, which needs it.
 - [x] B3.2 — ~~`POST /watch/high_alert` — arm/disarm.~~ Shipped with B2, same reason.
 - [x] B3.3 — `POST /presence` — geohash6 plus lat/lon rounded to ~100 m, one row per person, overwritten. A presence, not a trail, and only read while it is fresh.
-- [x] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the name and the exact pin, logs the responder against the alert, and tells the wearer and their family who is coming. A severity-5 alert carrying a position now fans an anonymous, coarse copy out to fresh presences within 800 m. Both are covered by [tests/test_samaritan_and_checkin.py](tests/test_samaritan_and_checkin.py).
+- [x] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the name and the exact pin, logs the responder against the alert, and tells the wearer and their family who is coming. A severity-5 alert carrying a position now fans an anonymous, coarse copy out to fresh presences within 800 m. Both are covered by [tests/test_samaritan_and_checkin.py](../tests/test_samaritan_and_checkin.py).
 - [ ] B3.5 — Qwen severity scoring + Urdu dispatch text via Model Studio. *Cut line Day 3 21:00 → fall back to `RiskEngine._template`, which already works.*
 - [ ] B3.6 — WhatsApp fan-out.
 
@@ -263,10 +263,10 @@ Everything here is JavaScript (exec plan §7.0). Nobody writes Kotlin.
 > **Audited 26 Aug 2026 — this milestone was marked open and is substantially
 > done.** The checkboxes below had not been updated since the plan was written.
 
-- [x] N1.1 — `plugins/withNigehbanAndroid.js` exists and is registered at [app.json:76](nigehban-app/app.json#L76). It adds nine manifest permissions: the four `FOREGROUND_SERVICE*` variants, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `USE_FULL_SCREEN_INTENT`, `WAKE_LOCK`, `ACCESS_BACKGROUND_LOCATION` — on top of the nine in `app.json`.
-- [x] N1.2 — `expo-battery` **is** installed (`~57.0.2`), along with `expo-task-manager` and `expo-dev-client`. ~~`@notifee/react-native` is genuinely still missing.~~ **Closed 26 Aug 2026 by removing the requirement, not by meeting it:** Notifee was archived on 7 Apr 2026 and never supported the New Architecture, so it could not have been installed here at all. What it was needed for is now [`modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/) — see N3.3. **No new dependency was added.**
+- [x] N1.1 — `plugins/withNigehbanAndroid.js` exists and is registered at [app.json:76](../nigehban-app/app.json#L76). It adds nine manifest permissions: the four `FOREGROUND_SERVICE*` variants, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `USE_FULL_SCREEN_INTENT`, `WAKE_LOCK`, `ACCESS_BACKGROUND_LOCATION` — on top of the nine in `app.json`.
+- [x] N1.2 — `expo-battery` **is** installed (`~57.0.2`), along with `expo-task-manager` and `expo-dev-client`. ~~`@notifee/react-native` is genuinely still missing.~~ **Closed 26 Aug 2026 by removing the requirement, not by meeting it:** Notifee was archived on 7 Apr 2026 and never supported the New Architecture, so it could not have been installed here at all. What it was needed for is now [`modules/nigehban-alarm/`](../nigehban-app/modules/nigehban-alarm/) — see N3.3. **No new dependency was added.**
 - [x] N1.3 — Done. `extra.eas.projectId` is set, the `development` profile builds an APK, and the proof it is installed is behavioural: **push reaches a force-stopped app**, which Expo Go on Android cannot do at all since SDK 53.
-- [ ] N1.4 — Drop `usesCleartextTraffic` once the cloud has TLS (D2), not before. Still correctly open — [app.json:54](nigehban-app/app.json#L54).
+- [ ] N1.4 — Drop `usesCleartextTraffic` once the cloud has TLS (D2), not before. Still correctly open — [app.json:54](../nigehban-app/app.json#L54).
 
 **Blocks:** ~~J1~~ — unblocked. **Done when:** ~~the dev-build APK is installed on two phones and the manifest carries all ten permissions.~~ Observed; the manifest carries eighteen.
 
@@ -286,7 +286,7 @@ The hardest single task on the board.
 
 ### N3 · Push + alarm · Owner M2 · Phase 2 · ~4 h
 
-- [x] N3.1 — **Done, audited 26 Aug 2026.** This entry said the FCM project "has never been created". It has: `nigehban-app/google-services.json` is a real Firebase config for project **`nigheban-d126d`**, package `com.nigehban.app`, referenced from [app.json:22](nigehban-app/app.json#L22); the service-account key is gitignored by pattern (`*firebase-adminsdk*.json`) with the reasoning written into `.gitignore`. Landed across `a537bd9` → `57b8350`. **Confirmed working end to end: a push arrives at a force-stopped app.** The one-time steps below are kept as the runbook for a second Firebase project or a credential rotation, not as outstanding work:
+- [x] N3.1 — **Done, audited 26 Aug 2026.** This entry said the FCM project "has never been created". It has: `nigehban-app/google-services.json` is a real Firebase config for project **`nigheban-d126d`**, package `com.nigehban.app`, referenced from [app.json:22](../nigehban-app/app.json#L22); the service-account key is gitignored by pattern (`*firebase-adminsdk*.json`) with the reasoning written into `.gitignore`. Landed across `a537bd9` → `57b8350`. **Confirmed working end to end: a push arrives at a force-stopped app.** The one-time steps below are kept as the runbook for a second Firebase project or a credential rotation, not as outstanding work:
   1. console.firebase.google.com → create a project → add an Android app with package `com.nigehban.app` → download `google-services.json` into `nigehban-app/`.
   2. Add `"android": { "googleServicesFile": "./google-services.json" }` to `nigehban-app/app.json`.
   3. `eas credentials` → Android → push notifications → upload the Firebase service account key (Project settings → Service accounts → Generate new private key, in the Firebase console).
@@ -296,11 +296,11 @@ The hardest single task on the board.
 - [◐] N3.3 — Full-screen intent over the lock screen (matrix #6 — fires with the family app **killed**). ~~via Notifee~~ — **built in-house, 26 Aug 2026.**
   - **Notifee is dead, and the plan could not have known.** Invertase archived [invertase/notifee](https://github.com/invertase/notifee) on **7 Apr 2026**; the last publish was `9.1.8` in December 2024, and it never supported the New Architecture — which Expo 57 / RN 0.86 is, exclusively. So the one dependency N1.2 was still waiting on was never going to arrive. `expo-notifications@57.0.12` has no full-screen-intent API either; the shipped `.d.ts` files were grepped before concluding that.
   - `react-native-notify-kit` — a community fork, same public API, New Arch, ~34.8k downloads/week — was the obvious substitute and was **deliberately not taken**. It is five months old and has one unpaid maintainer, and Nigehban needs two of Notifee's fifty-odd APIs. Putting the emergency siren behind a dependency that has already died once under this project is a worse risk than owning ninety lines.
-  - **What was built:** [`modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/), a local Expo module, autolinked from `modules/` with no config entry (verified with `expo-modules-autolinking search -p android`). `presentAlarm()` posts a `CATEGORY_CALL` notification with `setFullScreenIntent(pi, true)` on its own silent `IMPORTANCE_HIGH` channel; `stopAlarm()` tears it down; `consumeLaunchAlertId()` reads the alert out of the launching intent so a cold start knows why it woke.
+  - **What was built:** [`modules/nigehban-alarm/`](../nigehban-app/modules/nigehban-alarm/), a local Expo module, autolinked from `modules/` with no config entry (verified with `expo-modules-autolinking search -p android`). `presentAlarm()` posts a `CATEGORY_CALL` notification with `setFullScreenIntent(pi, true)` on its own silent `IMPORTANCE_HIGH` channel; `stopAlarm()` tears it down; `consumeLaunchAlertId()` reads the alert out of the launching intent so a cold start knows why it woke.
   - **The permission was already there and was not enough.** `USE_FULL_SCREEN_INTENT` buys the right to *fire* the intent; what happens next is the launched activity's business. Without `android:showWhenLocked` and `android:turnScreenOn` on MainActivity, Android brings the app up *behind* the lock screen with the display off — an SOS that fired perfectly and is waiting under a black screen. Both are now set by `withNigehbanAndroid.js`, verified via `expo config --type introspect`.
   - **The killed-app half needs a second push.** `presentAlarm` needs JS running, and the case the feature exists for is the one where it is not. Only a **data-only** push starts a headless runtime on a terminated Android app — a push with a title is drawn by the system and the app is never woken. So `emit_alert` now sends severity ≥ 4 **twice**: the visible push, unchanged, plus a silent one carrying `kind`/`name`/`maps`, which `src/bgNotifications.js` turns into the alarm. Sent in addition, never instead: Doze can still drop the silent one, and then the visible notification and its tap routing are what is left. Payload shapes verified against the real send path.
   - **Not yet observed on hardware.** There is no JDK or Android SDK on this machine, so the Kotlin has been written and read but not compiled — that happens on the next EAS build. Setup → **TEST THE LOCK-SCREEN ALARM** runs the exact production path on one phone in ten seconds, which is how this gets closed.
-  - **Tap routing landed 26 Aug 2026, ahead of the full-screen intent.** There was no `addNotificationResponseReceivedListener` anywhere in the tree, so tapping an SOS push cold-launched the app to the Home tab with no idea an alert was involved — the push arrived correctly and then dead-ended. `subscribeNotificationTaps()` in [notifications.js](nigehban-app/src/notifications.js) now reads `alertId`/`alert_id` (the local and remote paths spell it differently), also checks `getLastNotificationResponseAsync()` for the tap that *launched* the app, and clears it so a later unrelated launch does not replay the same alert. App.js holds the id until a session exists, then fetches `/alerts?scope=incoming` and drives the existing takeover modal. Still needs N3.1 before the push it routes can actually be delivered.
+  - **Tap routing landed 26 Aug 2026, ahead of the full-screen intent.** There was no `addNotificationResponseReceivedListener` anywhere in the tree, so tapping an SOS push cold-launched the app to the Home tab with no idea an alert was involved — the push arrived correctly and then dead-ended. `subscribeNotificationTaps()` in [notifications.js](../nigehban-app/src/notifications.js) now reads `alertId`/`alert_id` (the local and remote paths spell it differently), also checks `getLastNotificationResponseAsync()` for the tap that *launched* the app, and clears it so a later unrelated launch does not replay the same alert. App.js holds the id until a session exists, then fetches `/alerts?scope=incoming` and drives the existing takeover modal. Still needs N3.1 before the push it routes can actually be delivered.
 - [◐] N3.4 — Siren + vibration until dismissed. **Built 26 Aug 2026, same module.**
   - A notification sound plays once, from the channel, at whatever volume Android picks. This owns a `MediaPlayer` on `STREAM_ALARM` with `isLooping = true` instead, plus `VibrationEffect.createWaveform(pattern, 0)` — repeat index 0, i.e. forever. The alarm stream is also the answer to Do Not Disturb: `setBypassDnd(true)` on a channel is silently ignored without Notification Policy Access, which almost no app has, whereas `USAGE_ALARM` audio is exempt by default.
   - The stream volume is raised to maximum and restored on stop. If the process dies mid-alarm it stays up — the right direction to fail in here, and cheaper than the machinery to guarantee otherwise.
@@ -315,7 +315,7 @@ The hardest single task on the board.
 ### F1 · Board bring-up · Owner M4 · Phase 0 · ~3 h
 
 - [x] F1.1 — Install **Seeed nRF52 Boards** (Adafruit Bluefruit core, *not* the mbed variant). `Seeeduino:nrf52@1.1.13` + `Seeed Arduino LSM6DS3`; all bench sketches compile.
-- [x] F1.2 — Blink, then advertise as `Nigehban-01`; verify in **nRF Connect** — no Nigehban app needed, so this waits on nobody. Passed via [t6_ble](firmware/t6_ble/).
+- [x] F1.2 — Blink, then advertise as `Nigehban-01`; verify in **nRF Connect** — no Nigehban app needed, so this waits on nobody. Passed via [t6_ble](../firmware/t6_ble/).
 - [x] F1.3 — `BLEUart` up. It is literally the Nordic UART Service the app already speaks. Notify and write both verified round-trip in nRF Connect. **This verification was not sufficient — see F1.4.** nRF Connect shows bytes arriving on TX, which looks like a pass; it does not show that the line was cut off at 23 of 86 bytes, because there is no line framing in a hex dump. The truncation survived until the app tried to parse a newline that never came.
 - [x] F1.4 — **First end-to-end link to the Nigehban app. 27 Aug 2026.** Five independent faults, each of which alone was enough to produce "connected, no data". Detailed in §"Bring-up: five silent faults" below.
 
@@ -323,10 +323,10 @@ The hardest single task on the board.
 
 - [x] F2.1 — Move `Button`, `Pattern`, `onGesture`, `handleCommand` **verbatim** from the ESP32 prototype onto `bleuart`. The protocol is frozen (exec plan §5); the app must not notice the swap. All gestures and commands verified against nRF Connect. **The prototype sketch was deleted from the tree on 27 Aug 2026** — the nRF52 sketch is now the only firmware, and `git show 70c5176:nigehban_band_esp32/nigehban_band_esp32.ino` is the record.
 - [x] F2.2 — Delete the MPU6050 path. The XIAO Sense has an LSM6DS3TR-C on board at `0x6A`; porting the external-IMU code would be work spent on hardware you do not need. LSM6DS3 block present but `#if HAS_IMU 0` until F3; both paths compile.
-- [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](firmware/README.md).
+- [ ] F2.3 — Real battery: enable the divider on `P0.14`, read `P0.31`, calibrate against a multimeter. **Code written, NOT calibrated** — `VBAT_DIVIDER_COMP` is still a guess and no LiPo has been connected. See the `VBAT_ENABLE` hardware warning in [firmware/README.md](../firmware/README.md).
   - **It is also unstable, not merely uncalibrated. Found 27 Aug 2026, not fixed.** Consecutive heartbeats alternate between two settled values — `mv:4085`/93% and `mv:3699`/39% — on one board, on one continuous `seq`. The divider's source impedance (1M ∥ 510k ≈ 338k) is far too high for the SAADC's default acquisition window, so the sample capacitor never fully charges and each conversion is dragged toward the previous one. Averaging 8 back-to-back reads in `batteryMilliVolts()` does not help: every sample is equally under-settled. Fix is a longer acquisition time, or a median-of-N with a gap between samples — a median rejects the alternating outlier, a mean does not. **This was a safety path, and is now a smaller one.** It used to raise `low_battery` **and** `going_dark` — severity 3, "phone about to die" — straight from this number, so the band paged the family about a flat battery that was not flat. Since 29 Aug 2026 those two come from the *phone's* own battery (U3.4), and only the new severity-1 `band_battery` rides this reading. The blast radius dropped from a false emergency to a false maintenance notice.
 
-    Latching on a single reading still turned the alternation into an alert every other heartbeat, so [App.js](nigehban-app/App.js) now requires `BAND_LOW_STREAK` (3) consecutive readings below the threshold — an alternating signal never produces two in a row — plus a `+3` re-arm margin. **That is a workaround, not the fix.** The fix is still this item: a longer acquisition time, or a median-of-N with a gap between samples. Delete the streak guard when it lands.
+    Latching on a single reading still turned the alternation into an alert every other heartbeat, so [App.js](../nigehban-app/App.js) now requires `BAND_LOW_STREAK` (3) consecutive readings below the threshold — an alternating signal never produces two in a row — plus a `+3` re-arm margin. **That is a workaround, not the fix.** The fix is still this item: a longer acquisition time, or a median-of-N with a gap between samples. Delete the streak guard when it lands.
 
 > **Tap timing changed during F2.1.** The band originally waited for a tap burst
 > to close before classifying it, so two *slow* taps became two `checkin_ack`s —
@@ -335,7 +335,7 @@ The hardest single task on the board.
 >
 > **Corrected 26 Aug 2026 — this note said `virtualBand.js` had not caught up.
 > It has**, and had already: `TAP_WINDOW_MS = 1200` with SOS on the second tap
-> at [virtualBand.js:271](nigehban-app/src/virtualBand.js#L271). The stale note
+> at [virtualBand.js:271](../nigehban-app/src/virtualBand.js#L271). The stale note
 > was claiming a live safety bug in the file the whole no-hardware test plan
 > runs on.
 >
@@ -544,12 +544,12 @@ exec plan.** All three files now agree.
 
 Changed in lockstep:
 the ESP32 prototype (since retired) ·
-[nigehban_band_nrf52.ino](nigehban_band_nrf52/nigehban_band_nrf52.ino) ·
-[virtualBand.js](nigehban-app/src/virtualBand.js) ·
-[bandLink.js](nigehban-app/src/bandLink.js) ·
-[band.js](nigehban-app/src/band.js) ·
-[App.js](nigehban-app/App.js) ·
-[Band.js](nigehban-app/src/screens/Band.js)
+[nigehban_band_nrf52.ino](../nigehban_band_nrf52/nigehban_band_nrf52.ino) ·
+[virtualBand.js](../nigehban-app/src/virtualBand.js) ·
+[bandLink.js](../nigehban-app/src/bandLink.js) ·
+[band.js](../nigehban-app/src/band.js) ·
+[App.js](../nigehban-app/App.js) ·
+[Band.js](../nigehban-app/src/screens/Band.js)
 
 Three deliberate choices inside that, each worth knowing about:
 
@@ -582,7 +582,7 @@ Three deliberate choices inside that, each worth knowing about:
 ### Next: make it configurable
 
 The map is now **data**, not an if-chain —
-`DEFAULT_GESTURES` in [virtualBand.js](nigehban-app/src/virtualBand.js), and one
+`DEFAULT_GESTURES` in [virtualBand.js](../nigehban-app/src/virtualBand.js), and one
 clearly marked block in the `.ino`. A settings screen that lets a wearer remap
 gestures edits that array; nothing else has to change. That is the planned
 follow-up, and the structure is already in place for it.
@@ -689,16 +689,16 @@ will know*, that class of bug outranks any unbuilt feature.
 
 | # | Where | What it looked like | What was happening |
 |---|---|---|---|
-| 1 | [CheckinBanner.js](nigehban-app/src/components/CheckinBanner.js) | The family member's screen closed itself | `s.head` with no `s` — a `ReferenceError` every render, and no error boundary, so React unmounted the tree |
-| 2 | [notifications.js](nigehban-app/src/notifications.js) | Push arrives, tap does nothing useful | No response listener anywhere; every tap cold-launched to Home |
-| 3 | [api.js](nigehban-app/src/api.js) | Header says **connected** | NAT-dropped socket, half-open for minutes, no ping to notice |
-| 4 | [band.js](nigehban-app/src/band.js) | Stuck on **Searching** | BLE scan with no timeout, and a scan-error branch with no retry |
-| 5 | [App.js](nigehban-app/App.js) | *EMERGENCY* with no map link | `raise()` read a fix only the Home tab feeds |
-| 6 | [state.js](nigehban-app/src/state.js) | Band stops buzzing, screen says nothing | `checkin_missed` fell through to `default: return null` |
-| 7 | [nigehban_server.py](server/nigehban_server.py) | Siren at 3 a.m. for yesterday | No `ttl`, so Expo's four-week default applied |
-| 8 | [notifications.js](nigehban-app/src/notifications.js) | Silent SOS under Do Not Disturb | The DND-bypass channel was created and then never used |
-| 9 | [band.js](nigehban-app/src/band.js) | **Connected**, battery blank forever | Notify subscribe errors and write errors were both caught and dropped, so a dead data path reported as a live link |
-| 10 | [nigehban_band_nrf52.ino](nigehban_band_nrf52/nigehban_band_nrf52.ino) | nRF Connect shows bytes on TX | `notify()` sent 23 of every 86 bytes and abandoned the rest; a hex dump has no line framing, so it looked like a pass |
+| 1 | [CheckinBanner.js](../nigehban-app/src/components/CheckinBanner.js) | The family member's screen closed itself | `s.head` with no `s` — a `ReferenceError` every render, and no error boundary, so React unmounted the tree |
+| 2 | [notifications.js](../nigehban-app/src/notifications.js) | Push arrives, tap does nothing useful | No response listener anywhere; every tap cold-launched to Home |
+| 3 | [api.js](../nigehban-app/src/api.js) | Header says **connected** | NAT-dropped socket, half-open for minutes, no ping to notice |
+| 4 | [band.js](../nigehban-app/src/band.js) | Stuck on **Searching** | BLE scan with no timeout, and a scan-error branch with no retry |
+| 5 | [App.js](../nigehban-app/App.js) | *EMERGENCY* with no map link | `raise()` read a fix only the Home tab feeds |
+| 6 | [state.js](../nigehban-app/src/state.js) | Band stops buzzing, screen says nothing | `checkin_missed` fell through to `default: return null` |
+| 7 | [nigehban_server.py](../server/nigehban_server.py) | Siren at 3 a.m. for yesterday | No `ttl`, so Expo's four-week default applied |
+| 8 | [notifications.js](../nigehban-app/src/notifications.js) | Silent SOS under Do Not Disturb | The DND-bypass channel was created and then never used |
+| 9 | [band.js](../nigehban-app/src/band.js) | **Connected**, battery blank forever | Notify subscribe errors and write errors were both caught and dropped, so a dead data path reported as a live link |
+| 10 | [nigehban_band_nrf52.ino](../nigehban_band_nrf52/nigehban_band_nrf52.ino) | nRF Connect shows bytes on TX | `notify()` sent 23 of every 86 bytes and abandoned the rest; a hex dump has no line framing, so it looked like a pass |
 
 Rows 9 and 10 are the same lesson as the other eight, learned again on hardware:
 **verifying a transport is not verifying a message.** nRF Connect proved bytes
@@ -773,22 +773,23 @@ heartbeat.
 
 #### Open, in the order I would take them
 
-1. **SOS must not need the server.** *Found the hard way: the in-app SOS button
-   was also dead, and the cause was ngrok being off.* [App.js:173-199](nigehban-app/App.js#L173-L199)
-   dispatches `SOS_RAISED` **only after** `POST /alert` succeeds, and there is
-   no queue — `useLive` retries its socket, alerts retry nothing. So the exact
-   scenario the product exists for (bad signal, dead zone, server hiccup) gives
-   no takeover, no siren, no record, and a toast that vanishes. Fix: dispatch
-   locally *first*, persist unsent alerts, flush on reconnect, and render
-   delivery state honestly — "sent to 3" versus "not delivered yet, retrying",
-   which today look identical because neither renders.
+1. ~~**SOS must not need the server.**~~ **DONE — 1 Sep 2026.** *Found the hard
+   way: the in-app SOS button was also dead, and the cause was ngrok being off.*
+   `App.js` dispatched `SOS_RAISED` only after `POST /alert` succeeded, with no
+   queue behind it, so the exact scenario the product exists for gave no
+   takeover, no siren, no record, and a toast that vanished. It now dispatches
+   locally *first*, persists unsent alerts in
+   [alertQueue.js](../nigehban-app/src/alertQueue.js), flushes on reconnect and on
+   every return to the foreground, and renders "Sent to 3 people" and "Not yet —
+   waiting for signal" as the different things they are. Covered by
+   [tests/test_offline_queue.py](../tests/test_offline_queue.py).
 2. **Battery ADC** — F2.3 above. Safety path: false lows page the family.
 3. **`registerPushToken` fails** (`404`, then `fetch canceled`). This phone
    registers no push token, so it receives nobody else's alerts. Own alerts
    still fan out; incoming ones do not arrive.
 4. **`Custom sound 'default' not found`** — thrown on every launch. On the alarm
    path, so it bears on whether an SOS actually makes a noise.
-5. **[nigehban_hub.py:460](nigehban_hub.py#L460) has bug #1, unfixed.** Exact
+5. **[nigehban_hub.py:460](../nigehban_hub.py#L460) has bug #1, unfixed.** Exact
    `d.name == "Nigehban-01"` against a band now named `Nigehban-02`. The laptop
    bridge cannot find the band for precisely the reason the app could not.
 6. **MTU stays 23** — the central drives negotiation and Android had already
@@ -830,5 +831,5 @@ sitting with one Android phone, roughly half an hour for all three.
 **Not verifiable at all yet:** #6 — see the note under §12, `virtualBand.js`
 never implements the band's nag timeout, so the phone-as-band cannot produce the
 event. Porting those ~10 lines from
-[nigehban_band_nrf52.ino:577](nigehban_band_nrf52/nigehban_band_nrf52.ino#L577)
+[nigehban_band_nrf52.ino:577](../nigehban_band_nrf52/nigehban_band_nrf52.ino#L577)
 closes both the test gap and a real firmware/JS divergence.

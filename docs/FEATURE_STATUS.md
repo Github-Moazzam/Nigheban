@@ -19,6 +19,66 @@ proved it), and a **test** (the cheapest way for you to prove it again).
 
 ---
 
+## Since this audit — 1 Sep 2026
+
+The 29 Aug audit below is left as it was written. This section is what has
+changed since, because a status file that is quietly edited in place stops being
+evidence of anything. **[BUG_LIST.md](BUG_LIST.md) is the live defect record**
+— it carries the cause and the fix for each item named here.
+
+**Done since, and observed on hardware** (Samsung, Android 14, release APK on
+`fix/ble-scan-throttle`, 1 Sep):
+
+- **The offline SOS queue** — the item §5 called "highest-value on this list".
+  Local-first dispatch, unsent alerts persisted, flushed on reconnect, and
+  delivery state rendered honestly. §3.3's caveat and Blocker #3 are corrected
+  below; [alertQueue.js](../nigehban-app/src/alertQueue.js),
+  [tests/test_offline_queue.py](../tests/test_offline_queue.py).
+- **The BLE scan throttle** (BUG-002) — the app could drive itself into
+  Android's 5-scans-per-30-seconds limit and never escape without a manual
+  Bluetooth toggle.
+- **The wearer can now see their own emergency.** A live SOS survives the app
+  being swiped away (BUG-005), the wearer's own phone shows a sticky
+  notification for it (BUG-006), and the band buzzes to confirm the press
+  (BUG-007). Before this the SOS went out correctly and the wearer had no way
+  to know.
+- **One notification per emergency** instead of two or three (BUG-009).
+- **Sign-out no longer leaves the previous account's band paired** (BUG-001).
+
+**Done since, not yet on a device:**
+
+- **Responders survive a closed app** (BUG-008, `fix/responder-notifications`).
+  A family member answering now pushes a silent-but-vibrating notification to
+  the wearer, and the responder list is restored when the app reopens. The push
+  is the part still needing a phone: force-stopped app, screen off.
+
+**New problems found since, all open.** These were found by using the thing, and
+most of them were invisible from the UI:
+
+| # | What | Severity |
+|---|---|---|
+| BUG-010 | The band only reconnects while the screen is on — `retrySoon` is a `setTimeout`, and Android stops those when the activity is not visible | High |
+| BUG-011 | Every SOS from a killed app also raises a false `watch_lost`, so a contradictory alert lands beside a real emergency | High |
+| BUG-012 | Any band's SOS beacon fires on **every** Nigehban phone in range — an emergency raised on the wrong account, to the wrong family | Critical |
+| BUG-013 | A stranger's press silently discards your own band's SOS | Critical |
+| BUG-014 | A band reboot can discard the next real press | High |
+| BUG-015 | Nothing restores the band link after an OEM kills the app — the wearer carries a band that looks linked and is not | High |
+| BUG-016 | Advertising fields fail silently once they no longer fit in 31 bytes | Low today |
+
+Still open from the original nine: **BUG-003** (`lastError` is collected and
+rendered by nothing), **BUG-004** (the `error:` status path can still put a raw
+library string on screen), and the **`presentAlarm` finding** at the end of
+BUG-009 — the lock-screen takeover appears not to be firing on the test device,
+which matters because §3.11 below treats it as observed and working.
+
+**What that does to the scoreboard:** the ✅ column is stronger than it reads
+below on the app's own behaviour and weaker on the band link. Nothing in the
+band's connection story should be treated as settled until BUG-010 and BUG-015
+are fixed, and BUG-012/013 mean the beacon path is **not** safe to demo with
+more than one band in the room.
+
+---
+
 ## 0. Scoreboard
 
 **28 tracked capabilities.**
@@ -34,21 +94,21 @@ proved it), and a **test** (the cheapest way for you to prove it again).
 
 | # | Feature | Where |
 |---|---|---|
-| 1 | Accounts — register, sign in, hashed session tokens, server-owned role | [`server/nigehban_server.py`](server/nigehban_server.py), [`Auth.js`](nigehban-app/src/screens/Auth.js) |
-| 2 | Two-party pairing & consent — 10-min pairing code, permanent `NGB-` code, accept/decline, rate limits | [`Family.js`](nigehban-app/src/screens/Family.js), [`AddFamily.js`](nigehban-app/src/screens/user/AddFamily.js) |
-| 3 | Instant SOS — app button **and** band double-tap → family takeover with a map pin | [`App.js`](nigehban-app/App.js), [`Home.js`](nigehban-app/src/screens/Home.js) |
-| 4 | Stand-down and "I'M ON IT" — from the app or from the band's single press | [`SosLiveView.js`](nigehban-app/src/components/SosLiveView.js), [`SosLive.js`](nigehban-app/src/screens/user/SosLive.js) |
-| 5 | Remote check-in with a **server-owned** deadline, and escalation when it passes | [`sweeper()`](server/nigehban_server.py), [`CheckinBanner.js`](nigehban-app/src/components/CheckinBanner.js) |
-| 6 | High Alert — server-held randomised 5–10 min re-buzz, PIN-gated disarm | [`HighAlertPanel.js`](nigehban-app/src/components/HighAlertPanel.js), [`PinSheet.js`](nigehban-app/src/components/PinSheet.js) |
-| 7 | Heartbeat watchdog + watch-status tile (3 min of silence while armed → `watch_lost`) | [`watch.js`](nigehban-app/src/watch.js), [`WatchStatusTile.js`](nigehban-app/src/components/WatchStatusTile.js) |
-| 8 | Good Samaritan — coarse anonymous fan-out within 800 m, identity released only on "I'm going" | [`SamaritanCall.js`](nigehban-app/src/components/SamaritanCall.js) |
-| 9 | Live WebSocket delivery, reconnect, and a 30 s keep-alive ping | [`api.js`](nigehban-app/src/api.js) |
-| 10 | Push to a **force-stopped** app, lock-screen full-screen takeover, looping siren | [`modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/), [`bgNotifications.js`](nigehban-app/src/bgNotifications.js) |
-| 11 | Notification tap routing — a tapped push opens the right alert, even from a cold start | [`notifications.js`](nigehban-app/src/notifications.js) |
-| 12 | Virtual band — the phone runs the firmware's own gesture engine | [`virtualBand.js`](nigehban-app/src/virtualBand.js), [`Band.js`](nigehban-app/src/screens/Band.js) |
-| 13 | Real BLE band link — connect, gestures, 10 s heartbeat, battery %, scan/connect fault recovery | [`band.js`](nigehban-app/src/band.js), [`nigehban_band_nrf52.ino`](nigehban_band_nrf52/nigehban_band_nrf52.ino) |
-| 14 | Design system + **two role shells** — admin console (5 tabs) and end-user shell (3 tabs) | [`theme.js`](nigehban-app/src/theme.js), [`UserShell.js`](nigehban-app/src/screens/UserShell.js) |
-| 15 | Postgres/Supabase database + idempotent migration runner | [`supabase_migration.sql`](server/supabase_migration.sql), [`migrate_pg.py`](server/migrate_pg.py) |
+| 1 | Accounts — register, sign in, hashed session tokens, server-owned role | [`server/nigehban_server.py`](../server/nigehban_server.py), [`Auth.js`](../nigehban-app/src/screens/Auth.js) |
+| 2 | Two-party pairing & consent — 10-min pairing code, permanent `NGB-` code, accept/decline, rate limits | [`Family.js`](../nigehban-app/src/screens/Family.js), [`AddFamily.js`](../nigehban-app/src/screens/user/AddFamily.js) |
+| 3 | Instant SOS — app button **and** band double-tap → family takeover with a map pin | [`App.js`](../nigehban-app/App.js), [`Home.js`](../nigehban-app/src/screens/Home.js) |
+| 4 | Stand-down and "I'M ON IT" — from the app or from the band's single press | [`SosLiveView.js`](../nigehban-app/src/components/SosLiveView.js), [`SosLive.js`](../nigehban-app/src/screens/user/SosLive.js) |
+| 5 | Remote check-in with a **server-owned** deadline, and escalation when it passes | [`sweeper()`](../server/nigehban_server.py), [`CheckinBanner.js`](../nigehban-app/src/components/CheckinBanner.js) |
+| 6 | High Alert — server-held randomised 5–10 min re-buzz, PIN-gated disarm | [`HighAlertPanel.js`](../nigehban-app/src/components/HighAlertPanel.js), [`PinSheet.js`](../nigehban-app/src/components/PinSheet.js) |
+| 7 | Heartbeat watchdog + watch-status tile (3 min of silence while armed → `watch_lost`) | [`watch.js`](../nigehban-app/src/watch.js), [`WatchStatusTile.js`](../nigehban-app/src/components/WatchStatusTile.js) |
+| 8 | Good Samaritan — coarse anonymous fan-out within 800 m, identity released only on "I'm going" | [`SamaritanCall.js`](../nigehban-app/src/components/SamaritanCall.js) |
+| 9 | Live WebSocket delivery, reconnect, and a 30 s keep-alive ping | [`api.js`](../nigehban-app/src/api.js) |
+| 10 | Push to a **force-stopped** app, lock-screen full-screen takeover, looping siren | [`modules/nigehban-alarm/`](../nigehban-app/modules/nigehban-alarm/), [`bgNotifications.js`](../nigehban-app/src/bgNotifications.js) |
+| 11 | Notification tap routing — a tapped push opens the right alert, even from a cold start | [`notifications.js`](../nigehban-app/src/notifications.js) |
+| 12 | Virtual band — the phone runs the firmware's own gesture engine | [`virtualBand.js`](../nigehban-app/src/virtualBand.js), [`Band.js`](../nigehban-app/src/screens/Band.js) |
+| 13 | Real BLE band link — connect, gestures, 10 s heartbeat, battery %, scan/connect fault recovery | [`band.js`](../nigehban-app/src/band.js), [`nigehban_band_nrf52.ino`](../nigehban_band_nrf52/nigehban_band_nrf52.ino) |
+| 14 | Design system + **two role shells** — admin console (5 tabs) and end-user shell (3 tabs) | [`theme.js`](../nigehban-app/src/theme.js), [`UserShell.js`](../nigehban-app/src/screens/UserShell.js) |
+| 15 | Postgres/Supabase database + idempotent migration runner | [`supabase_migration.sql`](../server/supabase_migration.sql), [`migrate_pg.py`](../server/migrate_pg.py) |
 
 ### ◐ Built — not yet observed on a device (4)
 
@@ -71,7 +131,7 @@ proved it), and a **test** (the cheapest way for you to prove it again).
 | # | Feature | Note |
 |---|---|---|
 | 22 | **Cloud deployment** (Alibaba ECS, Docker, Caddy, TLS) | Nothing exists — no Dockerfile, no compose, no Caddyfile, no account. Everything runs off a laptop + ngrok |
-| 23 | **Qwen severity scoring / Urdu dispatch text** | Exists only in the legacy [`nigehban_hub.py`](nigehban_hub.py); not in the server. Pre-agreed cut line |
+| 23 | **Qwen severity scoring / Urdu dispatch text** | Exists only in the legacy [`nigehban_hub.py`](../nigehban_hub.py); not in the server. Pre-agreed cut line |
 | 24 | **WhatsApp fan-out** | Same — CallMeBot path lives in the hub, not the server |
 | 25 | **Security hardening** | Tokens never expire · CORS is `*` · `usesCleartextTraffic` still on · rate limits only on auth/pairing, not every write |
 | 26 | **Band hardware build** | Motor driver (transistor + flyback + 100 µF), LiPo via JST-PH, power budget. No haptic feedback on the real band today |
@@ -165,7 +225,7 @@ npm run web           # browser, fastest loop
 ```
 
 Paste the server address into the app's address box. The rule
-([`api.js`](nigehban-app/src/api.js)): a bare IPv4 or `localhost` gets `http://`,
+([`api.js`](../nigehban-app/src/api.js)): a bare IPv4 or `localhost` gets `http://`,
 anything else gets `https://`.
 
 ### 1.6 A development build — needed for BLE, push, the alarm, the service
@@ -291,16 +351,27 @@ phones on mobile data; band → phone → server → family observed 27 Aug 2026
 SOS raised from the BAND tab or from a backgrounded app used to carry no
 coordinates at all, which is most of the value gone.
 
-> ### ⚠ The caveat: an SOS currently needs the server
+> ### ✅ The caveat above is fixed — corrected 1 Sep 2026
 >
-> [`App.js`](nigehban-app/App.js) dispatches `SOS_RAISED` **only after**
-> `POST /alert` succeeds, and unsent alerts are not queued. With no
-> connectivity the alert is **lost, not delayed** — no takeover, no siren, no
-> record, and a toast that vanishes. This is the exact scenario the product
-> exists for. It is [Blocker #3](#6-blockers-ranked).
+> This used to read: *"`App.js` dispatches `SOS_RAISED` only after `POST /alert`
+> succeeds, and unsent alerts are not queued — with no connectivity the alert is
+> lost, not delayed."* That is no longer true, and leaving it standing would
+> send someone to rebuild what exists.
 >
-> **To reproduce:** stop the server (or kill the tunnel), press SOS, watch
-> nothing happen.
+> [`App.js`](../nigehban-app/App.js) now dispatches **locally first** and vibrates
+> before the network call is attempted, so the SOS screen appears with no
+> connectivity at all. A failed send is persisted by
+> [`alertQueue.js`](../nigehban-app/src/alertQueue.js) and flushed when the socket
+> comes back, on every return to the foreground, and on a 30 s timer while
+> anything is still queued. The screen distinguishes *"Sent to 3 people"* from
+> *"Not yet — waiting for signal"* rather than showing one for both.
+>
+> **What is still true:** a queued alert has reached nobody. The phone holds it
+> honestly, and says so, but a wearer in a dead zone still has no family member
+> looking at it. That is the limit the v2 band mesh exists to remove.
+>
+> **To reproduce the good behaviour:** kill the tunnel, press SOS, watch the
+> screen say *"waiting for signal"*; restore the tunnel and watch it flush.
 
 ---
 
@@ -346,7 +417,7 @@ digits. That asymmetry is the feature.
 4. Try to disarm without the PIN. It must be refused.
 
 **Test (L0)** — shorten `HIGH_ALERT_MIN_S`/`HIGH_ALERT_MAX_S` in
-[`nigehban_server.py`](server/nigehban_server.py) if you do not want to wait
+[`nigehban_server.py`](../server/nigehban_server.py) if you do not want to wait
 five minutes.
 
 **Why the next buzz is shown only to the minute:** the interval is randomised
@@ -360,10 +431,10 @@ precisely so it cannot be timed by somebody watching.
 
 | | State |
 |---|---|
-| Phone accelerometer state machine at 104 Hz | ✅ [`virtualBand.js`](nigehban-app/src/virtualBand.js) |
-| 30 s (sev 4) / 15 s (sev 5) countdown, vibrating through the last five seconds | ✅ [`FallCountdown.js`](nigehban-app/src/components/FallCountdown.js) |
+| Phone accelerometer state machine at 104 Hz | ✅ [`virtualBand.js`](../nigehban-app/src/virtualBand.js) |
+| 30 s (sev 4) / 15 s (sev 5) countdown, vibrating through the last five seconds | ✅ [`FallCountdown.js`](../nigehban-app/src/components/FallCountdown.js) |
 | "I'm fine" writes a `near_miss` the server records and tells nobody | ✅ |
-| PIN-gated cancel on the end-user shell | ✅ [`DisarmPad.js`](nigehban-app/src/screens/user/DisarmPad.js) |
+| PIN-gated cancel on the end-user shell | ✅ [`DisarmPad.js`](../nigehban-app/src/screens/user/DisarmPad.js) |
 | **On the band** | ❌ `#define HAS_IMU 0` — the LSM6DS3TR-C is never read |
 | **Threshold calibration** | ❌ F3.3's CSV logging was never run; thresholds are the exec plan's starting guesses |
 
@@ -526,6 +597,32 @@ dropped (usually Doze) and the visible push is doing its job as the fallback.
 **Also verify the tap:** tapping the push must open *that alert*, not a bare
 Home screen — including on a cold start.
 
+> ### ⚠ Added 1 Sep 2026 — the takeover may not actually be firing
+>
+> BUG-009 found the websocket path posting its fallback notification, and that
+> path posts **only** when `presentAlarm()` returns false. So on that device the
+> native alarm module was either absent from the build or throwing. The ✅ above
+> is from 29 Aug and is not being withdrawn, but "a notification appeared"
+> cannot distinguish a working takeover from a broken one — which is exactly the
+> failure mode this document opens by warning about.
+>
+> Re-run the L3 test above and watch the **screen**, not the shade. If it stays
+> dark, the row this file calls observed is not.
+
+### The wearer's own side — added 1 Sep 2026
+
+The three mechanisms above are all about the **family's** phone. The wearer's
+own phone had nothing: the SOS went out from a swiped-away app, the family was
+paged, and the wearer had no way to tell. That group is now fixed —
+[BUG-005](BUG_LIST.md), 006, 007 — and BUG-008 adds the missing half, a
+notification when somebody answers.
+
+**Test (L3):** raise an SOS, force-stop the app, screen off. Have a family
+member tap **I'M ON IT**. The wearer's phone must buzz, show *"<name> is on the
+way"*, and **make no sound** — it is silent on purpose, because the person it
+reaches may be hiding. Reopen the app: the responder must be listed, with a
+truthful elapsed time rather than "just now".
+
 ---
 
 ### 3.12 Foreground service — when it runs ◐
@@ -645,9 +742,9 @@ own**, on the **release** APK, against the **cloud**. None of that has happened.
 | 7 | Stand down from the band → family alarm clears | ✅ | L2/L4 |
 | 8 | Check-in, phone locked, band buzzes, ack in window | ✅ | L3 |
 | 9 | Check-in ignored 90 s → **server** escalates | ✅ | L0 |
-| 10 | App swiped away, 20 min in a pocket, SOS still works | ◐ | Untested since `59fc02d` |
+| 10 | App swiped away, 20 min in a pocket, SOS still works | ◐ | The **press** works — confirmed 1 Sep, and the wearer is now told (BUG-005/006/007). The **link** is not safe on an OEM that kills the process (BUG-015) |
 | 11 | Phone rebooted → service back in < 60 s | ❌ | **No boot receiver (N2.3)** |
-| 12 | Band out of range 5 min, then return → auto-reconnect | ◐ | Written, unobserved |
+| 12 | Band out of range 5 min, then return → auto-reconnect | ❌ | **Observed failing 1 Sep — BUG-010.** Reconnects with the screen on; does not with the screen off |
 | 13 | **Phone** battery to 20 % → `low_battery` | ◐ | Untested |
 | 13b | **Band** battery to 20 % → `band_battery`, not a phone warning | ◐ | Untested; ADC may never trip it |
 | 14 | **Phone** battery to 5 % → `going_dark` | ◐ | Untested |
@@ -658,19 +755,35 @@ own**, on the **release** APK, against the **cloud**. None of that has happened.
 | 19 | Kill the service from OEM settings → family amber in 3 min | ✅ | L2 |
 | 20 | Good Samaritan on a severity-5 alert | ✅ | L0 |
 
-**Tally: 11 pass · 6 unverified · 3 fail · (row 18 counted as unverified).**
+**Tally: 11 pass · 5 unverified · 4 fail · (row 18 counted as unverified).**
+Row 12 moved from unverified to fail on 1 Sep — it was written, then run.
+That is the tally doing its job: a box only leaves ◐ by being tested, and it can
+leave in either direction.
 
 ---
 
 ## 5. What is left, by track
 
 ### App (M1)
-- [ ] **Offline SOS queue** — dispatch locally *first*, persist unsent alerts,
+- [x] **Offline SOS queue** — dispatch locally *first*, persist unsent alerts,
       flush on reconnect, and render delivery state honestly: *"sent to 3"* vs
-      *"not delivered yet, retrying"*, which today look identical because
-      neither renders. **Highest-value item on this list.**
+      *"not delivered yet, retrying"*. **Done and observed 1 Sep 2026**;
+      [alertQueue.js](../nigehban-app/src/alertQueue.js).
+- [ ] **Make the band link restore itself** — the highest-value item on this
+      list now. BUG-010 (the retry timer does not fire with the screen off) and
+      BUG-015 (nothing survives an OEM kill to retry at all). BUG-010 has to
+      land first: BUG-015's fix needs a timer that actually fires.
+- [ ] **Put a band id in the beacon** — BUG-012 and BUG-013. Today any band's
+      press is accepted by every Nigehban phone in range, and a stranger's press
+      can discard your own band's SOS. Not safe to demo with two bands present.
+- [ ] Surface `lastError` (BUG-003), and stop the `error:` path putting raw
+      library strings on screen (BUG-004) — one change, since the second needs
+      the first.
+- [ ] Find out why `presentAlarm()` is not firing on the test device — the
+      lock-screen takeover is meant to be the primary emergency signal and the
+      notification fallback is currently doing its job. See the end of BUG-009.
 - [ ] Port the band's nag timeout (~10 lines from
-      [`nigehban_band_nrf52.ino:644-648`](nigehban_band_nrf52/nigehban_band_nrf52.ino#L644-L648))
+      [`nigehban_band_nrf52.ino:644-648`](../nigehban_band_nrf52/nigehban_band_nrf52.ino#L644-L648))
       into `virtualBand.js`, closing both a test gap and a real firmware/JS
       divergence. *(The plan cites line 577 for this; the code has moved — it
       is at 644 today.)*
@@ -716,7 +829,7 @@ own**, on the **release** APK, against the **cloud**. None of that has happened.
 - [ ] **F4.1–F4.3** Motor driver (transistor + flyback + 100 µF bulk cap),
       LiPo via JST-PH, power budget. *If the band disconnects whenever it
       buzzes, the 100 µF cap is what is missing.*
-- [ ] Fix [`nigehban_hub.py:66`](nigehban_hub.py#L66) — it looks for
+- [ ] Fix [`nigehban_hub.py:66`](../nigehban_hub.py#L66) — it looks for
       `Nigehban-01`; the band is now `Nigehban-02`
 
 ### Deployment (M3)
@@ -747,7 +860,7 @@ Ordered by *what stops you first*, not by size.
 
 ### 2. The flagship test suite silently checks the wrong database
 **Severity: high — it reports green while proving nothing.**
-[`tests/test_consent_and_sweeper.py`](tests/test_consent_and_sweeper.py) still
+[`tests/test_consent_and_sweeper.py`](../tests/test_consent_and_sweeper.py) still
 opens **SQLite** at `server/nigehban.db` for its B1 section. That file still
 exists and still holds **93 users from the SQLite era** — so the checks connect,
 find no plaintext tokens, and **PASS against a database the server has not used
@@ -758,9 +871,14 @@ databases both answer.* Port those three queries to `psycopg` reading
 `DATABASE_URL`, or delete the section. Until then, `test_samaritan_and_checkin.py`
 and `test_sockets.py` are the only automated proof you can trust.
 
-### 3. An SOS needs the server, and unsent alerts are not queued
-**Severity: high — it is the product's core promise.** Bad signal, a dead zone
-or a server hiccup gives no takeover, no siren, no record. Fix in §5 (App).
+### 3. ~~An SOS needs the server, and unsent alerts are not queued~~ — FIXED
+**Resolved 1 Sep 2026.** Local-first dispatch plus a persisted queue that
+flushes on reconnect; see §3.3 above. A dead zone now delays an alert instead of
+destroying it.
+
+**Replaced by:** the band link does not restore itself (BUG-010, BUG-015). The
+same class of failure — the product looks fine and quietly is not — has simply
+moved from the alert path to the connection under it.
 
 ### 4. Push tokens minted under the old EAS `projectId`
 **Severity: high — one stale token silences a whole family.** The EAS project
@@ -829,7 +947,7 @@ stolen *database*; it does nothing about a stolen *phone*) · CORS is `*` ·
 every write endpoint.
 
 ### 14. `nigehban_hub.py` cannot find the band
-**Severity: low.** [Line 66](nigehban_hub.py#L66) matches `Nigehban-01` exactly;
+**Severity: low.** [Line 66](../nigehban_hub.py#L66) matches `Nigehban-01` exactly;
 the firmware is `Nigehban-02`. The laptop bridge — the best rig for testing
 firmware with no phone — fails for the same reason the app once did.
 
@@ -881,11 +999,11 @@ here, make its silence loud in the place it happens.
 
 | Document | What it is for |
 |---|---|
-| [README.md](README.md) | What the product is, and how to run it |
+| [README.md](../README.md) | What the product is, and how to run it |
 | [EXECUTION_PLAN.md](EXECUTION_PLAN.md) | Phases, frozen protocol, schema, circuit, the v2 designs |
 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) | The same work sliced by workstream; §14 is the silent-failure pass |
 | [BACKGROUND_SERVICE_AND_OTHER_FEATURES.md](BACKGROUND_SERVICE_AND_OTHER_FEATURES.md) | The foreground service, the battery split, the database setup |
 | [BRANCH_NOTES_ble-close-app-bug.md](BRANCH_NOTES_ble-close-app-bug.md) | The BLE link, the native alarm, the killed-app push path |
 | [TESTING_WITHOUT_HARDWARE.md](TESTING_WITHOUT_HARDWARE.md) | The virtual band, the browser loop, the two-phone test |
 | [NIGEHBAN_BUILD_GUIDE.md](NIGEHBAN_BUILD_GUIDE.md) | Building the band |
-| [firmware/README.md](firmware/README.md) | Bench sketches `t1`–`t6`, and the `VBAT_ENABLE` hardware warning |
+| [firmware/README.md](../firmware/README.md) | Bench sketches `t1`–`t6`, and the `VBAT_ENABLE` hardware warning |
