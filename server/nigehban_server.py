@@ -92,6 +92,7 @@ HIGH_ALERT_MAX_S = 600
 BEAT_LOST_S      = 180      # armed and silent this long -> tell the family
 SWEEP_TICK_S     = 5
 
+
 # ---- in-memory auth cache ------------------------------------------------
 # me() hits the DB on every authenticated request. With Mumbai that is ~25ms
 # and with Tokyo it was ~200ms — per call, before the endpoint even starts.
@@ -1610,9 +1611,6 @@ async def sweep_once(now):
             "AND next_buzz_at<=%s", (now,)).fetchall()
         opened = {}
         for w in buzz:
-            # Randomised, not fixed. A predictable buzz can be answered on
-            # autopilot -- or by somebody else holding the phone -- and an
-            # interval you can time is one you can plan around.
             nxt = now + random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
             c.execute("UPDATE watch_state SET next_buzz_at=%s WHERE user_id=%s",
                       (nxt, w["user_id"]))
@@ -1641,9 +1639,6 @@ async def sweep_once(now):
 
     for w in buzz:
         checkin_id, nxt = opened[w["user_id"]]
-        # The id has to travel with the buzz. Without it the app has nothing to
-        # acknowledge, so "I am fine" fails and the sweeper escalates a person
-        # who answered -- the worst failure this product can have.
         await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
                                     "checkin_id": checkin_id,
                                     "window": CHECKIN_WINDOW_S,
@@ -1651,15 +1646,6 @@ async def sweep_once(now):
                                     "next_buzz_at": nxt})
 
     for w in lost:
-        # The last known position is the most useful thing there is here: the
-        # phone has stopped reporting, so this is where it stopped.
-        #
-        # The wording is the alert. "Watch stopped reporting" reads like a
-        # gadget fault, and that is how a family treats it -- but the watch was
-        # ARMED, which is the one state where going quiet is itself the thing
-        # worth waking someone over. So the note says the three causes the
-        # server can honestly distinguish between (it cannot tell them apart)
-        # and names the one that matters, rather than describing the sensor.
         silent_s = int(now - w["last_beat"])
         mins = max(1, round(silent_s / 60))
         await emit_alert(w["user_id"], "watch_lost", source="server",
@@ -1672,10 +1658,6 @@ async def sweep_once(now):
 
     LIMIT.sweep()
     return {"missed": len(due), "buzzed": len(buzz), "lost": len(lost)}
-
-
-
-
 # ---- live socket --------------------------------------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str = ""):

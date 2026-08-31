@@ -81,11 +81,56 @@
 
 #define HEARTBEAT_MS    10000
 
+// ------------------------------------------------------- THE SOS BEACON ---
+//
+// The way an SOS gets out when there is no link to get it out on.
+//
+// A GATT connection is opened by the phone, never by the band, and it only
+// exists while the phone's app is alive to hold it. On most non-Samsung
+// Android skins -- Vivo, Oppo, Xiaomi, Huawei, Transsion -- swiping the app off
+// the Recents screen runs `kill -9` on it, which no foreground service and no
+// permission can survive. The wearer walks out with a band that looks linked,
+// is not, and will drop their SOS on the floor.
+//
+// So the press also goes out in the advertisement itself, where no connection
+// is required. Android 8+ lets an app hand the OS a scan filter plus a
+// PendingIntent; the Bluetooth chip watches for the pattern and the *system*
+// starts the app when it appears -- with the app killed, hours later. That is
+// what these bytes are for. `modules/nigehban-bandwake` is the other half.
+//
+// Layout, 6 bytes inside the manufacturer-specific field:
+//
+//     FF FF   'N' 'G'   flag   seq
+//     \___/   \_____/   \__/   \_/
+//       |        |       |      +-- press counter, wraps; the phone dedups on it
+//       |        |       +--------- 0 idle, 1 SOS standing
+//       |        +----------------- our magic, because company FFFF is the
+//       |                           testing id and half the world uses it
+//       +-------------------------- company id, little-endian, SIG "testing"
+//
+// The phone filters on `FF FF 'N' 'G' 01` with a full mask, so an idle band
+// never wakes it and the sequence byte is free to change. Filtering in the
+// chip rather than in software is also what makes this legal at all: since
+// Android 8.1 a background scan with no filter returns nothing while the
+// screen is off, which is exactly when this has to work.
+#define SOS_BEACON_COMPANY_LO  0xFF
+#define SOS_BEACON_COMPANY_HI  0xFF
+#define SOS_BEACON_MAGIC_0     'N'
+#define SOS_BEACON_MAGIC_1     'G'
+// How long the flag stays up. Long enough that a phone which was rebooting,
+// out of range or in Doze still gets its chance; short enough that a band left
+// unpaired in a drawer is not still crying SOS tomorrow.
+#define SOS_BEACON_MS          600000UL   // 10 minutes
+
 // ------------------------------------------------------------------ STATE ---
 BLEUart bleuart;                // this IS the Nordic UART Service
 
 bool     gConnected    = false;
 bool     gWasConnected = false;
+
+bool     gSosBeacon    = false;   // is the advertisement crying SOS right now
+uint8_t  gSosSeq       = 0;       // bumped per press, so repeats are not deduped
+uint32_t gSosBeaconAt  = 0;       // when it went up, for SOS_BEACON_MS
 
 uint8_t  gBattery      = 100;
 bool     gBatteryForced= false;   // `bat` command pins it for demos
@@ -401,8 +446,23 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
     // 4 taps for `armed` in v2; that needs its own affordance, because folding
     // it in would let an over-tapped SOS arm anti-snatch instead of calling
     // for help.
-    feedback(4, 120, 80);
-    sendEvent("sos", meta + ",\"src\":\"double_tap\"");
+    if (gConnected) {
+      feedback(4, 120, 80);
+      sendEvent("sos", meta + ",\"src\":\"double_tap\"");
+      return;
+    }
+
+    // No link. send() would drop this on the floor -- and until now it did so
+    // *after* buzzing the four-pulse "sent" pattern, so a frightened person was
+    // told help was coming when nothing had left their wrist. That was the
+    // worst thing this firmware did.
+    //
+    // The beacon is the real answer to it. The different pattern is the honest
+    // one: slower and longer, so the wrist can tell "gone the fast way" from
+    // "gone the slow way" without looking at anything.
+    setSosBeacon(true);
+    feedback(6, 250, 150);
+    sendEvent("sos", meta + ",\"src\":\"double_tap\",\"via\":\"beacon\"");
     return;
   }
 
@@ -457,6 +517,62 @@ void handleCommand(const String &line) {
   }
 }
 
+// ----------------------------------------------------- THE ADVERTISEMENT ---
+//
+// Rebuilt rather than edited, because the SoftDevice takes the payload as one
+// blob -- there is no way to change six bytes of it in place.
+//
+// The 31-byte budget, exactly:
+//
+//     flags                        3
+//     128-bit NUS service UUID    18
+//     manufacturer data (6)        8
+//                                 --
+//                                 29
+//
+// addTxPower() used to hold the last 3 and is gone. Nothing ever read it: the
+// app scans on the service UUID and takes the name out of the scan response.
+// It was the one field in here that was pure decoration, and the beacon does
+// not fit without those bytes.
+void buildAdvertising() {
+  uint8_t mfg[6] = {
+    SOS_BEACON_COMPANY_LO, SOS_BEACON_COMPANY_HI,
+    SOS_BEACON_MAGIC_0,    SOS_BEACON_MAGIC_1,
+    (uint8_t)(gSosBeacon ? 1 : 0),
+    gSosSeq,
+  };
+
+  Bluefruit.Advertising.clearData();
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addService(bleuart);
+  Bluefruit.Advertising.addManufacturerData(mfg, sizeof(mfg));
+}
+
+/**
+ * Put the SOS flag up, or take it down, and get it on the air.
+ *
+ * The payload is rebuilt on both paths, connected or not. While a link is up
+ * the radio is not advertising -- but `restartOnDisconnect(true)` will put
+ * whatever sits in this buffer straight back on the air the moment the link
+ * drops, so leaving a stale flag in it is how a band ends up crying about an
+ * emergency that was answered an hour ago.
+ *
+ * Advertising is only stopped and restarted when it is actually running.
+ * Touching a live advertisement is what makes a payload change reach the
+ * radio; doing it mid-connection is not needed and is not free.
+ */
+void setSosBeacon(bool on) {
+  if (on) {
+    gSosSeq++;                       // a second press must not dedup as the first
+    gSosBeaconAt = millis();
+  }
+  gSosBeacon = on;
+
+  if (!gConnected) Bluefruit.Advertising.stop();
+  buildAdvertising();
+  if (!gConnected) Bluefruit.Advertising.start(0);
+}
+
 // ------------------------------------------------------- BLE CALLBACKS ---
 void connect_callback(uint16_t conn_handle) {
   gConnected = true;
@@ -464,6 +580,11 @@ void connect_callback(uint16_t conn_handle) {
   // the 1-2 week budget depends on (F4.3). Units of 1.25 ms -> 30-60 ms.
   BLEConnection *c = Bluefruit.Connection(conn_handle);
   if (c) c->requestConnectionParameter(24, 48);
+
+  // The phone is here, so the slow channel is no longer the only one. Clearing
+  // it now also stops the same press being delivered twice -- once as a beacon
+  // wake, and once over the link that wake caused.
+  if (gSosBeacon) setSosBeacon(false);
 
   // The negotiated MTU, on the wire, at the one moment it is knowable. 23 means
   // lines will be chunked and this build is missing configPrphBandwidth; 247
@@ -572,15 +693,13 @@ void setup() {
 
   bleuart.begin();
 
-  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-  Bluefruit.Advertising.addTxPower();
-  Bluefruit.Advertising.addService(bleuart);
   // The name goes in the scan response: the 128-bit NUS UUID costs 18 of the
   // advertising packet's 31 bytes and DEVICE_NAME will not fit alongside it.
   Bluefruit.ScanResponse.addName();
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);   // 20 ms fast / 152.5 ms slow
   Bluefruit.Advertising.setFastTimeout(30);
+  buildAdvertising();
   Bluefruit.Advertising.start(0);               // 0 = advertise forever
 
 #if HAS_IMU
@@ -639,6 +758,16 @@ void loop() {
       feedback(2, 80, 80);
       Serial.println("{\"t\":\"log\",\"msg\":\"link down, advertising again\"}");
     }
+  }
+
+  // The SOS flag comes down on its own after SOS_BEACON_MS.
+  //
+  // Nothing else would ever take it down if the phone simply never arrives --
+  // flat battery, left at home, uninstalled. A band still advertising an
+  // emergency tomorrow morning is a band whose next real SOS nobody believes.
+  if (gSosBeacon && (now - gSosBeaconAt) > SOS_BEACON_MS) {
+    setSosBeacon(false);
+    Serial.println("{\"t\":\"log\",\"msg\":\"sos beacon expired\"}");
   }
 
   // missed check-in: band nags once more, phone owns the real escalation
