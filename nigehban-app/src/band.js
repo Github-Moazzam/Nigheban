@@ -17,7 +17,44 @@ export const BAND_PREFIX = 'Nigehban-';
 // forever with nothing to press. Ten seconds is long enough for a band that is
 // advertising on a 1 s interval and short enough to be worth waiting through.
 const SCAN_TIMEOUT_MS = 10000;
+// The wait before the first retry. Every subsequent failure doubles it up to
+// RETRY_MAX_MS, and a link that comes up resets it -- see retrySoon().
+//
+// It used to be a flat 3 s, which is what turned Android's scan throttle from a
+// thirty-second pause into a permanent state. A throttled scan fails
+// *immediately* rather than running for SCAN_TIMEOUT_MS, so the cycle collapsed
+// from ~13 s to ~3 s -- about ten scan starts per thirty seconds, twice the
+// limit that caused the throttle in the first place. The app re-armed it
+// forever, and the two errors that reached the screen ("Undocumented scan
+// throttle", then "application registration failed") were the Bluetooth stack
+// refusing us harder each time round.
 const RETRY_MS = 3000;
+// Two ceilings, because the two ways back to a band cost wildly different
+// things. A scan is rationed by the OS and is what this whole mechanism exists
+// to protect, so it backs all the way off. Going straight at a band we have
+// linked to before is one connection attempt against a known address: it
+// spends no scan budget, and on a device somebody is wearing for their safety,
+// "reconnects within fifteen seconds of the band coming back" is the property
+// that matters more than the handful of milliwatts it costs to keep asking.
+const RETRY_MAX_MS = 60000;
+const RETRY_MAX_KNOWN_MS = 15000;
+
+// Android's own rule, from AppScanStats: an app that starts more than five
+// scans inside any thirty-second window is "scanning too frequently", and the
+// OS quietly stops delivering results. The budget here is four rather than
+// five so a retry landing on the boundary cannot trip it.
+const SCAN_WINDOW_MS = 30000;
+const SCAN_BUDGET = 4;
+
+// What to wait when the stack says it has throttled us but we cannot read a
+// suggested time out of the message: one full window, plus a margin.
+const THROTTLE_COOLDOWN_MS = 35000;
+
+// SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -- the scanner client could not
+// be registered with the Bluetooth stack at all, usually because registrations
+// were leaked by exactly the start/stop churn described above. Another scan
+// cannot fix it, so back off hard and tell the user the thing that can.
+const BT_STUCK_COOLDOWN_MS = 60000;
 // Two and a half of the firmware's 10 s heartbeats: long enough to ride out a
 // missed one, short enough that a dead subscription is caught rather than worn.
 const DATA_TIMEOUT_MS = 25000;
@@ -36,9 +73,12 @@ const LINK_KEY = 'nigehban.band.id';
 // falls back to a simulated band there -- that way login, family and alerts are
 // all testable today while the real dev build is still cooking.
 let BleManager = null;
+let ScanMode = null;
 let bleError = null;
 try {
-  BleManager = require('react-native-ble-plx').BleManager;
+  const plx = require('react-native-ble-plx');
+  BleManager = plx.BleManager;
+  ScanMode = plx.ScanMode;
 } catch (e) {
   bleError = 'module not bundled';
 }
@@ -84,17 +124,92 @@ let connectFn = null;     // the newest mounted tree's connect(), for the retry
 let connecting = false;
 let buf = '';             // partial line across BLE notifications
 let sawLine = false;      // dev logging: confirm reassembly once
+// The current retry wait, grown by each failure and reset by a link that comes
+// up. Module scope for the same reason everything else here is: the loop
+// outlives the React tree, and a backoff that resets on every mount is not a
+// backoff.
+let retryDelay = RETRY_MS;
+// Which ceiling the backoff is growing towards. Set by connect() once it knows
+// whether there is a remembered band to go straight at.
+let retryCap = RETRY_MAX_MS;
+// When startDeviceScan() was last called, newest last. This is the app's half
+// of Android's scan budget -- see scanGateDelay().
+let scanStarts = [];
 
 function bleManager() {
   if (!manager && BleManager) manager = new BleManager();
   return manager;
 }
 
-/** Schedule another attempt, unless the user has withdrawn the instruction. */
-function retrySoon() {
+/**
+ * Schedule another attempt, unless the user has withdrawn the instruction.
+ *
+ * `ms` overrides the backoff for a failure that carries its own timing -- a
+ * scan throttle naming the moment it lifts, or the scan budget saying how long
+ * until there is room. Everything else doubles the wait, so a band that is
+ * simply switched off costs one attempt a minute rather than twenty, and the
+ * budget below is never the only thing holding the line.
+ */
+function retrySoon(ms) {
   if (!wantsLink) return;
   clearTimeout(retryTimer);
-  retryTimer = setTimeout(() => { retryTimer = null; connectFn?.(); }, RETRY_MS);
+  const wait = ms == null ? retryDelay : ms;
+  // A caller-supplied wait is a fact about the radio, not a failure count, so
+  // it must not push the backoff up on top of itself.
+  if (ms == null) retryDelay = Math.min(retryDelay * 2, retryCap);
+  retryTimer = setTimeout(() => { retryTimer = null; connectFn?.(); }, wait);
+}
+
+/** A link came up, or the user let go: the next failure starts short again. */
+function resetBackoff() {
+  retryDelay = RETRY_MS;
+}
+
+/**
+ * How long until we are allowed to start another scan, in ms. 0 means now.
+ *
+ * The backoff above is the polite half of staying inside Android's limit; this
+ * is the half that guarantees it. However the app gets here -- a retry firing
+ * early, a second caller, a failure mode nobody anticipated -- a scan cannot
+ * start unless there is genuinely room in the window for it, so the throttle
+ * that produced this whole bug can no longer be reached from inside the app.
+ */
+function scanGateDelay() {
+  const now = Date.now();
+  scanStarts = scanStarts.filter((t) => now - t < SCAN_WINDOW_MS);
+  if (scanStarts.length < SCAN_BUDGET) return 0;
+  // Wait for the oldest start to age out of the window, plus a moment so we
+  // are not racing the stack's own clock for the boundary.
+  return SCAN_WINDOW_MS - (now - scanStarts[0]) + 500;
+}
+
+/**
+ * The stack's own answer to "stay off the air for how long", in ms -- or null
+ * when this failure says nothing about timing and the normal backoff applies.
+ *
+ * RxAndroidBle reports the undocumented throttle with the moment it expects it
+ * to lift: `... suggested retry date is Tue Sep 01 00:29:02 GMT+05:00 2026`.
+ * That is Java's Date.toString(), which Hermes does not reliably parse, so an
+ * unreadable or already-past date falls back to a full window rather than to
+ * nothing -- waiting for no time at all is what caused this.
+ */
+function scanCooldown(err) {
+  const msg = err?.reason || err?.message || '';
+  if (isBtStuck(err)) return BT_STUCK_COOLDOWN_MS;
+  if (!/scan throttle|too frequently/i.test(msg)) return null;
+  const at = /suggested retry date is (.+)$/i.exec(msg);
+  const when = at ? Date.parse(at[1].trim()) : NaN;
+  if (!Number.isNaN(when)) {
+    const wait = when - Date.now() + 1000;
+    if (wait > 0) return wait;
+  }
+  return THROTTLE_COOLDOWN_MS;
+}
+
+/** The stack refusing to register this app's scanner at all, rather than a
+ *  scan that failed. Nothing the app does next will clear it. */
+function isBtStuck(err) {
+  return /application registration failed/i.test(err?.reason || err?.message || '');
 }
 
 /**
@@ -395,6 +510,10 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
     setLastError(null);
     setStatus('connected');
+    // Whatever the last run of failures cost, this link proves the situation
+    // has changed. The next drop starts from a short wait rather than from a
+    // minute the band did nothing to deserve.
+    resetBackoff();
 
     // "Connected" is a claim about the radio, not about the data. The band
     // heartbeats every 10 s, so silence past 25 s means the subscription is
@@ -440,11 +559,33 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
   const connect = useCallback(async () => {
     if (simulated) { setStatus('simulated'); return; }
+
+    // --- the band we already know ------------------------------------------
+    // A scan exists to learn a band's id. Once it is known, going straight at
+    // it is faster, cheaper on the radio, and works when the band is not in the
+    // OS scan cache -- which is the normal state of affairs a few seconds after
+    // the app was killed and the band went back to advertising. Falling back to
+    // the scan below costs nothing when this misses.
+    //
+    // Read first, before any of the checks that can bail out, because it also
+    // decides how patient those bail-outs are allowed to be.
+    const knownId = await recallBand();
+
+    // Which ceiling this attempt's failures grow towards. A remembered band
+    // gets the short one: the retry that finds it again spends no scan budget,
+    // so making the wearer wait a minute for it would be a cost with no
+    // corresponding saving. Clamp the current wait too, or a backoff already
+    // grown past the cap during a scan-only stretch would outlive its reason.
+    retryCap = knownId ? RETRY_MAX_KNOWN_MS : RETRY_MAX_MS;
+    retryDelay = Math.min(retryDelay, retryCap);
+
     // Each of these is recoverable without the user touching the app again --
     // a permission granted from Settings, Bluetooth switched back on, Location
     // re-enabled -- so each schedules another attempt rather than ending the
     // loop. Ending it meant the band stayed dark until somebody found the
-    // CONNECT button.
+    // CONNECT button. None of them can be observed happening, so the wait to
+    // notice is the retry wait, which is the other half of why the cap above
+    // is chosen before we get here.
     if (!(await askPermissions())) { setStatus('no-permission'); retrySoon(); return; }
     if (await locationServicesOff()) { setStatus('location-off'); retrySoon(); return; }
 
@@ -467,14 +608,6 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       const state = await mgr.state();
       if (state === 'PoweredOff') { setStatus('bluetooth-off'); retrySoon(); return; }
     } catch { /* older adapters: just try the scan */ }
-
-    // --- the band we already know ------------------------------------------
-    // A scan exists to learn a band's id. Once it is known, going straight at
-    // it is faster, cheaper on the radio, and works when the band is not in the
-    // OS scan cache -- which is the normal state of affairs a few seconds after
-    // the app was killed and the band went back to advertising. Falling back to
-    // the scan below costs nothing when this misses.
-    const knownId = await recallBand();
 
     // --- a link this process is already holding -----------------------------
     // Before asking for a connection, check whether we have one. The activity
@@ -533,6 +666,21 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       }
     }
 
+    // --- Android's scan budget ---------------------------------------------
+    // Nothing below is worth doing if the OS has already decided to answer the
+    // scan with silence. Waiting here costs one delayed attempt; starting
+    // anyway costs the next thirty seconds of every scan the app makes, and
+    // eventually the scanner registration itself.
+    const gate = scanGateDelay();
+    if (gate > 0) {
+      setStatus('throttled');
+      // The gate's own timing, not the backoff: this is a queue, not a
+      // failure, and doubling the wait for it would punish the band for the
+      // app's scan history.
+      retrySoon(gate);
+      return;
+    }
+
     setStatus('scanning');
 
     // Every exit from the scan goes through here, so the timer can never
@@ -554,14 +702,43 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // in the very first report. Filtering on it pushes the match down into the
     // OS scanner: cheaper on the radio than waking JS for every beacon in the
     // room, and it cannot miss a band whose name has not arrived yet.
-    mgr.startDeviceScan([NUS_SERVICE], { allowDuplicates: false }, async (err, d) => {
+    scanStarts.push(Date.now());
+    mgr.startDeviceScan([NUS_SERVICE], {
+      allowDuplicates: false,
+      // RxAndroidBle defaults to SCAN_MODE_LOW_POWER, whose duty cycle gives a
+      // ten-second scan roughly two chances to catch an advertisement. This is
+      // a short scan for one known device with the app in front of the user --
+      // what the high duty cycle is for -- and finding the band on the first
+      // attempt is itself the best defence against the budget above.
+      scanMode: ScanMode ? ScanMode.LowLatency : 2,
+    }, async (err, d) => {
       if (err) {
         // Bluetooth off, permission revoked mid-scan, adapter reset: all of
         // them land here, and all of them used to leave the hook with no scan
         // running, no timer, and no way back except the user pressing connect.
         endScan();
-        setStatus('error:' + (err.reason || err.message));
-        retrySoon();
+        const msg = err.reason || err.message;
+        // How long the radio wants us gone, if this failure knows. Null means
+        // it does not, and the ordinary backoff decides.
+        const cool = scanCooldown(err);
+        if (isBtStuck(err)) {
+          // Not a band problem, and not one another scan can solve: the stack
+          // would not register this app's scanner at all. Naming the one thing
+          // that clears it beats printing the code and retrying into the wall.
+          setLastError(
+            'Android would not register this app with the Bluetooth stack. '
+            + 'Turn Bluetooth off and on again, and force-stop the app if that '
+            + 'does not do it. (' + msg + ')');
+          setStatus('bt-stuck');
+        } else if (cool != null) {
+          setLastError(
+            'Android is rate-limiting this app\'s Bluetooth scans. Waiting '
+            + Math.round(cool / 1000) + 's for it to lift. (' + msg + ')');
+          setStatus('throttled');
+        } else {
+          setStatus('error:' + msg);
+        }
+        retrySoon(cool);
         return;
       }
       if (!d) return;
@@ -622,6 +799,11 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   const disconnect = useCallback(async () => {
     wantsLink = false;
     connecting = false;
+    // A deliberate disconnect ends the episode, so the next link starts fresh.
+    // `scanStarts` is deliberately NOT cleared: that window belongs to Android,
+    // not to us, and forgetting it here would let connect/disconnect/connect
+    // walk straight back into the throttle this all exists to avoid.
+    resetBackoff();
     // Nulled, not merely cleared: `retryTimer` is now the "is a loop running"
     // answer for the cold-start effect, and a stale handle would read as yes.
     clearTimeout(retryTimer); retryTimer = null;
@@ -754,6 +936,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     if (__DEV__) {
       wantsLink = false;
       connecting = false;
+      resetBackoff();
       clearTimeout(retryTimer); retryTimer = null;
       clearTimeout(scanTimer); scanTimer = null;
       clearInterval(dataTimer); dataTimer = null;

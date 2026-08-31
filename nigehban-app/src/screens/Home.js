@@ -10,12 +10,21 @@ import { pendingPermissions } from './Setup';
 import { C, S, T, fmtAgo } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Stat, Txt } from '../ui';
 
+// Every status band.js can set needs a line here. The lookup falls back to the
+// raw key, which is how `error:Undocumented scan throttle (code 2147483646),
+// suggested retry date is ...` ended up on screen as a wristband's status.
 const BAND_LABEL = {
   idle: 'Not connected', scanning: 'Searching', connecting: 'Connecting',
   connected: 'Connected', disconnected: 'Lost the band', simulated: 'Simulated',
   virtual: 'This phone is the band',
   'no-permission': 'Bluetooth denied',
   'not-found': 'Band not found',
+  throttled: 'Bluetooth busy',
+  'bt-stuck': 'Restart Bluetooth',
+  'bluetooth-off': 'Bluetooth off',
+  'location-off': 'Location off',
+  'no-service': 'Band needs re-pairing',
+  'no-notify': 'Band not responding',
 };
 
 /**
@@ -90,8 +99,12 @@ export default function Home({
   const bandTone =
     band.status === 'connected' ? C.green
     : band.status === 'virtual' || band.simulated ? C.amber
+    // Waiting out Android's scan throttle is a pause, not a fault -- the link
+    // comes back on its own -- so it must not read like a band that is gone.
+    : band.status === 'throttled' ? C.amber
     : band.status === 'disconnected' || band.status === 'no-permission'
-      || band.status === 'not-found' ? C.red
+      || band.status === 'not-found' || band.status === 'bt-stuck'
+      || band.status === 'bluetooth-off' || band.status === 'location-off' ? C.red
     : C.dim;
 
   const batt = ctx.battery;

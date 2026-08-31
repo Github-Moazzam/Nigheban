@@ -34,8 +34,9 @@ import {
 } from './src/bandWake';
 import { runFirstRunAsks } from './src/permissions';
 import {
-  DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
-  setupNotificationChannels, subscribeNotificationTaps,
+  DEFAULT_CHANNEL_ID, clearOwnSosNotification, registerPushToken,
+  sendEmergencyAlarmIfNothingShown, setupNotificationChannels,
+  showOwnSosNotification, subscribeNotificationTaps,
 } from './src/notifications';
 
 const TABS = [
@@ -309,6 +310,12 @@ function Main() {
   }, [toast]);
 
   // ---- raising and standing down -----------------------------------------
+  // The band, reachable from `raise` below, which is defined before the link
+  // exists. A ref rather than a dependency because a buzz is fire-and-forget:
+  // rebuilding `raise` every time the band's battery ticks would be a lot of
+  // churn for a call that never reads anything back.
+  const bandRef = useRef(null);
+
   const raise = useCallback(async (payload) => {
     if (!session) return null;
 
@@ -344,6 +351,17 @@ function Main() {
       setDeliveredTo(null);
       setDeliveryStatus('queued');
       Vibration.vibrate([0, 300, 120, 300]);
+
+      // The confirmations that do not need this screen to exist.
+      //
+      // When the band raises an SOS with the app swiped out of Recents, this
+      // function still runs: the process is alive, the vibration is felt, and
+      // the alert below reaches the server. Only the dispatch above is inert,
+      // because the reducer it targets died with the activity. So the wrist and
+      // the notification shade are where the wearer is actually told -- and
+      // they are the two places that were saying nothing at all.
+      bandRef.current?.send?.({ c: 'buzz', n: 3 });
+      showOwnSosNotification(localAlert);
     }
 
     // Now try the network call.
@@ -396,6 +414,7 @@ function Main() {
         dispatch('SOS_CLEARED');
         setDeliveredTo(null);
         setDeliveryStatus(null);
+        clearOwnSosNotification();
         setToast('Cancelled — alert was not sent yet');
         bump();
         return;
@@ -404,6 +423,10 @@ function Main() {
       dispatch('SOS_CLEARED');
       setDeliveredTo(null);
       setDeliveryStatus(null);
+      // The notification is sticky by design, so nothing else will ever take it
+      // down. An "SOS is active" sitting on the lock screen after the wearer
+      // stood it down is the same lie as the screen showing nothing during one.
+      clearOwnSosNotification();
       setToast('Stood down — your family has been told');
       bump();
     } catch (e) {
@@ -501,6 +524,7 @@ function Main() {
   }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert]);
 
   const band = useBandLink(onBandEvent);
+  bandRef.current = band;
 
   // Two separate things need this app's Android process alive, and the service
   // is the only thing that keeps it alive once the app is off screen or swiped
@@ -729,7 +753,13 @@ function Main() {
         // Expo Go and on web, where the native module is not in the binary --
         // there the old notification is still the best available signal.
         presentAlarm(a).then((took) => {
-          if (!took) sendEmergencyAlarmNotification(a);
+          // Not `sendEmergencyAlarmNotification` directly. The same alert also
+          // arrives as a visible push and as a silent push that wakes the
+          // background task, and this path is the only one that used to post
+          // without first looking at what was already on screen -- which is
+          // exactly why one SOS showed up two and three times with the app
+          // open, and behaved itself with the app killed.
+          if (!took) sendEmergencyAlarmIfNothingShown(a);
         });
       } else {
         notify(`${a.user.name} — ${a.kind.replace('_', ' ')}`,
@@ -851,15 +881,54 @@ function Main() {
     prevOnline.current = serverOnline;
   }, [serverOnline, flushNow]);
 
+  // ---- an emergency this React tree never saw ------------------------------
+  //
+  // The state machine is memory-only, and Android destroys this whole tree
+  // whenever the app is swiped out of Recents. The band's SOS still goes out
+  // from the surviving process, so the alert is real, the family has been
+  // paged, and the wearer felt the phone buzz -- but `dispatch('SOS_RAISED')`
+  // landed in a reducer that no longer existed. Reopening the app then showed
+  // the ordinary home screen with an emergency still live on the server, which
+  // is the worst thing this app can say.
+  //
+  // The queue flush below is not enough on its own: it only restores alerts
+  // that FAILED to send. A delivered one leaves nothing behind locally, so the
+  // better the signal, the more completely the SOS disappeared.
+  //
+  // The server is the record. `created_at` comes back with the row, and the SOS
+  // screen computes its timer from that -- so reopening ten minutes later shows
+  // 10:00, not a countdown restarting from zero.
+  const restoreLiveSos = useCallback(async () => {
+    if (!session) return;
+    // This tree already knows. Re-dispatching would reset the responder list
+    // the socket has been filling in since.
+    if (ctxRef.current.activeSos) return;
+    try {
+      const mine = await call(session, '/alerts?scope=mine&limit=5');
+      const live = (mine || []).find(
+        (a) => !a.resolved_at && ['sos', 'snatch', 'fall'].includes(a.kind));
+      if (!live) return;
+      dispatch('SOS_RAISED', { alert: live });
+      setDeliveryStatus('delivered');
+      // The process may have been killed since, taking the notification with
+      // it. Putting it back is what keeps the lock screen honest.
+      showOwnSosNotification(live);
+    } catch {
+      // Offline. The queue flush and the live socket still cover their own
+      // cases, and a failed lookup must never look like "no emergency".
+    }
+  }, [session, dispatch]);
+
   // A cold start with something still in the queue, and every return to the
   // foreground after that.
   useEffect(() => {
     flushNow();
+    restoreLiveSos();
     const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') flushNow();
+      if (next === 'active') { flushNow(); restoreLiveSos(); }
     });
     return () => sub.remove();
-  }, [flushNow]);
+  }, [flushNow, restoreLiveSos]);
 
   // While the screen still says "waiting for signal", keep trying. With no
   // network that is one failed fetch every thirty seconds; once the queue is
@@ -871,6 +940,11 @@ function Main() {
   }, [deliveryStatus, flushNow]);
 
   const signOut = async () => {
+    // The band link belongs to the account that paired it. Sign-out used to
+    // leave it up and leave `nigehban.band.id` in storage, so the next account
+    // -- a different person, on a different database -- inherited the previous
+    // one's wristband and started auto-connecting to it on launch.
+    try { await band.disconnect?.(); } catch { /* nothing paired, or already down */ }
     await stopBackgroundWatch();
     await clearSession();
     await clearQueue();

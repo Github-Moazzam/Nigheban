@@ -5,7 +5,7 @@ isolates a single unknown, so a failure tells you exactly what is broken.
 Run them in order and do not skip ahead on a failure.
 
 Covers milestone **F1** and de-risks **F2 / F3 / F4** in
-[DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md).
+[DEVELOPMENT_PLAN.md](../docs/DEVELOPMENT_PLAN.md).
 
 ---
 
