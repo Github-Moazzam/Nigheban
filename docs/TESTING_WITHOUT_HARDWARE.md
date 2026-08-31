@@ -123,7 +123,7 @@ number. `BATTERY → 15%` forces it when you are in a hurry.
 ### One thing the virtual band does not do yet
 
 The firmware nags once more when a check-in window lapses and then sends
-`checkin_missed` ([nigehban_band_nrf52.ino:577](nigehban_band_nrf52/nigehban_band_nrf52.ino#L577),
+`checkin_missed` ([nigehban_band_nrf52.ino:577](../nigehban_band_nrf52/nigehban_band_nrf52.ino#L577),
 `gAwaitingAck` / `gAckDeadline`). `virtualBand.js` sets `awaitingAck` on a
 `checkin_req` but has **no deadline timer**, so it can never emit that event.
 
@@ -158,8 +158,8 @@ gesture engine, the wire log, the state machine. That is most of the product.
 | | Reason |
 |---|---|
 | REAL BAND source | `react-native-ble-plx` is a native module; the require fails and `band.js` reports `simulated` |
-| Push, lock-screen alarm, notification taps | Guarded out explicitly — `Platform.OS === 'web'` in [notifications.js](nigehban-app/src/notifications.js) |
-| Foreground service | No native service to start ([bgService.js:56](nigehban-app/src/bgService.js#L56)) |
+| Push, lock-screen alarm, notification taps | Guarded out explicitly — `Platform.OS === 'web'` in [notifications.js](../nigehban-app/src/notifications.js) |
+| Foreground service | No native service to start ([bgService.js:56](../nigehban-app/src/bgService.js#L56)) |
 | Fall detection | Needs `DeviceMotionEvent`; browsers expose it inconsistently and a laptop has no accelerometer at all. `FORCE FALL` still works |
 
 Two things are *easier* to test here than on a phone, and worth doing here first:

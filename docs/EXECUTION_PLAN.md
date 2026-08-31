@@ -404,7 +404,7 @@ Invertase archived Notifee on 7 Apr 2026 and it never supported the New
 Architecture, which Expo 57 / RN 0.86 requires — so the plan's one "via
 library" row had no library behind it. Full-screen intents and the looping
 siren are now ~200 lines of Kotlin in
-[`nigehban-app/modules/nigehban-alarm/`](nigehban-app/modules/nigehban-alarm/),
+[`nigehban-app/modules/nigehban-alarm/`](../nigehban-app/modules/nigehban-alarm/),
 a local Expo module that autolinks out of `modules/` with no config entry.
 
 This does move M2's bar: the role now needs someone who can *read* Kotlin, not

@@ -62,7 +62,7 @@ The sticky "Nigehban is watching" notification. While it is up, Android keeps
 this app's process alive, which keeps the BLE link and the heartbeat alive.
 Android 8+ requires the visible notification — it cannot be hidden.
 
-Implemented in [`src/bgService.js`](nigehban-app/src/bgService.js) on top of
+Implemented in [`src/bgService.js`](../nigehban-app/src/bgService.js) on top of
 `expo-location`'s foreground-service option. The location updates are a means to
 an end; the task body is deliberately a no-op.
 
@@ -77,7 +77,7 @@ with the app dead.
 
 It now runs when the phone is **actually acting as a safety device**, which is
 two independent conditions, either one sufficient
-([`App.js`](nigehban-app/App.js), the `syncBackgroundWatch` effect):
+([`App.js`](../nigehban-app/App.js), the `syncBackgroundWatch` effect):
 
 1. **A band is linked** — `nigehban.band.id` exists *and* the app is in BLE
    mode. The GATT link belongs to the process, so losing the process drops the
@@ -98,7 +98,7 @@ two independent conditions, either one sufficient
 ### Three things it deliberately does not key off
 
 - **The live connection.** A band out of range is precisely when
-  [`band.js`](nigehban-app/src/band.js)'s 3-second retry loop needs the process
+  [`band.js`](../nigehban-app/src/band.js)'s 3-second retry loop needs the process
   alive. Stopping the service there kills the thing doing the reconnecting.
 - **`band.mode` alone.** DISCONNECT clears the stored band id but never touches
   the mode, so a deliberately unlinked phone would sit in BLE mode forever.
@@ -108,9 +108,9 @@ two independent conditions, either one sufficient
 
 ### The tri-state
 
-`wantsBand()` in [`band.js`](nigehban-app/src/band.js) returns `true` / `false`
+`wantsBand()` in [`band.js`](../nigehban-app/src/band.js) returns `true` / `false`
 / **`null`**, where null means *could not tell* — the same convention
-[`alarm.js`](nigehban-app/src/alarm.js) uses for the Android 14 full-screen
+[`alarm.js`](../nigehban-app/src/alarm.js) uses for the Android 14 full-screen
 permission.
 
 This matters more than it looks. The obvious version reuses `recallBand()`,
@@ -129,7 +129,7 @@ wrongly stopped service is the emergency path failing.
 ### The bug
 
 The app read `band.battery` — in BLE mode, the **wristband's** ADC reading from
-[`nigehban_band_nrf52.ino`](nigehban_band_nrf52/nigehban_band_nrf52.ino) — sent
+[`nigehban_band_nrf52.ino`](../nigehban_band_nrf52/nigehban_band_nrf52.ino) — sent
 it to the server as `phone_batt`, and showed the family **"Phone about to die"**.
 
 So a wearer at 4% band and 90% phone paged his family about the wrong device.
@@ -181,17 +181,17 @@ Two consequences:
 
 ### Where they show up
 
-- `usePhoneBattery()` in [`src/watch.js`](nigehban-app/src/watch.js) reads
+- `usePhoneBattery()` in [`src/watch.js`](../nigehban-app/src/watch.js) reads
   `expo-battery`. Already a dependency — **no new native module**, so an EAS
   build carries it with no config-plugin work.
 - The heartbeat sends `phone_batt` and `band_batt` as separate fields, never
   substituted for one another. In virtual mode `band_batt` is `null` — there is
   no second cell — rather than a copy of the phone's reading.
 - `/watch/{member_id}` returns both. Both family screens read that endpoint.
-- [`WatchStatusTile.js`](nigehban-app/src/components/WatchStatusTile.js) shows
+- [`WatchStatusTile.js`](../nigehban-app/src/components/WatchStatusTile.js) shows
   `connected · 41%` on the band's own row, with `PHONE BATTERY` as its own
   column.
-- [`Dashboard.js`](nigehban-app/src/screens/user/Dashboard.js) shows
+- [`Dashboard.js`](../nigehban-app/src/screens/user/Dashboard.js) shows
   `PHONE BATTERY 68%` and `BAND · Linked · 41%`.
 
 ### Migration note
@@ -358,7 +358,7 @@ cd nigehban-app && npx expo start
 ```
 
 Type the server address into the app's setup screen. The rule
-([`api.js`](nigehban-app/src/api.js)): a bare IPv4 or `localhost` gets `http://`,
+([`api.js`](../nigehban-app/src/api.js)): a bare IPv4 or `localhost` gets `http://`,
 anything else gets `https://`.
 
 **A real build** — needed for BLE, the foreground service, and the lock-screen
