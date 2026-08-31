@@ -253,11 +253,19 @@ to anything.
   and the family's screen shows the watch's own health so a silent failure is
   visible before an emergency rather than during one.
 - **Tokens do not expire.** Fine for a demo, not for deployment.
-- **An SOS currently needs the server.** The app dispatches `SOS_RAISED` only
-  after `POST /alert` succeeds, and unsent alerts are not queued — so with no
-  connectivity the alert is lost rather than delayed. The band-side link is
-  fixed and working; this is the next thing to build. See the bring-up section
-  in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+- **An SOS survives a dead network, but nobody is reached until signal returns.**
+  The press is dispatched locally first, persisted, and flushed automatically on
+  reconnect, and the SOS screen says *"not delivered yet, retrying"* rather than
+  looking identical to a delivered one. So the alert is delayed rather than
+  lost — but a phone with no signal still reaches no family member, and the
+  band's own path to help without a phone is the v2 mesh in the roadmap below.
+- **The wristband does not reliably come back on its own.** Walk out of range
+  and return: it reconnects with the screen on, and does not with the screen off
+  — the retry is a `setTimeout`, and Android stops those when the activity is
+  not visible (BUG-010). On an OEM that kills the process on a Recents swipe,
+  nothing is left alive to retry at all, and the phone stays deaf until someone
+  opens the app (BUG-015). Both are open, with the beacon-identity defects found
+  alongside them, in [docs/BUG_LIST.md](docs/BUG_LIST.md).
 
 ---
 

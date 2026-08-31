@@ -11,7 +11,7 @@
 >
 > **Current plans:** [EXECUTION_PLAN.md](EXECUTION_PLAN.md) ·
 > [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) ·
-> [firmware/README.md](firmware/README.md) for the bench work.
+> [firmware/README.md](../firmware/README.md) for the bench work.
 >
 > **Still current in here, and not ESP32-specific:** §8 Alibaba Cloud wiring ·
 > §9 BOM and enclosure build order · §10's judge Q&A prep. Kept for those.
@@ -105,7 +105,7 @@ MPU6050 (optional): VCC→3V3  GND→GND  SDA→GPIO21  SCL→GPIO22
 ### 2.3 Flash the band
 
 > **Obsolete — the ESP32 and its sketch are gone.** To flash the real band, use
-> [firmware/arduino_setup.md](firmware/arduino_setup.md) (Seeed nRF52 core) and
+> [firmware/arduino_setup.md](../firmware/arduino_setup.md) (Seeed nRF52 core) and
 > `nigehban_band_nrf52/`. The steps below are the historical ESP32 procedure.
 
 1. Arduino IDE → **File ▸ Preferences ▸ Additional Board URLs**:
