@@ -29,6 +29,9 @@ import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
 import { activeAlarm, consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
+import {
+  consumePendingBandSos, startBandWake, stopBandWake, subscribeBandSos,
+} from './src/bandWake';
 import { runFirstRunAsks } from './src/permissions';
 import {
   DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
@@ -546,6 +549,93 @@ function Main() {
     })();
     return () => { cancelled = true; };
   }, [session, band.status, band.mode, band.modeLoaded, watchMode]);
+
+  // ---- the band's own way in, for when this process is gone ---------------
+  //
+  // The foreground service above is the app's attempt to stay alive. On most
+  // non-Samsung skins it loses: a swipe on the Recents screen is `kill -9`, and
+  // the GATT link dies with the process. From that moment the band looks linked
+  // and can reach nobody, which is the exact state a wearer walks out in.
+  //
+  // So the SOS also goes out in the band's advertisement, and the scan that
+  // matches it is registered with Android rather than held by us -- it outlives
+  // the kill. See src/bandWake.js.
+  //
+  // Armed on the same standing instruction the link itself runs on, and
+  // deliberately NOT on `session`: a signed-out phone still wants the press
+  // written down, and the pending record waits for a session rather than being
+  // thrown away. Not on `band.status` either -- an out-of-range band is when
+  // this matters most, and disarming then would remove the one path still
+  // capable of carrying the alert.
+  useEffect(() => {
+    if (!band.modeLoaded) return undefined;
+    if (band.mode !== MODES.BLE) { stopBandWake(); return undefined; }
+
+    let cancelled = false;
+    (async () => {
+      const wanted = await wantsBand();
+      if (cancelled || wanted === null) return;   // read failed: change nothing
+      if (wanted) await startBandWake(); else await stopBandWake();
+    })();
+    return () => { cancelled = true; };
+  }, [band.mode, band.modeLoaded, band.status]);
+
+  // What to do with a press that came in over the advertisement.
+  //
+  // It goes through `raise` like every other SOS: the same GPS fix, the same
+  // offline queue, the same family fan-out. A second code path for the
+  // emergency case would be the one nobody ever exercises.
+  const raiseBeaconSos = useCallback(async (hit) => {
+    if (!hit) return;
+    // Too old to escalate on its own. The wearer is still told -- a press that
+    // went nowhere is exactly what they need to know about -- but a family is
+    // not paged about something that happened before lunch.
+    if (hit.stale) {
+      setToast('Your band called for help while the app was closed, too long ago '
+             + 'to send now. Press SOS again if you still need help.');
+      return;
+    }
+    await raise({
+      kind: 'sos',
+      source: 'band',
+      note: 'band beacon — the app was not running',
+    });
+  }, [raise]);
+
+  // Held in a ref, and the two effects below depend on the token rather than on
+  // the handler.
+  //
+  // `raise` closes over `fix`, which is replaced on every GPS update. Depending
+  // on the handler directly would therefore tear the subscription down and
+  // rebuild it every few seconds, and a press landing in one of those gaps
+  // would find no listener -- so it would fall through to the notification
+  // route on a phone where the app was in fact wide awake. The ref keeps the
+  // newest handler without moving the subscription.
+  const beaconSosRef = useRef(raiseBeaconSos);
+  beaconSosRef.current = raiseBeaconSos;
+
+  // Arriving while JS is alive: no notification, the alert simply goes.
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    return subscribeBandSos((hit) => beaconSosRef.current?.(hit));
+  }, [session?.token]);
+
+  // Arriving while the app was dead. The press was written to storage by a
+  // receiver in a process that no longer exists; this is the first moment
+  // anything can act on it. Checked on every resume as well as at boot,
+  // because Android may bring the app back without a fresh mount.
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    const check = async () => {
+      const hit = await consumePendingBandSos();
+      if (hit) beaconSosRef.current?.(hit);
+    };
+    check();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') check();
+    });
+    return () => sub.remove();
+  }, [session?.token]);
 
   // ---- U3.4 battery: one alert per threshold crossing, per device --------
   //
