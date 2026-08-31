@@ -6,5 +6,19 @@
     to fire the takeover, WAKE_LOCK, and android:showWhenLocked /
     android:turnScreenOn on MainActivity so the launched activity comes up over
     the keyguard with the display on rather than behind it in the dark.
+
+    The receiver is different, and does belong here. It is this module's own
+    component rather than a decision about the app, it is merged into the app
+    manifest at build time either way, and keeping it beside the class it names
+    means a rename cannot leave a dangling entry in a file two directories up.
+
+    Not exported: the only PendingIntent that reaches it is explicit and built
+    by this module, and nothing outside the app should be able to silence an
+    emergency siren.
   -->
+  <application>
+    <receiver
+      android:name="com.nigehban.alarm.NigehbanAlarmReceiver"
+      android:exported="false" />
+  </application>
 </manifest>
