@@ -1,0 +1,23 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'com.nigehban.bandwake'
+version = '1.0.0'
+
+android {
+  namespace 'com.nigehban.bandwake'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  lint {
+    // Same reasoning as nigehban-alarm: a lint failure here would fail an
+    // emergency build over a style opinion. withNativeModuleGuard.js is what
+    // protects this module from shipping broken; lint is not.
+    abortOnError false
+  }
+}
+
+// androidx.core arrives on the compile classpath through expo-modules-core,
+// which exposes it with `api`. Deliberately not re-declared -- pinning a second
+// version is how the androidx graph starts resolving differently from the app.
