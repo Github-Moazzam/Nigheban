@@ -14,12 +14,21 @@ import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { usePhoneBattery } from '../../watch';
 import { RU, U, rowStyles as r } from './kit';
 
-/** The link states, said as a person would say them. */
+/**
+ * The link states, said as a person would say them.
+ *
+ * Every status band.js can set needs a line here. The lookup falls back to the
+ * raw key, which is how `error:Scan failed because application registration
+ * failed (code 6)` ended up on this screen as a wristband's status.
+ */
 const BAND_LABEL = {
   idle: 'Not connected', scanning: 'Searching…', connecting: 'Connecting…',
   connected: 'Connected', disconnected: 'Lost the band',
   simulated: 'Simulated', virtual: 'This phone',
   'no-permission': 'Bluetooth denied', 'not-found': 'Band not found',
+  throttled: 'Bluetooth busy…', 'bt-stuck': 'Restart Bluetooth',
+  'bluetooth-off': 'Bluetooth off', 'location-off': 'Location off',
+  'no-service': 'Needs re-pairing', 'no-notify': 'Band not responding',
 };
 
 /**
@@ -244,13 +253,17 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               {/* The band's own scan is the busy signal here -- it outlives this
                   press by seconds, so the link state says "searching" long
                   after `connect` has returned. */}
+              {/* `throttled` counts as busy for the same reason `scanning`
+                  does -- the app is mid-attempt and the press would do nothing
+                  but queue another one. Leaving it pressable is how a wearer
+                  helps Android decide this app scans too often. */}
               <Action
                 icon="bluetooth" label="Connect to band" busyLabel="Searching…"
                 filled
                 busy={band?.status === 'scanning' || band?.status === 'connecting'
-                      || pending === 'connect'}
+                      || band?.status === 'throttled' || pending === 'connect'}
                 disabled={band?.status === 'scanning' || band?.status === 'connecting'
-                          || !!pending}
+                          || band?.status === 'throttled' || !!pending}
                 onPress={() => run('connect', band?.connect)}
               />
               <Action
@@ -266,6 +279,25 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           <Text style={[T.meta, { color: U.amber, marginTop: S.sm }]}>
             Bluetooth permission was denied, so the band cannot be found. Grant it
             in Android settings, or let this phone stand in for the band.
+          </Text>
+        ) : null}
+
+        {/* The one link failure the app cannot get itself out of. Android will
+            not register this app's scanner again until the adapter is reset, so
+            the only useful thing to put on screen is how to reset it. */}
+        {band?.status === 'bt-stuck' ? (
+          <Text style={[T.meta, { color: U.red, marginTop: S.sm }]}>
+            Android has stopped letting this app use Bluetooth. Turn Bluetooth
+            off and on again — and if the band still does not appear after that,
+            force-stop the app and reopen it.
+          </Text>
+        ) : null}
+
+        {band?.status === 'throttled' ? (
+          <Text style={[T.meta, { color: U.amber, marginTop: S.sm }]}>
+            Android is rate-limiting Bluetooth scans from this app. Waiting for
+            that to lift — the band reconnects on its own, so there is nothing
+            to press.
           </Text>
         ) : null}
 
