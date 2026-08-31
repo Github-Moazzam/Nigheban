@@ -6,6 +6,15 @@ months later.
 
 **Status key:** `OPEN` · `FIXED` (branch/commit noted) · `WONTFIX` (with reason)
 
+**Verified on device — 1 Sep 2026.** BUG-001, 002, 005, 006, 007 and 009 were
+confirmed working on a Samsung running Android 14, against the real band, from
+a release APK built on `fix/ble-scan-throttle`. Recorded because "the code is
+written" and "the wristband actually reconnects" are different claims, and only
+the second one is worth anything on a safety device.
+
+Still open after that pass: BUG-003, BUG-004 (partial), BUG-008, and the
+`presentAlarm` failure noted at the end of BUG-009.
+
 ---
 
 ## BUG-001 — Sign-out leaves the previous account's band paired
