@@ -1,0 +1,174 @@
+-- ============================================================
+-- NIGEHBAN — Supabase Migration
+-- Run this in: Supabase Dashboard → SQL Editor → New Query → Run
+-- ============================================================
+
+-- Extensions
+create extension if not exists "pgcrypto";
+
+-- ============================================================
+-- USERS
+-- ============================================================
+create table if not exists public.users (
+    id           text primary key,
+    username     text unique not null,
+    pw_hash      text not null,
+    name         text not null,
+    token_hash   text not null default '',
+    role         text not null default 'user'
+                     check (role in ('admin', 'user')),
+    created_at   timestamptz not null default now()
+);
+
+create index if not exists idx_users_token on public.users (token_hash);
+
+-- ============================================================
+-- FAMILY LINKS
+-- ============================================================
+create table if not exists public.links (
+    owner_id   text not null references public.users(id) on delete cascade,
+    member_id  text not null references public.users(id) on delete cascade,
+    relation   text not null default '',
+    created_at timestamptz not null default now(),
+    primary key (owner_id, member_id)
+);
+
+create index if not exists idx_links_member on public.links (member_id);
+
+-- ============================================================
+-- ALERTS
+-- ============================================================
+create table if not exists public.alerts (
+    id          bigint generated always as identity primary key,
+    user_id     text not null references public.users(id) on delete cascade,
+    kind        text not null,
+    severity    smallint not null,
+    source      text not null default 'app',
+    lat         double precision,
+    lon         double precision,
+    accuracy    double precision,
+    note        text not null default '',
+    created_at  timestamptz not null default now(),
+    resolved_at timestamptz
+);
+
+create index if not exists idx_alerts_user
+    on public.alerts (user_id, created_at desc);
+
+-- ============================================================
+-- ACKNOWLEDGEMENTS
+-- ============================================================
+create table if not exists public.acks (
+    alert_id bigint not null references public.alerts(id) on delete cascade,
+    user_id  text   not null references public.users(id)  on delete cascade,
+    at       timestamptz not null default now(),
+    primary key (alert_id, user_id)
+);
+
+-- ============================================================
+-- PAIRINGS
+-- ============================================================
+create table if not exists public.pairings (
+    token_hash text primary key,
+    issuer_id  text not null references public.users(id) on delete cascade,
+    relation   text not null default '',
+    created_at timestamptz not null default now(),
+    expires_at timestamptz not null,
+    used_at    timestamptz,
+    used_by    text
+);
+
+-- ============================================================
+-- INVITES
+-- ============================================================
+create table if not exists public.invites (
+    id         bigint generated always as identity primary key,
+    from_id    text not null references public.users(id) on delete cascade,
+    to_id      text not null references public.users(id) on delete cascade,
+    relation   text not null default '',
+    state      text not null default 'pending',
+    created_at timestamptz not null default now(),
+    settled_at timestamptz,
+    unique (from_id, to_id)
+);
+
+create index if not exists idx_invites_to on public.invites (to_id, state);
+
+-- ============================================================
+-- DEVICES
+-- ============================================================
+create table if not exists public.devices (
+    id          text primary key,
+    user_id     text not null references public.users(id) on delete cascade,
+    push_token  text,
+    platform    text,
+    os_version  text,
+    app_version text,
+    last_seen   timestamptz
+);
+
+-- ============================================================
+-- CHECK-INS
+-- ============================================================
+create table if not exists public.checkins (
+    id         bigint generated always as identity primary key,
+    user_id    text not null references public.users(id) on delete cascade,
+    asked_by   text,
+    reason     text not null default 'manual',
+    due_at     timestamptz not null,
+    created_at timestamptz not null default now(),
+    acked_at   timestamptz,
+    escalated  boolean not null default false
+);
+
+create index if not exists idx_checkins_due
+    on public.checkins (due_at)
+    where acked_at is null and escalated = false;
+
+-- ============================================================
+-- WATCH STATE
+-- ============================================================
+create table if not exists public.watch_state (
+    user_id       text primary key references public.users(id) on delete cascade,
+    mode          text not null default 'idle',
+    next_buzz_at  timestamptz,
+    last_beat     timestamptz,
+    band_link     boolean not null default false,
+    -- Two batteries, and they fail independently: a flat band means the safety
+    -- device is off the air, a flat phone means every path to the family is
+    -- about to close. band_batt is null in virtual mode, where there is no
+    -- band. See migrations/002_band_battery.sql -- phone_batt held band
+    -- battery before that migration.
+    phone_batt    smallint,
+    band_batt     smallint,
+    last_lat      double precision,
+    last_lon      double precision,
+    lost_notified boolean not null default false
+);
+
+-- ============================================================
+-- PRESENCE
+-- ============================================================
+create table if not exists public.presence (
+    user_id  text primary key references public.users(id) on delete cascade,
+    geohash6 text not null,
+    lat      double precision not null,
+    lon      double precision not null,
+    at       timestamptz not null default now()
+);
+
+create index if not exists idx_presence_geo on public.presence (geohash6, at);
+
+-- ============================================================
+-- SAMARITANS
+-- ============================================================
+create table if not exists public.samaritans (
+    alert_id bigint not null references public.alerts(id) on delete cascade,
+    user_id  text   not null references public.users(id)  on delete cascade,
+    at       timestamptz not null default now(),
+    primary key (alert_id, user_id)
+);
+
+-- ============================================================
+-- Done.
+-- ============================================================

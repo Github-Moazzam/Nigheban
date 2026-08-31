@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------- runtime data
+# The database holds real accounts, password hashes and live auth tokens.
+# events.jsonl holds location history. Neither belongs in a public repo.
+server/*.db
+server/*.db-wal
+server/*.db-shm
+*.sqlite
+*.sqlite3
+events.jsonl
+
+# ------------------------------------------------------------------- secrets
+.env
+.env.*
+!.env.example
+# nigehban-app/google-services.json is deliberately NOT ignored. It is Firebase
+# *client* config, not a credential -- the API key inside is restricted to the
+# package name plus signing certificate. EAS Build does not upload gitignored
+# files, so ignoring it produces a build with FCM silently missing and push
+# dead. Committing it is also what lets a teammate build from a clean checkout.
+# The FCM service-account key (the JSON with "private_key") is the real secret;
+# that lives in EAS credentials and must never be committed.
+GoogleService-Info.plist
+# The FCM V1 service-account key -- the JSON containing "private_key". Unlike
+# google-services.json above this is a real credential: it can send push as
+# this Firebase project to every installed handset. It belongs in EAS
+# credentials only. Ignored by name here because the natural mistake is to
+# drop it next to app.json so `eas credentials` can find it, and EAS Build
+# uploads everything that is not ignored.
+*firebase-adminsdk*.json
+service-account*.json
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# -------------------------------------------------------------- dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/releases
+
+# ------------------------------------------------------------------ JS build
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+*.jsbundle
+*.hbc
+
+# The generated native folders are ignored by nigehban-app/.gitignore, where
+# `/android` and `/ios` are anchored to the app directory. Do not re-add them
+# here unanchored: `android/` matches at any depth, which silently swallowed
+# modules/nigehban-alarm/android/ -- handwritten Kotlin, not generated output --
+# and it never reached git or the EAS upload, so it was never compiled in.
+#
+# What DOES need ignoring is that module's Gradle output -- machine-specific
+# dex/jar/Kotlin incremental caches. Anchored to modules/*/android/build/ so it
+# can only ever match the build directory, never the src/ tree beside it.
+nigehban-app/modules/*/android/build/
+
+# -------------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ------------------------------------------------------------------- Arduino
+nigehban_band_nrf52/build/
+nigehban_band_nrf52/*.bin
+nigehban_band_nrf52/*.elf
+nigehban_band_nrf52/*.map
+nigehban_band_nrf52/*.uf2
+firmware/*/build/
+
+# ------------------------------------------------------------- editors and OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+
+# ---------------------------------------------------------------------- misc
+*.log
+npm-debug.log*
+yarn-error.log*
+files.zip
