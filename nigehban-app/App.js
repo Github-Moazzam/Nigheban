@@ -28,7 +28,7 @@ import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/
 import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
 import { registerBackgroundNotifications } from './src/bgNotifications';
-import { consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
+import { activeAlarm, consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import { runFirstRunAsks } from './src/permissions';
 import {
   DEFAULT_CHANNEL_ID, registerPushToken, sendEmergencyAlarmNotification,
@@ -119,7 +119,7 @@ function Main() {
   const [deliveryStatus, setDeliveryStatus] = useState(null); // null | 'queued' | 'sending' | 'delivered'
   const [toast, setToast] = useState(null);
   const [fix, setFix] = useState(null);               // last position, from Home
-  const [pendingAlertId, setPendingAlertId] = useState(null); // tapped from a notification
+  const [pendingAlertId, setPendingAlertId] = useState(null); // { id, answered } from a notification
 
   const { state, ctx, dispatch, is, watchMode } = useSafetyMachine();
   const insets = useEdgeInsets();
@@ -133,7 +133,7 @@ function Main() {
       // else can replace the intent, and hand it to the same routing the
       // notification tap uses.
       const launched = await consumeLaunchAlertId();
-      if (launched != null) setPendingAlertId(launched);
+      if (launched) setPendingAlertId(launched);
       const s = await loadSession();
       setSession(s);
       // The foreground service is no longer started here. Signing in is not
@@ -186,7 +186,35 @@ function Main() {
   // land on the alert rather than a bare Home screen. The listener can fire
   // before `session` is ready (cold start), so it only records which alert
   // was tapped; the effect below does the fetch once a session exists.
-  useEffect(() => subscribeNotificationTaps(setPendingAlertId), []);
+  //
+  // A tap on the push body is never an answer -- only the alarm notification's
+  // own I'M ON IT button is, and that arrives through consumeLaunchAlertId.
+  useEffect(() => subscribeNotificationTaps(
+    (id) => setPendingAlertId({ id, answered: false })
+  ), []);
+
+  // Coming back to the app is the other half of the launch read, and for a long
+  // time it was missing.
+  //
+  // The read above runs once, at boot. But MainActivity is singleTask, so when
+  // the app is merely backgrounded -- which it usually is, the family member
+  // opened it this morning -- Android does not restart it. It hands the alarm
+  // notification's intent to `onNewIntent` instead, and nothing was ever asking
+  // for that. So the one gesture the notification exists for, pressing it,
+  // brought the app to the front on whatever tab it was left on, with the siren
+  // still sounding and no takeover anywhere: no name, no map, no way to answer.
+  //
+  // `activeAlarm` is the second question, for the person who reaches past the
+  // notification and opens the app from its icon. Neither of those intents
+  // carries an alert id; the siren itself is the only thing that knows.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (next) => {
+      if (next !== 'active') return;
+      const hit = (await consumeLaunchAlertId()) || (await activeAlarm());
+      if (hit) setPendingAlertId(hit);
+    });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     if (!pendingAlertId) return;
@@ -198,18 +226,29 @@ function Main() {
       if (!booting) setPendingAlertId(null);
       return;
     }
+    const { id, answered } = pendingAlertId;
     (async () => {
       try {
         const list = await call(session, '/alerts?scope=incoming');
-        const alert = list.find((a) => String(a.id) === String(pendingAlertId));
+        const alert = list.find((a) => String(a.id) === String(id));
         if (alert && !alert.resolved_at) {
           setIncoming(alert);
           setTab('home');
+          // They already said they were going -- on the notification, before the
+          // app was even open. The takeover still comes up, because "who and
+          // where" is the next thing they need, but the family is told now
+          // rather than after a second press of a button they have pressed.
+          if (answered) {
+            try {
+              await call(session, `/alert/${alert.id}/ack`, { method: 'POST' });
+              bump();
+            } catch { /* the socket tells them when it reconnects */ }
+          }
         }
       } catch { /* the in-app takeover still works once the socket catches up */ }
       setPendingAlertId(null);
     })();
-  }, [pendingAlertId, session]);
+  }, [pendingAlertId, session, booting, bump]);
 
   // Ask for what the app needs at the point somebody has an account and is
   // looking at the screen -- not on a Setup tab they may never open. Two rungs,
