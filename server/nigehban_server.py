@@ -93,6 +93,17 @@ BEAT_LOST_S      = 180      # armed and silent this long -> tell the family
 SWEEP_TICK_S     = 5
 
 
+# ---- in-memory auth cache ------------------------------------------------
+# me() hits the DB on every authenticated request. With Mumbai that is ~25ms
+# and with Tokyo it was ~200ms — per call, before the endpoint even starts.
+# Caching the token->user lookup for 60s removes that cost entirely for all
+# but the first request in each window.  The entry expires naturally; a login
+# that changes token_hash simply means the old entry stops being looked up
+# (the app switches to the new token) and ages out.
+_AUTH_CACHE = {}          # token_hash -> (user_dict, expires_at)
+AUTH_CACHE_TTL = 60       # seconds
+
+
 # ------------------------------------------------------------------- db ---
 # One pool for the process, and it is not an optimisation.
 #
@@ -288,12 +299,18 @@ def client_ip(req: Request) -> str:
 def me(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "sign in first")
-    tok = authorization[7:]
+    th = tok_hash(authorization[7:])
+    now = time.time()
+    cached = _AUTH_CACHE.get(th)
+    if cached and cached[1] > now:
+        return dict(cached[0])
     with closing(db()) as c:
         u = c.execute("SELECT * FROM users WHERE token_hash=%s",
-                      (tok_hash(tok),)).fetchone()
+                      (th,)).fetchone()
     if not u:
+        _AUTH_CACHE.pop(th, None)
         raise HTTPException(401, "session expired, sign in again")
+    _AUTH_CACHE[th] = (dict(u), now + AUTH_CACHE_TTL)
     return dict(u)
 
 
@@ -1576,30 +1593,24 @@ async def sweeper():
 
 async def sweep_once(now):
     """One tick, factored out so a test can drive it directly."""
-    # 1. missed check-ins -> tell the family
+    # One connection for all three deadline checks.  Each was a separate pool
+    # checkout before, costing three round trips to the pooler every five
+    # seconds -- just to learn that nothing happened.
     with closing(db()) as c:
+        # 1. missed check-ins -> tell the family
         due = c.execute(
             "SELECT * FROM checkins WHERE acked_at IS NULL AND escalated=FALSE AND due_at<=%s",
             (now,)).fetchall()
         if due:
             c.execute("UPDATE checkins SET escalated=TRUE WHERE id = ANY(%s)",
                       ([r["id"] for r in due],))
-            c.commit()
-    for r in due:
-        late = int(now - r["due_at"])
-        await emit_alert(r["user_id"], "checkin_missed", source="server",
-                         note=f"no answer to a {r['reason']} check-in ({late}s late)")
 
-    # 2. High Alert: time to ask again?
-    with closing(db()) as c:
+        # 2. High Alert: time to ask again?
         buzz = c.execute(
             "SELECT * FROM watch_state WHERE mode='high_alert' AND next_buzz_at IS NOT NULL "
             "AND next_buzz_at<=%s", (now,)).fetchall()
         opened = {}
         for w in buzz:
-            # Randomised, not fixed. A predictable buzz can be answered on
-            # autopilot -- or by somebody else holding the phone -- and an
-            # interval you can time is one you can plan around.
             nxt = now + random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
             c.execute("UPDATE watch_state SET next_buzz_at=%s WHERE user_id=%s",
                       (nxt, w["user_id"]))
@@ -1607,38 +1618,34 @@ async def sweep_once(now):
                             " VALUES (%s,NULL,'high_alert',%s,%s) RETURNING id",
                             (w["user_id"], now + CHECKIN_WINDOW_S, now))
             opened[w["user_id"]] = (cur.fetchone()["id"], nxt)
-        if buzz:
-            c.commit()
-    for w in buzz:
-        checkin_id, nxt = opened[w["user_id"]]
-        # The id has to travel with the buzz. Without it the app has nothing to
-        # acknowledge, so "I am fine" fails and the sweeper escalates a person
-        # who answered -- the worst failure this product can have.
-        await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
-                                    "checkin_id": checkin_id,
-                                    "window": CHECKIN_WINDOW_S,
-                                    "due_at": now + CHECKIN_WINDOW_S,
-                                    "next_buzz_at": nxt})
 
-    # 3. heartbeat watchdog: armed, and gone quiet
-    with closing(db()) as c:
+        # 3. heartbeat watchdog: armed, and gone quiet
         lost = c.execute(
             "SELECT * FROM watch_state WHERE mode!='idle' AND lost_notified=FALSE "
             "AND last_beat IS NOT NULL AND last_beat < %s", (now - BEAT_LOST_S,)).fetchall()
         if lost:
             c.execute("UPDATE watch_state SET lost_notified=TRUE WHERE user_id = ANY(%s)",
                       ([r["user_id"] for r in lost],))
+
+        if due or buzz or lost:
             c.commit()
+
+    # Process results after releasing the connection -- emit_alert and HUB.to
+    # each need their own, and holding one while awaiting would starve the pool.
+    for r in due:
+        late = int(now - r["due_at"])
+        await emit_alert(r["user_id"], "checkin_missed", source="server",
+                         note=f"no answer to a {r['reason']} check-in ({late}s late)")
+
+    for w in buzz:
+        checkin_id, nxt = opened[w["user_id"]]
+        await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
+                                    "checkin_id": checkin_id,
+                                    "window": CHECKIN_WINDOW_S,
+                                    "due_at": now + CHECKIN_WINDOW_S,
+                                    "next_buzz_at": nxt})
+
     for w in lost:
-        # The last known position is the most useful thing there is here: the
-        # phone has stopped reporting, so this is where it stopped.
-        #
-        # The wording is the alert. "Watch stopped reporting" reads like a
-        # gadget fault, and that is how a family treats it -- but the watch was
-        # ARMED, which is the one state where going quiet is itself the thing
-        # worth waking someone over. So the note says the three causes the
-        # server can honestly distinguish between (it cannot tell them apart)
-        # and names the one that matters, rather than describing the sensor.
         silent_s = int(now - w["last_beat"])
         mins = max(1, round(silent_s / 60))
         await emit_alert(w["user_id"], "watch_lost", source="server",
@@ -1651,8 +1658,6 @@ async def sweep_once(now):
 
     LIMIT.sweep()
     return {"missed": len(due), "buzzed": len(buzz), "lost": len(lost)}
-
-
 # ---- live socket --------------------------------------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str = ""):
