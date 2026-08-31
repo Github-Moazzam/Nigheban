@@ -124,21 +124,60 @@ export async function stopAlarm() {
 }
 
 /**
- * The alert id that launched this process from the lock screen, once.
+ * What this launch was about — `{ id, answered }`, or null.
  *
  * Separate from `subscribeNotificationTaps` in notifications.js because it is a
  * separate mechanism: that one reads a tap on an `expo-notifications` push,
- * this one reads the intent extra a full-screen intent launched us with. Both
+ * this one reads the intent extra the alarm notification launched us with. Both
  * feed the same `pendingAlertId` in App.js, and either may be the one that
  * fires depending on whether the screen was locked.
+ *
+ * `answered` distinguishes the notification's own I'M ON IT button from merely
+ * opening the app to look. It is the one thing that cannot be worked out on
+ * this side, and it is what App.js sends the ack on.
+ *
+ * Must be called on every resume, not only at boot. Android delivers the intent
+ * to `onNewIntent` when the app is already running, and an app that only asks
+ * once comes to the front on Home with the siren still going.
  */
 export async function consumeLaunchAlertId() {
   if (!NativeAlarm) return null;
   try {
-    return await NativeAlarm.consumeLaunchAlertId();
+    return normalise(await NativeAlarm.consumeLaunchAlertId());
   } catch {
     return null;
   }
+}
+
+/**
+ * The alert a siren is sounding for right now, or null.
+ *
+ * The case neither of the two above covers: the app opened from the launcher
+ * icon or the recents list while the alarm is going. No intent carries an alert
+ * id there, so without this the app comes up on Home, screaming, with nothing
+ * on screen that can stop it.
+ */
+export async function activeAlarm() {
+  if (!NativeAlarm?.activeAlertId) return null;
+  try {
+    const id = await NativeAlarm.activeAlertId();
+    return id == null ? null : { id: String(id), answered: false };
+  } catch {
+    return null;
+  }
+}
+
+/** Both shapes the native side has ever returned, as one. */
+function normalise(hit) {
+  if (hit == null) return null;
+  // A bare string is what builds before the answer button returned. Keeping it
+  // readable means a JS bundle can update ahead of the binary without the
+  // launch routing silently going dead.
+  if (typeof hit === 'string' || typeof hit === 'number') {
+    return { id: String(hit), answered: false };
+  }
+  if (hit.alertId == null) return null;
+  return { id: String(hit.alertId), answered: !!hit.answered };
 }
 
 function alarmTitle(alert) {
