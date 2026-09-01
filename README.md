@@ -266,6 +266,15 @@ to anything.
   nothing is left alive to retry at all, and the phone stays deaf until someone
   opens the app (BUG-015). Both are open, with the beacon-identity defects found
   alongside them, in [docs/BUG_LIST.md](docs/BUG_LIST.md).
+- **An SOS only leaves the wrist while the app or its foreground service is
+  alive.** The band could raise an SOS with the app killed, by putting the press
+  in its advertisement for a scan registered with Android itself. That path was
+  **switched off on 1 Sep 2026** — it carried no band identity, so one band's
+  press was accepted by every Nigehban phone in range and raised as the wrong
+  person's emergency (BUG-012), while swallowing the second wearer's own press
+  (BUG-013). The code is still there behind two booleans; the reasoning, the
+  cost and the steps to bring it back are in
+  [docs/BAND_WAKE_DISABLED.md](docs/BAND_WAKE_DISABLED.md).
 
 ---
 

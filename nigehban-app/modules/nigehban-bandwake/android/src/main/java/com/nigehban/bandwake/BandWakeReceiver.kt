@@ -77,6 +77,19 @@ class BandWakeReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     val app = context.applicationContext
 
+    // Switched off -- see BandWake.FEATURE_ENABLED and
+    // docs/BAND_WAKE_DISABLED.md. Reaching this at all means the system is
+    // still holding a registration made by an earlier build, so the delivery is
+    // used to take that registration down for good, and nothing else happens:
+    // no pending press is written, no notification is posted, and no activity
+    // is launched. That last one is the point. The launch is what pulls this
+    // app -- and, on the reporter's Vivo, other apps -- to the foreground
+    // (BUG-018), and it must not survive the switch by one stale registration.
+    if (!BandWake.FEATURE_ENABLED) {
+      BandWake.stop(app)
+      return
+    }
+
     // An error frame rather than results: the scan has been dropped, usually
     // because Bluetooth was cycled or the controller reset. Re-arming here is
     // what stops a single glitch quietly disarming the band for good.
