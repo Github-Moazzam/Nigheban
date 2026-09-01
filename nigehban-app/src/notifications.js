@@ -136,6 +136,39 @@ export async function registerPushToken(session) {
 }
 
 /**
+ * Tell the server to stop pushing to this handset.
+ *
+ * The other half of registerPushToken, and it must be called *before* the
+ * session is cleared: the request needs the token that clearSession() is about
+ * to remove. Getting that order backwards makes this silently do nothing.
+ *
+ * Best effort by design. Sign-out cannot be made to depend on the network --
+ * somebody handing a phone over, or standing somewhere with no signal, will
+ * still tap it and the app must still sign them out. So a failure here is
+ * recorded and swallowed, and the guards that make an offline sign-out safe
+ * live on the phone instead: `unregisterBackgroundNotifications()` and the
+ * session check at the top of the background notification task.
+ *
+ * The install id is encoded because older builds registered the Expo push token
+ * itself as the id, and `ExponentPushToken[...]` carries brackets that must not
+ * go into a path segment raw.
+ */
+export async function stopPushToThisPhone(session) {
+  if (!session?.token) return false;
+  try {
+    await call(session, `/device/${encodeURIComponent(await installId())}`,
+               { method: 'DELETE' });
+    lastToken = null;
+    registered = false;
+    return true;
+  } catch (e) {
+    lastError = e?.message || String(e);
+    console.warn('[notifications] stopPushToThisPhone failed —', lastError);
+    return false;
+  }
+}
+
+/**
  * Initialize high-priority system notification channels on Android/iOS.
  * Configures the MAX importance emergency channel with siren sound, DND bypass, and strong vibration.
  */
