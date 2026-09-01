@@ -1,13 +1,14 @@
 import * as Clipboard from 'expo-clipboard';
 import React, { useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable,
+  ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable,
   ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { call } from '../../api';
 import { useEdgeInsets } from '../../safeArea';
 import { F, S, T } from '../../theme';
 import { Icon, Txt } from '../../ui';
+import Dialog from './Dialog';
 import { RU, U } from './kit';
 
 /**
@@ -33,6 +34,14 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
   // reload of the board behind this sheet, and until now both buttons sat
   // there looking untouched for the whole of it.
   const [answering, setAnswering] = useState(null);   // `${inv.id}:accept|decline`
+  // A link being made is the one moment in this app that is good news, and it
+  // used to be a line of grey text under a form. It gets the screen now: what
+  // just happened, what it means from here, and one way out. `asked` is the
+  // other half -- a request that has gone nowhere yet must not be dressed up
+  // to look like the same thing.
+  const [linked, setLinked] = useState(null);         // { name, how: 'code'|'accepted' }
+  const [asked, setAsked] = useState(false);
+  const [declining, setDeclining] = useState(null);   // the invite being refused
   const insets = useEdgeInsets();
 
   const incoming = invites?.incoming || [];
@@ -50,10 +59,10 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
       setCode(''); setRelation('');
       // The server answers the same way whether or not that code belongs to
       // anybody, so that guessing codes cannot be used to find out who exists.
-      // Saying "sent" would be a lie half the time.
-      setNote(r.linked
-        ? `${r.member.name} is now in your family.`
-        : 'If that code belongs to someone, they have been asked.');
+      // Saying "sent" would be a lie half the time -- which is why the second
+      // popup is worded as a condition and not as a receipt.
+      if (r.linked) setLinked({ name: r.member.name, how: 'code' });
+      else setAsked(true);
       onChanged?.();
     } catch (e) {
       setErr(e.message);
@@ -67,24 +76,14 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
     try {
       await call(session, `/invite/${inv.id}/${accept ? 'accept' : 'decline'}`,
         { method: 'POST' });
-      setNote(accept ? `${inv.from.name} is now in your family.` : 'Declined.');
       await onChanged?.();
+      if (accept) setLinked({ name: inv.from.name, how: 'accepted' });
+      else setNote('Declined. They are not told, and they cannot ask again.');
     } catch (e) {
       setErr(e.message);
     } finally {
       setAnswering(null);
     }
-  };
-
-  const confirmDecline = (inv) => {
-    Alert.alert(
-      `Say no to ${inv.from.name}?`,
-      'They will not be told, and they will not be able to ask you again.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Say no', style: 'destructive', onPress: () => answer(inv, false) },
-      ],
-    );
   };
 
   const copyMine = async () => {
@@ -94,6 +93,11 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
   };
 
   const close = () => { reset(); onClose?.(); };
+
+  // The end of a successful add: the popup goes, and so does this sheet. What
+  // is behind it is the board with the new person on it, which is the only
+  // thing anybody wants to look at next.
+  const finish = () => { setLinked(null); close(); };
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={close}>
@@ -157,7 +161,7 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                           </Text>
                         </Pressable>
                         <Pressable
-                          onPress={() => confirmDecline(inv)}
+                          onPress={() => setDeclining(inv)}
                           disabled={!!answering}
                           accessibilityRole="button"
                           accessibilityState={{
@@ -263,6 +267,67 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
             </ScrollView>
           </View>
         </KeyboardAvoidingView>
+
+        {/* ---- it worked ----
+            Nested inside this sheet rather than beside it: two modals that are
+            siblings are two presentations racing each other, and the one that
+            loses simply never appears. */}
+        <Dialog
+          visible={!!linked}
+          tone={U.mint}
+          icon="user-check"
+          title={`${linked?.name || 'They'} is now in your family`}
+          body={linked?.how === 'accepted'
+            ? 'You said yes, so the link is live in both directions from this moment.'
+            : 'That code was theirs, and the link is live in both directions from this moment.'}
+          points={[
+            `An SOS from ${linked?.name || 'them'} reaches this phone — even with the app closed.`,
+            'Yours reaches them the same way.',
+            'Either of you can ask the other for a check-in at any time.',
+          ]}
+          note="Either of you can undo this later. Nobody is told when you do."
+          onClose={finish}
+          actions={[{ label: 'Done', icon: 'check', filled: true, onPress: finish }]}
+        />
+
+        {/* ---- it has been asked, which is not the same thing ---- */}
+        <Dialog
+          visible={asked}
+          tone={U.amber}
+          icon="send"
+          title="Request sent"
+          body={'If that code belongs to somebody, they have been asked. Nothing is '
+            + 'shared in either direction until they accept.'}
+          note={'We cannot tell you whether the code was real — answering that would '
+            + 'let anybody find out who has an account by guessing.'}
+          onClose={() => setAsked(false)}
+          actions={[
+            { label: 'Done', icon: 'check', filled: true,
+              onPress: () => { setAsked(false); close(); } },
+            { label: 'Add someone else', tone: U.dim, onPress: () => setAsked(false) },
+          ]}
+        />
+
+        {/* ---- saying no, which cannot be taken back ---- */}
+        <Dialog
+          visible={!!declining}
+          tone={U.red}
+          icon="user-x"
+          title={`Say no to ${declining?.from?.name || 'them'}?`}
+          body={'They are not told, and they will not be able to ask you again from '
+            + 'this code.'}
+          onClose={() => setDeclining(null)}
+          actions={[
+            { label: 'Say no', icon: 'user-x', filled: true, tone: U.red,
+              busyLabel: 'Declining…',
+              onPress: async () => {
+                const inv = declining;
+                await answer(inv, false);
+                setDeclining(null);
+              } },
+            { label: 'Cancel', tone: U.dim, onPress: () => setDeclining(null) },
+          ]}
+        />
       </View>
     </Modal>
   );

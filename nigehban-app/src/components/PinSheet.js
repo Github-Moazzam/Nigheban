@@ -19,8 +19,17 @@ const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'];
  * `mode="set"` asks twice and stores it; `mode="verify"` checks it and gives
  * three attempts before it makes you wait, which is enough friction to make
  * guessing pointless and not enough to lock out the owner.
+ *
+ * One PIN, more than one gate: it also stands in front of removing somebody
+ * from the family list, which is the other way to make this phone stop calling
+ * for help. So the wording of the refusal is a prop -- "High Alert stays on"
+ * is a lie on the family screen, and a gate that lies about what it just
+ * refused is worse than no gate at all.
  */
-export default function PinSheet({ visible, mode = 'verify', title, body, onCancel, onDone }) {
+export default function PinSheet({
+  visible, mode = 'verify', title, body, lockedNote, wrongNote = 'Wrong PIN.',
+  onCancel, onDone,
+}) {
   const [entry, setEntry] = useState('');
   const [first, setFirst] = useState(null);      // 'set' mode: the first pass
   const [error, setError] = useState(null);
@@ -56,7 +65,9 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
     Vibration.vibrate(60);
     setTries((n) => n + 1);
     setEntry('');
-    setError(tries >= 2 ? 'Too many attempts. High Alert stays on.' : 'Wrong PIN.');
+    setError(tries >= 2
+      ? (lockedNote || 'Too many attempts. High Alert stays on.')
+      : wrongNote);
   };
 
   const press = (k) => {
@@ -74,10 +85,12 @@ export default function PinSheet({ visible, mode = 'verify', title, body, onCanc
     }
   };
 
-  const heading = title
-    || (mode === 'set'
-        ? (first === null ? 'Choose a disarm PIN' : 'Enter it once more')
-        : 'Enter your PIN to disarm');
+  // A caller's title names the first question. The second pass of `set` is a
+  // different question -- type it again -- and it has to win, or the sheet
+  // asks "choose a PIN" twice and the second one looks like the first failing.
+  const heading = (mode === 'set' && first !== null)
+    ? 'Enter it once more'
+    : (title || (mode === 'set' ? 'Choose a disarm PIN' : 'Enter your PIN to disarm'));
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>

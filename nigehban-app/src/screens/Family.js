@@ -3,8 +3,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert, FlatList, StyleSheet, Text, View,
 } from 'react-native';
+import PinSheet from '../components/PinSheet';
 import WatchStatusTile from '../components/WatchStatusTile';
 import { call } from '../api';
+import { hasPin } from '../security';
 import { C, R, S, T } from '../theme';
 import {
   Banner, Button, Card, Chip, Divider, EmptyState, Field, Icon, Label,
@@ -39,6 +41,9 @@ export default function Family({ session, refreshKey }) {
   // card -- these buttons sit inside a repeated row, and a shared boolean
   // would light all of them at once.
   const [pending, setPending] = useState(null);
+  // The member waiting on four digits, and which question the sheet is asking:
+  // 'verify' when a PIN exists, 'set' when one has to be chosen first.
+  const [pinFor, setPinFor] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -153,15 +158,41 @@ export default function Family({ session, refreshKey }) {
        { text: 'Say no', style: 'destructive', onPress: () => answer(inv, false) }]);
   };
 
+  /**
+   * Removing somebody, behind the same four digits that disarm High Alert.
+   *
+   * Cutting a link is the only control on this screen that makes the app
+   * quieter, it takes effect immediately in both directions, and nobody is
+   * told it happened -- so a list edited by the wrong hands is an emergency
+   * with nowhere to go, discovered during the emergency. That is the threat
+   * the disarm PIN already exists for, so it is the same PIN.
+   *
+   * If none has been set the sheet asks for one first: verifyPin() answers
+   * "true" when the keystore is empty, so a gate that simply called it would
+   * stand open. Being plain about the limit -- it is a local four-digit gate
+   * against whoever is holding the handset, not a second factor, and the
+   * server does not see it.
+   */
   const remove = (m) => {
     Alert.alert(`Remove ${m.name}?`,
-      'You will stop seeing each other\'s alerts.',
+      'You will stop seeing each other\'s alerts, and they will stop seeing yours. '
+      + 'Your PIN is asked for next.',
       [{ text: 'Cancel', style: 'cancel' },
-       { text: 'Remove', style: 'destructive', onPress: () => run(`rm:${m.id}`, async () => {
-           try { await call(session, `/family/${m.id}`, { method: 'DELETE' }); await load(); }
-           catch (e) { setErr(e.message); }
-         }) }]);
+       { text: 'Remove', style: 'destructive', onPress: async () => {
+           setErr(null);
+           setPinFor({ member: m, mode: (await hasPin()) ? 'verify' : 'set' });
+         } }]);
   };
+
+  const doRemove = (m) => run(`rm:${m.id}`, async () => {
+    try {
+      await call(session, `/family/${m.id}`, { method: 'DELETE' });
+      setNote(`${m.name} has been removed. Neither of you will see the other's alerts.`);
+      await load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  });
 
   const checkin = (m) => run(`ci:${m.id}`, async () => {
     try {
@@ -176,6 +207,7 @@ export default function Family({ session, refreshKey }) {
   });
 
   return (
+    <>
     <FlatList
       contentContainerStyle={s.wrap}
       data={members}
@@ -346,6 +378,27 @@ export default function Family({ session, refreshKey }) {
         </Card>
       )}
     />
+
+    <PinSheet
+      visible={!!pinFor}
+      mode={pinFor?.mode === 'set' ? 'set' : 'verify'}
+      title={pinFor?.mode === 'set'
+        ? 'Choose a PIN first'
+        : `Enter your PIN to remove ${pinFor?.member?.name || 'them'}`}
+      body={pinFor?.mode === 'set'
+        ? 'The same four digits switch High Alert off. Nobody holding this phone '
+          + 'should be able to do either without them.'
+        : 'The same PIN that disarms High Alert. Removing someone stops their '
+          + 'alerts reaching this phone, so it is asked for here too.'}
+      lockedNote="Too many attempts. Nobody has been removed."
+      onCancel={() => setPinFor(null)}
+      onDone={() => {
+        const m = pinFor?.member;
+        setPinFor(null);
+        if (m) doRemove(m);
+      }}
+    />
+    </>
   );
 }
 

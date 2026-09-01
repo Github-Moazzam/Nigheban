@@ -36,6 +36,13 @@ const KIND_QUEUED = {
  */
 export default function SosLiveView({ alert, deliveredTo, deliveryStatus, responders = [], onStandDown, busy, fix }) {
   const isQueued = deliveryStatus === 'queued';
+  // Standing down owns its own flag. `busy` is the caller's, and on Home that
+  // is the flag for *raising* an alert -- which is never true while this card
+  // is on screen, so the one button here spent the entire round trip looking
+  // like nothing had happened. It is still honoured, so a press cannot land
+  // while the screen above is mid-dispatch.
+  const [standingDown, setStandingDown] = useState(false);
+  const working = busy || standingDown;
   const kind = isQueued
     ? (KIND_QUEUED[alert?.kind] || KIND_QUEUED.sos)
     : (KIND[alert?.kind] || KIND.sos);
@@ -122,8 +129,13 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
       </View>
 
       <View style={{ gap: S.sm }}>
-        <Button title="I'M SAFE — STAND DOWN" tone={C.green} filled icon="shield"
-                loading={busy} onPress={() => onStandDown?.(alert.id)} />
+        <Button title={working ? 'STANDING DOWN…' : "I'M SAFE — STAND DOWN"}
+                tone={C.green} filled icon="shield" loading={working}
+                onPress={async () => {
+                  if (working) return;
+                  setStandingDown(true);
+                  try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
+                }} />
         <Text style={[T.meta, s.foot]}>
           The band can do this too: press key 1 to stand down without the phone.
         </Text>
