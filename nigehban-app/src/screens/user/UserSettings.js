@@ -380,8 +380,8 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         <Section title="SAFETY" tone={U.mint} />
         <View style={s.group}>
           <Row
-            icon="lock" title="Disarm PIN"
-            sub="Asked for before an SOS can be cancelled"
+            icon="lock" title="Security PIN"
+            sub="Asked for before an alert is cancelled, or family is removed"
             value={pinSet ? 'Set' : 'Not set'}
             tone={pinSet ? U.mint : U.amber}
             onPress={() => setSheet(true)}
@@ -390,7 +390,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             <>
               <View style={r.line} />
               <Row
-                icon="rotate-ccw" title="Remove PIN" tone={U.dim}
+                icon="rotate-ccw" title="Remove PIN"
+                sub="High Alert disarms with one tap again"
+                tone={U.dim}
                 busy={pinBusy}
                 onPress={async () => {
                   if (pinBusy) return;
