@@ -12,6 +12,7 @@ import { hasPin } from '../../security';
 import { HIT, S, T, fmtAgo } from '../../theme';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import AddFamily from './AddFamily';
+import Dialog from './Dialog';
 import { RU, U } from './kit';
 
 /**
@@ -37,6 +38,13 @@ export default function Dashboard({
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Taking somebody off the list, which is four steps rather than one: ask,
+  // take the PIN, do it, say so. All four live up here rather than on the card
+  // itself, because the third step reloads the list -- the card unmounts
+  // half-way through, and a popup owned by it would go with it.
+  const [dropping, setDropping] = useState(null);      // the member, all the way through
+  const [dropStage, setDropStage] = useState(null);    // confirm|verify|set|working|done|failed
+  const [dropErr, setDropErr] = useState(null);
   // The SOS is fire-and-forget from this screen's point of view -- App.js swaps
   // the whole shell for the live view the moment it dispatches -- but the fix
   // is captured before that, and on a phone with no lock yet that wait is
@@ -115,6 +123,51 @@ export default function Dashboard({
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
+
+  /**
+   * REMOVING SOMEBODY — why there is a PIN in front of it.
+   *
+   * Every other control on this screen makes the app shout louder. This one is
+   * the only one that makes it quieter, and it is silent afterwards: nobody is
+   * told they were removed, so a link cut at the wrong moment is a link nobody
+   * finds out about until an alert has nowhere to go. That is the same threat
+   * High Alert's PIN is for -- somebody else holding this phone -- so it is the
+   * same PIN, and it is asked for here for the same reason.
+   *
+   * Being honest about what it is: four digits in the phone's keystore. It
+   * stops the person holding the handset, which is who this is about. It is
+   * not a second factor and the server does not check it.
+   */
+  const askDrop = (m) => {
+    setDropErr(null);
+    setDropping(m);
+    setDropStage('confirm');
+  };
+
+  // No PIN set yet is the one case that cannot simply be waved through:
+  // verifyPin() answers "true" when there is nothing stored, so a gate that
+  // just called it would open for anybody. Set one first, then continue.
+  const confirmDrop = async () => {
+    setDropStage(await hasPin() ? 'verify' : 'set');
+  };
+
+  const doDrop = async () => {
+    const m = dropping;
+    if (!m) return;
+    setDropStage('working');
+    try {
+      await call(session, `/family/${m.id}`, { method: 'DELETE' });
+      // The list is reloaded before the popup changes, so the board behind it
+      // has already lost the card by the time anybody reads "removed".
+      await load();
+      setDropStage('done');
+    } catch (e) {
+      setDropErr(e.message);
+      setDropStage('failed');
+    }
+  };
+
+  const endDrop = () => { setDropping(null); setDropStage(null); setDropErr(null); };
 
   const online = members.filter((m) => m.online).length;
   const pct = members.length ? Math.round((online / members.length) * 100) : 0;
@@ -374,7 +427,14 @@ export default function Dashboard({
             </Pressable>
           </View>
         )}
-        renderItem={({ item }) => <MemberCard member={item} session={session} />}
+        renderItem={({ item }) => (
+          <MemberCard
+            member={item}
+            session={session}
+            removing={dropping?.id === item.id && dropStage !== null}
+            onRemove={() => askDrop(item)}
+          />
+        )}
       />
 
       <AddFamily
@@ -383,6 +443,76 @@ export default function Dashboard({
         invites={invites}
         onClose={() => setAdding(false)}
         onChanged={load}
+      />
+
+      {/* ---- taking somebody off the list ---- */}
+      <Dialog
+        visible={dropStage === 'confirm' || dropStage === 'working'}
+        tone={U.red}
+        icon="user-minus"
+        title={`Remove ${dropping?.name || 'them'}?`}
+        loading={dropStage === 'working'}
+        loadingLabel={`Removing ${dropping?.name || 'them'}…`}
+        body={'This cuts the link both ways and takes effect straight away. Your '
+          + 'PIN is asked for next.'}
+        points={[
+          `Your SOS will stop reaching ${dropping?.name || 'them'}.`,
+          'Theirs will stop reaching you.',
+          'Neither of you can ask the other for a check-in.',
+        ]}
+        note={'They are not told. You can add each other again later with a code.'}
+        onClose={endDrop}
+        actions={[
+          { label: 'Remove', icon: 'user-minus', filled: true, tone: U.red,
+            busyLabel: 'Removing…', onPress: confirmDrop },
+          { label: 'Keep them', tone: U.dim, onPress: endDrop },
+        ]}
+      />
+
+      <Dialog
+        visible={dropStage === 'done'}
+        tone={U.mint}
+        icon="check"
+        title={dropping?.name ? `${dropping.name} has been removed` : 'They have been removed'}
+        body={'You are no longer watching each other. Nothing else on this phone has changed.'}
+        onClose={endDrop}
+        actions={[{ label: 'Done', icon: 'check', filled: true, onPress: endDrop }]}
+      />
+
+      <Dialog
+        visible={dropStage === 'failed'}
+        tone={U.amber}
+        icon="alert-circle"
+        title="Nothing was removed"
+        body={dropErr || 'The server did not answer.'}
+        note={'Nothing changed. You are both still on the other person’s list, '
+          + 'and alerts still reach you as they did before.'}
+        onClose={endDrop}
+        actions={[
+          { label: 'Try again', icon: 'rotate-ccw', filled: true, tone: U.amber,
+            busyLabel: 'Removing…', onPress: doDrop },
+          { label: 'Close', tone: U.dim, onPress: endDrop },
+        ]}
+      />
+
+      {/* The PIN sits between the question and the request, so the wording is
+          about this screen -- not about High Alert, which is what the sheet
+          says everywhere else it is used. */}
+      <PinSheet
+        visible={dropStage === 'verify' || dropStage === 'set'}
+        mode={dropStage === 'set' ? 'set' : 'verify'}
+        title={dropStage === 'set'
+          ? 'Choose a PIN first'
+          : `Enter your PIN to remove ${dropping?.name || 'them'}`}
+        body={dropStage === 'set'
+          ? 'Removing family is one of the two things this app asks four digits '
+            + 'for. The other is switching High Alert off. Nobody holding your '
+            + 'phone should be able to do either.'
+          : 'The same PIN that switches High Alert off. Removing someone stops '
+            + 'their alerts reaching you, so it is asked for here too.'}
+        lockedNote="Too many attempts. Nobody has been removed."
+        onCancel={endDrop}
+        onDone={doDrop}
       />
     </>
   );
@@ -605,7 +735,7 @@ function AskForLocation() {
   );
 }
 
-function MemberCard({ member, session }) {
+function MemberCard({ member, session, removing, onRemove }) {
   const w = member.watchState || {};
   const online = !!member.online;
   const tone = online ? U.mint : U.faint;
@@ -707,6 +837,33 @@ function MemberCard({ member, session }) {
         </Text>
         <Text style={[T.meta, { color: U.faint }]}>ID {member.id}</Text>
       </View>
+
+      {/* Below the footer, and never beside the check-in button. This is the
+          one control on the card that makes the app quieter, and a thumb
+          reaching for the loud one must not be able to find it by accident. */}
+      {onRemove ? (
+        <Pressable
+          onPress={onRemove}
+          disabled={removing}
+          accessibilityRole="button"
+          accessibilityState={{ busy: !!removing, disabled: !!removing }}
+          accessibilityLabel={`Remove ${member.name} from your family`}
+          style={({ pressed }) => [
+            s.remove,
+            removing && { opacity: 0.6 },
+            pressed && !removing && { opacity: 0.75 },
+          ]}
+        >
+          {removing ? (
+            <ActivityIndicator size="small" color={U.faint} />
+          ) : (
+            <Icon name="user-minus" size={14} color={U.faint} />
+          )}
+          <Text style={[T.button, { color: removing ? U.dim : U.faint, fontSize: 13 }]}>
+            {removing ? 'Removing…' : 'Remove from family'}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -864,6 +1021,15 @@ const s = StyleSheet.create({
   },
 
   foot: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+
+  /* Quiet on purpose -- no fill, no colour, and the smallest type on the card
+     -- but still the 48pt target everything else here gets. */
+  remove: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: S.sm, minHeight: 48, borderRadius: RU.inner,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: U.line,
+    marginTop: S.xs,
+  },
 
   empty: {
     alignItems: 'center', gap: S.md,

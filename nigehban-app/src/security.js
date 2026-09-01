@@ -1,13 +1,25 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
- * The disarm PIN (matrix #16).
+ * The security PIN (matrix #16). Historically the disarm PIN, and the storage
+ * key still says so.
  *
  * High Alert exists for the walk home that somebody else might be watching.
  * If a phone taken out of your hand can switch it off with one tap, the mode
  * protects nobody -- so disarming asks for four digits, and arming never does.
  * Arming must stay free: a control you have to authenticate into is a control
  * you do not use when you are frightened.
+ *
+ * The same four digits now stand in front of removing somebody from the family
+ * list, on the same reasoning: it is the other way to make this phone stop
+ * calling for help, it takes effect in both directions immediately, and nobody
+ * is told it happened. Adding family is not gated for the same reason arming
+ * is not.
+ *
+ * Note for callers building a gate: `verifyPin` answers TRUE when nothing has
+ * been stored, deliberately -- see below. A screen that means "prove it" has to
+ * check `hasPin()` first and ask for one to be set, or it will let anybody
+ * through.
  *
  * Stored in the platform keystore when it is available, falling back to the
  * same AsyncStorage the session token already lives in. That fallback is worth

@@ -222,6 +222,7 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
             {!mine && item.severity >= 3 && !item.resolved_at && !acked.has(item.id) ? (
               <Action
                 filled tint={t} icon="user-check" label="I've seen this — I'm on it"
+                busyLabel="Telling them…"
                 busy={busy === item.id} onPress={() => ack(item)}
               />
             ) : null}
@@ -229,6 +230,7 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
             {mine && live ? (
               <Action
                 filled tint={U.mint} icon="shield" label="I am safe — stand down"
+                busyLabel="Standing down…"
                 busy={busy === item.id} onPress={() => standDown(item)}
               />
             ) : null}
@@ -274,8 +276,15 @@ function Chip({ icon, text, tint }) {
   );
 }
 
-/** Filled is the one thing to do next; outlined is everything else. */
-function Action({ icon, label, sub, onPress, filled, tint = U.mint, busy }) {
+/**
+ * Filled is the one thing to do next; outlined is everything else.
+ *
+ * `busy` keeps the words and swaps the icon for a spinner. It used to replace
+ * the entire button with a bare spinner, which on a card that can carry either
+ * "I'm on it" or "stand down" meant the one moment you most want to know which
+ * one you pressed is the one moment the button will not say.
+ */
+function Action({ icon, label, busyLabel, sub, onPress, filled, tint = U.mint, busy }) {
   const fg = filled ? U.bg : U.dim;
   return (
     <Pressable
@@ -283,23 +292,27 @@ function Action({ icon, label, sub, onPress, filled, tint = U.mint, busy }) {
       disabled={busy}
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={{ busy: !!busy, disabled: !!busy }}
       style={({ pressed }) => [
         s.action,
         { backgroundColor: filled ? tint : U.raised },
-        pressed && { opacity: 0.75 },
+        busy && { opacity: 0.7 },
+        pressed && !busy && { opacity: 0.75 },
       ]}
     >
       {busy ? (
         <ActivityIndicator size="small" color={fg} />
       ) : (
-        <>
-          <Icon name={icon} size={16} color={fg} />
-          <View>
-            <Text style={[T.button, { color: fg }]}>{label}</Text>
-            {sub ? <Text style={[T.meta, { color: fg, opacity: 0.8 }]}>{sub}</Text> : null}
-          </View>
-        </>
+        <Icon name={icon} size={16} color={fg} />
       )}
+      <View>
+        <Text style={[T.button, { color: fg }]}>
+          {busy ? (busyLabel || label) : label}
+        </Text>
+        {sub && !busy ? (
+          <Text style={[T.meta, { color: fg, opacity: 0.8 }]}>{sub}</Text>
+        ) : null}
+      </View>
     </Pressable>
   );
 }
