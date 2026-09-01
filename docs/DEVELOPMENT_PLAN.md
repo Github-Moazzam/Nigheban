@@ -242,10 +242,12 @@ family member's request does.
 ### B4 · Hardening · Owner M3 · Phase 5 · ~2 h
 
 - [x] B4.0 — **Push TTL.** 26 Aug 2026 — `send_expo_push_notifications()` sent no `ttl`, so every push inherited Expo's four-week default. A severity-5 push queued while a phone was in a tunnel could ring at 3 a.m. the next day, long after the wearer stood the alert down — and a family member woken by a siren for an emergency that ended yesterday learns to distrust the siren, which is the whole product. Now **300 s for severity ≥ 4**, 3600 s for the rest. Deliberately not `0`: "deliver this instant or discard" throws away real alerts over a two-second blip.
-- [ ] B4.1 — Rate limits on every write endpoint.
+- [x] B4.1 — **Rate limits on every write endpoint.** 1 Sep 2026 — twelve endpoints gained a per-user bucket; `/register` and `/login` keep their per-IP ones. Two are exempt and the `RateLimit` docstring now says why rather than leaving it to be rediscovered: **`/alert`** (throttling an SOS is the wrong instinct) and **`/heartbeat`** (a 429 never reaches the `UPDATE`, so `last_beat` goes stale and `BEAT_LOST_S` later the sweeper pages the family — a rate limit that invents an emergency is worse than none). `/checkin/{id}/ack` is the same shape one step removed — a throttled *"I'm fine"* leaves the question open for the sweeper — so it is limited generously rather than exempt. Verified: presence 429s on call 31 of 33; 200 consecutive heartbeats and 12 consecutive SOS all accepted.
+- [x] B4.5 — **CORS allowlist.** 1 Sep 2026 — `ALLOWED_ORIGINS`, empty by default. Free to do: the app is React Native and ignores CORS, and the server serves no HTML, so no existing client notices. A future web console gets a loud devtools error rather than a silent one.
+- [x] B4.6 — **Cleartext off on release builds.** 1 Sep 2026 — `usesCleartextTraffic` moved out of `app.json` into `app.config.js`, gated on `EAS_BUILD_PROFILE`. Development and preview keep it, so a laptop server on the LAN still works; production refuses plain http. Verified by resolving the config on both profiles. **Still to check on the next EAS build: read the flag in the artifact's merged `AndroidManifest.xml`** — trap #1, a green build proves nothing.
 - [ ] B4.2 — Structured logging keyed by alert id, so a failed demo is diagnosable in 30 seconds.
 - [ ] B4.3 — Redis/Tair for WS fan-out across workers — *only if more than one worker ships*.
-- [ ] B4.4 — Token refresh is **explicitly cut** (exec plan §12). Say so on the roadmap slide rather than half-building it.
+- [ ] B4.4 — **Token expiry — still open, and the design is now decided.** Token *refresh* stays cut (exec plan §12), and access+refresh was reconsidered on 1 Sep 2026 and rejected on three grounds: both credentials would live in the same AsyncStorage blob, so it does nothing about the stolen phone that is the actual threat; standard rotation with reuse-detection races the 60 s heartbeat against the WS reconnect and would revoke a wearer's session mid-arm, paging her family; and a stateless access token would make revocation *slower* than the 60 s `_AUTH_CACHE` already gives. The plan instead is a `sessions` table with a sliding `last_seen` — a phone that is beating can never be logged out by the clock — plus per-device revoke and a real *sign out everywhere*. **Blocking prerequisite:** [api.js](../nigehban-app/src/api.js) has no 401 branch, so any expiry shipped before it stops the heartbeat silently and the sweeper pages the family. Worth building alongside it: record a rejected `/heartbeat` as evidence the phone is *alive but signed out*, so the sweeper can page the wearer instead of the family.
 
 ---
 
@@ -504,7 +506,7 @@ and the board should say so.
 | B1 Consent + schema | M3 | 0 | 4 h | ☑ done |
 | B2 The sweeper | M3 | 2 | 5 h | ☑ done |
 | B3 Feature endpoints | M3 | 3 | 6 h | ◐ B3.1–B3.4 done; Qwen and WhatsApp open |
-| B4 Hardening | M3 | 5 | 2 h | ◐ B4.0 push TTL done; rest open |
+| B4 Hardening | M3 | 5 | 2 h | ◐ B4.0/B4.1/B4.5/B4.6 done; B4.2/B4.3 open, B4.4 designed not built |
 | R1 Silent-failure pass (§14) | M1/M2/M3 | — | 4 h | ◐ 8 fixed, 3 verified |
 | N1 Config plugin + dev build | M2 | 0 | 3 h | ◐ N1.1/N1.2/N1.3 done; N1.4 waits on D2 |
 | N2 Foreground service | M2 | 2 | 8 h | ◐ N2.1/N2.2/N2.5/N2.6 done, **N2.6 untested on hardware**; boot receiver + watchdog open |
@@ -673,9 +675,11 @@ invalidates the previous session — the cheapest "I lost my phone" there is.
   of these relationships. It is a schema change and it is cheapest before there
   is real data — worth doing in B4 if the time exists.
 - **Tokens do not expire.** Hashing them limits the blast radius of a stolen
-  database; it does nothing about a stolen phone. B4.
-- **CORS is still `*`**, which is defensible for a tunnelled dev box holding
-  test accounts and indefensible the moment D2 puts this on a real host.
+  database; it does nothing about a stolen phone. B4.4, where the design is
+  settled — a sliding session window, not access+refresh — and the app-side
+  401 branch is the prerequisite that makes it safe to ship.
+- ~~**CORS is still `*`**~~ — closed 1 Sep 2026 (B4.5). It is now an allowlist
+  read from `ALLOWED_ORIGINS` and empty by default.
 
 ---
 

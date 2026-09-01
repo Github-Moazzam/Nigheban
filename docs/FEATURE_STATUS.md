@@ -146,7 +146,7 @@ the pre-`3d5efb9` behaviour restored on purpose.
 | 22 | **Cloud deployment** (Alibaba ECS, Docker, Caddy, TLS) | Nothing exists — no Dockerfile, no compose, no Caddyfile, no account. Everything runs off a laptop + ngrok |
 | 23 | **Qwen severity scoring / Urdu dispatch text** | Exists only in the legacy [`nigehban_hub.py`](../nigehban_hub.py); not in the server. Pre-agreed cut line |
 | 24 | **WhatsApp fan-out** | Same — CallMeBot path lives in the hub, not the server |
-| 25 | **Security hardening** | Tokens never expire · CORS is `*` · `usesCleartextTraffic` still on · rate limits only on auth/pairing, not every write |
+| 25 | **Security hardening** | **Three of four closed 1 Sep 2026.** CORS is an empty-by-default allowlist · `usesCleartextTraffic` off on production builds · every write endpoint rate limited but `/alert` and `/heartbeat`, which are exempt on purpose. **Still open: tokens never expire** (B4.4) |
 | 26 | **Band hardware build** | Motor driver (transistor + flyback + 100 µF), LiPo via JST-PH, power budget. No haptic feedback on the real band today |
 | 27 | **BLE mesh SOS — working with no phone** | **v2, deliberate cut.** Designed to the wire-protocol level in [EXECUTION_PLAN §13.1](EXECUTION_PLAN.md) |
 | 28 | **Anti-snatch / theft lockdown** | **v2, deliberate cut.** Firmware keeps `gArmed` and an unbound hold-5s gesture; the alert path is testable via the console's SNATCH button |
@@ -957,10 +957,26 @@ gate silently wins back on the next state change.
 fails by construction.
 
 ### 13. Security items that are fine for a tunnelled dev box and not for a host
-**Severity: must-fix before deployment.** Tokens never expire (hashing limits a
-stolen *database*; it does nothing about a stolen *phone*) · CORS is `*` ·
-`usesCleartextTraffic` is still on · rate limits cover auth and pairing but not
-every write endpoint.
+**Severity: must-fix before deployment. Three of the four are fixed as of
+1 Sep 2026; one remains.**
+
+**Still open — tokens never expire.** Hashing limits a stolen *database*; it
+does nothing about a stolen *phone*, and the token sits in plain AsyncStorage.
+This is B4.4 and it is the one item here with a hazard of its own: the app has
+no 401 branch, so a session ending while the phone is backgrounded stops the
+heartbeat silently and the sweeper pages the family for an emergency that is
+not happening. Expiry must not ship before that branch does.
+
+**Closed:**
+- **CORS** is an allowlist read from `ALLOWED_ORIGINS`, empty by default.
+  Nothing in the project is a browser, so this costs nothing today.
+- **Cleartext** is off on production builds. `app.config.js` gates
+  `usesCleartextTraffic` on the EAS build profile; dev and preview keep it, so
+  LAN testing against a laptop still works.
+- **Rate limits** now cover every write endpoint except two. `/alert` and
+  `/heartbeat` are exempt on purpose and the reasoning is in the `RateLimit`
+  docstring: a 429 on either one is indistinguishable from a dead phone, so a
+  rate limit there would invent the emergency it is meant to protect.
 
 ### 14. `nigehban_hub.py` cannot find the band
 **Severity: low.** [Line 66](../nigehban_hub.py#L66) matches `Nigehban-01` exactly;

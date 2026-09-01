@@ -124,6 +124,7 @@ function Main() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const [incoming, setIncoming] = useState(null);     // family emergency takeover
+  const [acking, setAcking] = useState(false);        // "I'm on it", mid-flight
   const [askSheet, setAskSheet] = useState(null);     // the check-in question
   const [samaritan, setSamaritan] = useState(null);   // a stranger nearby
   const [deliveredTo, setDeliveredTo] = useState(null);
@@ -1202,12 +1203,26 @@ function Main() {
                 <Button title="SEE WHERE THEY ARE" filled big tone={C.red} icon="navigation"
                         onPress={() => { stopAlarm(); Linking.openURL(incoming.maps); }} />
               ) : null}
-              <Button title="I'M ON IT" tone={C.green} filled icon="user-check"
+              {/* The one button on this screen that speaks to the server, and
+                  it is pressed by somebody who has just been woken by a siren.
+                  Without a spinner it sits there looking untouched for the
+                  whole round trip and gets pressed again -- on the takeover
+                  that is the worst place in the app to look dead. The whole
+                  dialog goes quiet while it runs: dismissing it mid-flight
+                  would leave the family with no screen that ever said whether
+                  they had answered. */}
+              <Button title={acking ? 'TELLING THEM…' : "I'M ON IT"}
+                      tone={C.green} filled icon="user-check" loading={acking}
                       onPress={async () => {
-                        try { await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' }); } catch { /* they are still told by the socket */ }
+                        if (acking) return;
+                        setAcking(true);
+                        try {
+                          await call(session, `/alert/${incoming.id}/ack`, { method: 'POST' });
+                        } catch { /* they are still told by the socket */ }
+                        finally { setAcking(false); }
                         setIncoming(null); bump();
                       }} />
-              <Button title="Dismiss" tone={C.dim}
+              <Button title="Dismiss" tone={C.dim} disabled={acking}
                       onPress={() => setIncoming(null)} />
             </View>
           </View>
