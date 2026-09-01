@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { loadSession } from './api';
 import { presentAlarm } from './alarm';
 import { sendEmergencyAlarmIfNothingShown } from './notifications';
 
@@ -135,6 +136,14 @@ if (TaskManager && Notifications) {
         return;
       }
       try {
+        // Nobody is signed in on this phone, so this push is for an account
+        // that has left it. Checked here rather than only at sign-out because
+        // sign-out is allowed to happen with no network: if the DELETE never
+        // reached the server, this is the only thing standing between a stale
+        // registration and what follows -- a full-screen, DND-bypassing siren
+        // for somebody else's emergency, on a phone showing a login screen.
+        const session = await loadSession();
+        if (!session?.token) return;
         const alert = extractAlert(data);
         // Anything below severity 4 is informational. Taking the screen over
         // for a low-battery notice is how a family learns to swipe the
@@ -172,6 +181,35 @@ export async function registerBackgroundNotifications() {
     lastError = e?.message || String(e);
     registered = false;
     console.warn('[bgNotifications] registerTaskAsync failed —', lastError);
+    return false;
+  }
+}
+
+/**
+ * The other half of the above, for sign-out.
+ *
+ * Registration is what lets a silent push wake this app headlessly and take the
+ * screen over. Leaving it in place after sign-out meant a phone nobody was
+ * signed in on could still be woken by an alert for the account that left.
+ *
+ * Unlike the server call in `stopPushToThisPhone`, this needs no network, which
+ * is the point: it is the half of the fix that still works when somebody signs
+ * out on a dead connection.
+ *
+ * Idempotent, and safe on a phone where the task was never registered.
+ */
+export async function unregisterBackgroundNotifications() {
+  if (!TaskManager || !Notifications) return false;
+  try {
+    if (await TaskManager.isTaskRegisteredAsync(TASK_NAME)) {
+      await Notifications.unregisterTaskAsync(TASK_NAME);
+    }
+    registered = false;
+    lastError = null;
+    return true;
+  } catch (e) {
+    lastError = e?.message || String(e);
+    console.warn('[bgNotifications] unregisterTaskAsync failed —', lastError);
     return false;
   }
 }

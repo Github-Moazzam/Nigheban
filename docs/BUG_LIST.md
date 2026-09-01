@@ -4,7 +4,8 @@ Known defects in this project. Newest last, so a bug's number and its place in
 the file agree. A bug stays here after it is fixed, with the fix recorded, so
 the same symptom is not re-diagnosed from scratch six months later.
 
-**Status key:** `OPEN` · `FIXED` (branch/commit noted) · `WONTFIX` (with reason)
+**Status key:** `OPEN` · `FIXED` (branch/commit noted) · `DEFERRED` (recorded,
+not being worked on, with the decision written down) · `WONTFIX` (with reason)
 
 **Verified on device — 1 Sep 2026.** BUG-001, 002, 005, 006, 007 and 009 were
 confirmed working on a Samsung running Android 14, against the real band, from
@@ -23,6 +24,66 @@ the app force-stopped and the screen off, has been seen to show it.
 BUG-010 was reported after that pass and is open. It is the reason the pass
 above could read green on BUG-002 while the band still fails to come back on
 its own: the device testing was done with the screen on.
+
+BUG-017 was fixed on `fix/stop-push-after-signout`. Its server half is verified
+against the real database — the handset provably stops being a delivery target,
+and provably becomes one again on the next sign-in. Its app half has not been
+run on a phone at all, which leaves it in the same position as BUG-008.
+
+---
+
+## Summary
+
+**18 filed — 8 fixed, 1 partial, 9 open**, one of those deferred by decision.
+Titles only; the entry below each row carries the symptom, the cause and the
+reasoning.
+
+| # | Bug | Severity | Status |
+|---|---|---|---|
+| 001 | Sign-out leaves the previous account's band paired | High | ✅ Fixed · device-verified |
+| 002 | Flat 3s retry drives the app into Android's BLE scan throttle | High | ✅ Fixed · device-verified |
+| 003 | `lastError` is collected but never displayed | Low | ⬜ Open |
+| 004 | Not every band status has a human label | Low | 🟨 Partial — labels added, `error:` path still raw |
+| 005 | A live SOS is forgotten when the app is reopened | Critical | ✅ Fixed · device-verified |
+| 006 | No notification when your own SOS is sent | High | ✅ Fixed · device-verified |
+| 007 | The band gets no confirmation buzz for an SOS | Medium | ✅ Fixed · device-verified |
+| 008 | Responders are lost if the app was closed when they answered | Medium | ✅ Fixed — **not device-verified** |
+| 009 | One SOS produces 2–3 notifications while the app is open | Medium | ✅ Fixed · device-verified — `presentAlarm` finding still open |
+| 010 | The band only reconnects while the screen is on | High | ⬜ Open |
+| 011 | Every SOS from a killed app also raises a false `watch_lost` | High | ⬜ Open |
+| 012 | Any band's SOS beacon fires on every Nigehban phone in range | Critical | ⬜ Open |
+| 013 | A stranger's press silently discards your own band's SOS | Critical | ⬜ Open |
+| 014 | A band reboot can discard the next real press | High | ⬜ Open |
+| 015 | Nothing restores the band link after the app is killed | High | ⬜ Open |
+| 016 | Advertising fields fail silently when they no longer fit | Low now, High on the next field | ⬜ Open · latent |
+| 017 | Sign-out leaves the handset receiving the old account's alerts | High | ✅ Fixed — **untested in the app** |
+| 018 | Beacon wake opens the app for an SOS — and other apps on one phone | Low · one handset | 🟦 Deferred — may be removed rather than fixed |
+
+**Key:** ✅ fixed · 🟨 partially fixed · ⬜ open · 🟦 deferred by decision.
+"Device-verified" means the 1 Sep 2026 pass saw it working on a real phone
+against the real band; a fix without it is written but unproven, and on a
+safety device those are not the same claim. "Deferred" means the decision not
+to work on it is itself recorded, in the entry, with the reasoning.
+
+Three rows are worth reading twice. **008** and **017** are both fixed with the
+same gap: in each case the unverified half is the behaviour of a phone that is
+not running the app, which is the case each of them exists for. **017**'s server
+side is now proven against the real database; its app side has not been run.
+**009** is fixed, but its secondary finding is not: the native full-screen
+alarm module appears to be missing or throwing on the test device, which is
+why the fallback notification was posting at all.
+
+The open list splits into three groups. The beacon cluster — **012**, **013**,
+**014**, **016** — is one branch, `fix/beacon-identity-and-dedup`, and two of
+those are Critical. The background-timer cluster — **010** then **015** — is
+strictly ordered, because 015 cannot work until 010 has replaced the JS timer.
+The rest — **003**, **004**, **011** — stand alone. **018** touches both
+clusters and is deliberately not scheduled; it may be closed by removing the
+feature rather than by fixing it.
+
+*(File order note: BUG-010 was written up after BUG-016 and physically sits at
+the end of the file, ahead of BUG-017 and BUG-018. The numbering above is
+the index.)*
 
 ---
 
@@ -1105,3 +1166,345 @@ let the display time out, walk out of range and back, watch whether the status
 line ever leaves `disconnected` before the screen is woken. `adb logcat` will
 show the RN timer callbacks stopping and the whole overdue queue firing at once
 on resume.
+
+---
+
+## BUG-017 — Sign-out leaves the handset receiving the old account's alerts
+
+**Status:** FIXED on `fix/stop-push-after-signout` — server side verified
+(11/11 against the real database), but **not yet tested in the app on a phone**
+**Severity:** High — a signed-out phone keeps receiving another family's
+emergencies, including live location links
+**Area:** [nigehban-app/App.js](../nigehban-app/App.js) ·
+[nigehban-app/src/notifications.js](../nigehban-app/src/notifications.js) ·
+[nigehban-app/src/bgNotifications.js](../nigehban-app/src/bgNotifications.js) ·
+[server/nigehban_server.py](../server/nigehban_server.py)
+
+### Symptom
+
+Sign out. Do not sign in again. A family member on that account presses SOS, or
+any other alert fires for them — check-in, low battery, `watch_lost`. The
+notification still arrives on the signed-out phone: name, alert kind, and the
+maps link to where that person is.
+
+Tapping it opens the app to the sign-in screen. There is nothing to answer with
+and nothing to see.
+
+### Cause
+
+`signOut` ([App.js:972-985](../nigehban-app/App.js#L972-L985)) tears down
+everything that lives *on the phone* and nothing that lives on the server:
+
+```js
+try { await band.disconnect?.(); } catch { /* nothing paired */ }
+await stopBackgroundWatch();
+await clearSession();
+await clearQueue();
+dispatch('RESET');
+```
+
+`clearSession()` removes one AsyncStorage key
+([api.js:161-163](../nigehban-app/src/api.js#L161-L163)). It does not tell the
+server anything, and there is nothing to tell it with: the only device endpoint
+is `POST /device`
+([nigehban_server.py:1249](../server/nigehban_server.py#L1249)). There is no
+`DELETE /device`, and no other route touches the row.
+
+So the `devices` row survives sign-out with `user_id` still pointing at the
+account that just left and `push_token` still live. Fan-out selects on exactly
+that column
+([nigehban_server.py:1279-1288](../server/nigehban_server.py#L1279-L1288)):
+
+```python
+"SELECT DISTINCT push_token FROM devices WHERE push_token IS NOT NULL"
+" AND push_token != '' AND user_id = ANY(%s)"
+```
+
+The handset is still a valid delivery target for an account nobody is signed
+in to. Nothing on the phone can decline the push either — a visible Expo push
+is drawn by the system before any app code runs, which is precisely the
+property BUG-006 and BUG-008 rely on.
+
+The row is keyed on the install id, so signing in as somebody else *does*
+repoint it ([notifications.js:114-125](../nigehban-app/src/notifications.js#L114-L125),
+`ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id`). That is what makes
+this easy to miss: the account-switch case, which BUG-001 made everyone look
+at, is the one case that already works. The broken state is **signed out and
+left signed out**, and it lasts indefinitely.
+
+### The second half: the takeover still fires
+
+Worse than the notification, and a separate mechanism. The background
+notification task is registered on sign-in
+([App.js:271-279](../nigehban-app/App.js#L271-L279)) and unregistered nowhere —
+`unregisterTaskAsync` does not appear in the app at all. The task itself has no
+notion of a session ([bgNotifications.js:132-149](../nigehban-app/src/bgNotifications.js#L132-L149)):
+
+```js
+if (!alert || alert.severity < 4) return;
+lastFiredAt = Date.now();
+if (await presentAlarm(alert)) return;
+await sendEmergencyAlarmIfNothingShown(alert);
+```
+
+Severity is the only gate. A severity-5 silent push therefore still wakes a
+headless runtime on a signed-out phone and fires the full-screen, DND-bypassing
+lock-screen siren for an account that is not signed in — landing the person, on
+dismiss, at a login screen.
+
+### Why this is High and not Medium
+
+Three harms, and they are different from each other:
+
+1. **A live-location leak.** The push carries the wearer's name and a maps
+   link. On a handset that was signed out because it changed hands — sold,
+   returned, handed to a family member — that goes to a stranger. Same class as
+   BUG-001, and this one leaks the thing the product exists to protect.
+2. **A siren with no off switch that means anything.** See above.
+3. **A phantom responder.** The wearer's family list still counts this handset
+   as covered. `send_expo_push_notifications` logs the push as accepted by Expo,
+   so the server-side view is green. Nobody — not the wearer, not the family,
+   not the log — can tell that one of the phones being paged cannot answer.
+   That is the inverse of the failure BUG-008 was written to close: there, the
+   answer never reached the wearer; here, the request never reaches a person.
+
+### Fix
+
+Branch `fix/stop-push-after-signout`. Four changes, and the smallest one matters
+most.
+
+**1. `DELETE /device/{install_id}`** ([nigehban_server.py](../server/nigehban_server.py)),
+authenticated, scoped with `AND user_id=%s` so a guessed install id cannot
+silence somebody else's phone. It clears **only** `push_token`.
+
+The plan here said to clear `user_id` too. That turned out to be both impossible
+and unnecessary: the column is `NOT NULL`
+([supabase_migration.sql:102](../server/supabase_migration.sql#L102)), and
+`push_tokens_for()` already filters on the token, so clearing the token *is* the
+fix. Leaving `user_id` alone also keeps the row saying what it means — this
+install, belonging to this account — which is exactly what the next sign-in
+updates. No migration was needed.
+
+Deliberately idempotent: signing out twice, or from a phone that never
+registered, returns `ok` rather than 404. A sign-out must never fail.
+
+**2. `stopPushToThisPhone(session)`** in
+[notifications.js](../nigehban-app/src/notifications.js) — the other half of
+`registerPushToken`, doing the install-id lookup and the DELETE. Best effort: a
+failure is recorded in `pushDiagnostics()` and swallowed. The id is
+percent-encoded, because older builds registered the Expo push token itself as
+the install id and `ExponentPushToken[...]` carries brackets.
+
+**3. Called from `signOut` before `clearSession()`**
+([App.js](../nigehban-app/App.js)). This ordering is the one trap in the change:
+`clearSession` destroys the token the call authenticates with, so doing it first
+makes the call silently do nothing while looking correct.
+
+**4. `unregisterBackgroundNotifications()`, and a session check inside the task**
+([bgNotifications.js](../nigehban-app/src/bgNotifications.js)). The task now
+calls `loadSession()` first and returns early when there is none, so a silent
+push can no longer wake a headless runtime and fire a full-screen, DND-bypassing
+siren on a phone showing a login screen.
+
+### The offline case — why 4 matters more than 1
+
+Sign-out must not require a network. Somebody handing a phone over, or standing
+somewhere with no signal, will still tap it and the app must still sign them out.
+So the DELETE cannot be a precondition — which means the server call is the part
+of this fix most likely to be missing exactly when it is needed, and the two
+local guards in 4 are what actually hold the line. They were written second and
+they are the ones to keep working.
+
+**Still open, deliberately not built here:** the durable version, where sign-out
+itself is queued the way an alert is — a marker persisted outside the session
+key, the DELETE retried on next launch, and the takeover refused while the marker
+is set. That covers the phone signed out on a dead connection and never opened
+again, whose row stays deliverable until somebody signs in on it. Worth settling
+at the same time whether the app should drop any push it cannot attribute to the
+current session, which would close the whole class rather than this instance.
+
+### Verification — what has actually been run
+
+[tests/test_signout_stops_push.py](../tests/test_signout_stops_push.py), against
+a live server and the real database on 1 Sep 2026: **11 passed, 0 failed.**
+
+That settles the server side completely:
+
+- an unauthenticated sign-out is refused, and another account's DELETE does
+  **not** clear your row — the scoping is real, not merely intended;
+- a signed-in phone is a delivery target, and after sign-out it is not;
+- the install row survives, still belonging to the account. Nothing is deleted;
+- signing back in makes the phone deliverable again, with no manual step;
+- signing out twice is not an error;
+- a bracketed legacy install id clears too.
+
+"The phone stops being a delivery target" is therefore now an observed fact about
+the database, rather than a claim about a line of SQL.
+
+Getting there took two attempts, which is the part worth recording. The first
+version of the test's database helper caught every exception and returned
+`"no db"`, so a failure to reach the database was reported as a *skipped* check
+and read as "you have not configured this". The run sat at 5 passed, 6 skipped,
+looking approximately green while the central assertion had never executed once.
+That is the same failure-wearing-the-costume-of-absence this file keeps
+documenting — `registerPushToken`'s green chip in this bug's own cause section,
+the `[expo push] no registered device` line that printed like a success. The
+helper now separates "nothing configured to ask" (skip) from "asked and it
+failed" (fail, with the real exception), and prints what it saw either way.
+
+**Still nothing has been run on a phone.** The three app-side changes — the call
+placed before `clearSession()`, `unregisterBackgroundNotifications()`, and the
+session check inside the background notification task — have not executed once.
+The server now provably stops *sending*; whether the app stops *asking*, and
+stops firing the takeover, is untested.
+
+### Still to verify
+
+1. **On a phone.** Sign out, leave it signed out, and have a family member raise
+   an SOS. Confirm nothing arrives — nothing in the shade, and no full-screen
+   takeover. Then sign back in and confirm it arrives again with no manual step.
+2. **On a phone with no network.** Sign out in airplane mode, restore the
+   network, and confirm the phone still receives nothing. This is the case the
+   server call cannot cover and the two local guards are supposed to, which makes
+   it both the more important of the two and the more likely to be quietly
+   broken.
+
+### A note on the name
+
+"Deregister the device" was the original wording and it misleads: it reads as
+though something belonging to the user is deleted. Nothing is. One column in one
+row is set to NULL, and the next sign-in fills it back in. The branch, the
+endpoint and the function are named for what actually happens, and this
+paragraph is here because the wording confused a reader once already.
+
+### Rejected
+
+**Having the server skip pushes to users with no live websocket.** It reads like
+a fix — a signed-out phone has no socket — but it is the same trade rejected in
+BUG-009 and it fails the same way: socket-connected is not the same as
+reachable, and a family member with a locked phone in their pocket is the
+case the push path exists for. Removing the guaranteed floor to catch a stale
+registration is the wrong direction on a safety device.
+
+**Expiring device rows on `last_seen`.** It would eventually clear this, but
+"eventually" is doing all the work: `last_seen` is only written by `POST
+/device`, so the window is measured in however long until the next sign-in, and
+a phone that is never signed into again never expires at all. Also punishes the
+legitimate case — a family member who has not opened the app in a month is
+exactly who most needs the push to still work.
+
+---
+
+## BUG-018 — The beacon wake opens the app for an SOS, and on one phone opens other apps too
+
+**Status:** DEFERRED — recorded 1 Sep 2026, not being worked on, and the feature
+may be removed rather than fixed
+**Severity:** Low as it stands — the SOS is delivered correctly on every phone
+including this one; the cost is unexpected app launches on one handset
+**Area:** [BandWakeReceiver.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt) ·
+[NigehbanAlarmModule.kt](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt)
+
+### Symptom
+
+App swiped out of Recents and the band disconnected — no app, so nothing is
+holding the GATT link. Press the band twice. The SOS **is** sent, correctly. But
+the phone also brings the Nigehban app up into the foreground, and on the
+reporter's Vivo running Android 8, **other unrelated apps come up as well**.
+
+Only that handset. No other phone tested behaves this way, and most never reach
+this path at all: on them the app or its foreground service survives a Recents
+swipe, the band stays linked, and the press arrives over GATT to JavaScript that
+is still running.
+
+### Cause — the app launch is the design; the rest is not
+
+The app launching is the feature, not the bug. When no JS listener is alive,
+[BandWakeReceiver.kt:146-187](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt#L146-L187)
+posts a full-screen-intent notification, and on a locked or idle phone Android
+launches the activity itself so the app's ordinary `raise()` sends the alert
+with nobody touching anything. That is the entire point of the beacon path and
+it is why an emergency still gets out of a phone that ran `kill -9` (BUG-015).
+
+**Other apps launching is not explained by that, and is not diagnosed.** Two
+candidates, cheapest first:
+
+1. **The implicit-intent fallback.** Both wake modules build the PendingIntent
+   the same way —
+   [BandWakeReceiver.kt:149-150](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt#L149-L150)
+   and [NigehbanAlarmModule.kt:433-434](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt#L433-L434):
+
+   ```kotlin
+   val launch = (context.packageManager.getLaunchIntentForPackage(context.packageName)
+     ?: Intent(Intent.ACTION_MAIN)).apply { ... }
+   ```
+
+   If `getLaunchIntentForPackage` ever returns null, the fallback is a bare
+   `ACTION_MAIN` with no component, no package and no category — an **implicit**
+   intent that matches essentially every launchable activity on the device, and
+   what it resolves to is the system's choice. Worth checking first because it is
+   cheap, because it is a landmine whether or not it is this bug, and because it
+   is duplicated in two modules.
+
+2. **Funtouch's wake-up chain.** Vivo's power manager freezes background apps and
+   thaws them in groups, and an app being pulled to the foreground from a
+   broadcast is the kind of event that triggers it. If that is the cause there is
+   nothing in this repo to fix, and the answer is to stop launching an activity
+   at all — which is what the direction below does anyway.
+
+Nothing has been captured from the device yet. `adb logcat -b events` filtered on
+`am_` at the moment of a press would separate the two in a single run, and that
+is the first thing to do whenever this is picked up.
+
+### Decision — deferred, and the feature may not survive
+
+Deferred deliberately, not forgotten. The reasoning, so it does not have to be
+rebuilt later:
+
+- It reproduces on one Android 8 Vivo and on no other phone.
+- The emergency itself is delivered correctly everywhere, including there. This
+  costs noise and confusion, not a missed SOS.
+- On every other handset the beacon path is barely exercised, because the app or
+  its foreground service survives the swipe and the band stays connected.
+- Two Critical bugs are open in the beacon cluster — BUG-012 and BUG-013 — and
+  those affect every phone. They come first.
+
+### The direction if it is picked up
+
+Not "fix the launch" but **stop launching for the SOS at all**.
+
+Today the wake and the delivery are one event: the press wakes the phone, and the
+wake exists in order to send the press. The alternative separates them — the wake
+starts the background service, the service reconnects the band, and the SOS
+arrives over the ordinary GATT link like every other band event, through code
+that runs on every phone and is exercised constantly. No activity is launched, so
+whatever is pulling other apps up has nothing to pull.
+
+That is the same machinery as BUG-015's idle-beacon relink, and it inherits the
+same two dependencies:
+
+- **Band identity in the advertisement** (BUG-012) — the MAC-derived band id.
+  Without it, a relink filter wakes this phone for every band in range.
+- **BUG-010 first**, because the reconnect the woken service has to run is
+  currently on a JS timer that does not fire while the Activity is paused.
+
+The open question, and the reason this is a direction and not a plan: a relink is
+slower than a beacon and can fail outright. A snatch is precisely the case where
+band and phone are moving apart, so it is when a relink is least likely to
+succeed and an alert most needed — the argument already made in BUG-015's closing
+note against merging the two paths. Dropping the direct beacon-to-SOS path buys a
+cleaner wake and pays for it in the worst case the product exists for.
+
+Three outcomes are all still live, and nothing here commits to any of them:
+
+1. Keep the path as it is and accept the Vivo's behaviour.
+2. Keep it, but stop launching an activity — post the notification and let the
+   wearer tap SEND IT NOW, at the cost of the hands-free case.
+3. Remove the beacon-to-SOS path in favour of the relink.
+
+### Not to be confused with
+
+- **BUG-015** is the *absence* of a relink after a kill. This is the *presence*
+  of a wake that works and does more than it should. Same machinery from opposite
+  sides, and outcome 3 above fixes both with one piece of work.
+- **BUG-012** is a foreign band waking this phone. Here it is this phone's own
+  band, doing exactly what it was told to do.
