@@ -32,7 +32,12 @@ import {
 } from './src/bgNotifications';
 import { activeAlarm, consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
-  consumePendingBandSos, startBandWake, stopBandWake, subscribeBandSos,
+  // consumePendingBandSos, startBandWake and subscribeBandSos are not imported
+  // while the band's beacon wake is switched off -- see the commented-out
+  // effects below and docs/BAND_WAKE_DISABLED.md. `stopBandWake` stays, and is
+  // the one thing still called: it disarms a phone updating from a build that
+  // had the feature on.
+  stopBandWake,
 } from './src/bandWake';
 import { runFirstRunAsks } from './src/permissions';
 import {
@@ -576,8 +581,37 @@ function Main() {
     return () => { cancelled = true; };
   }, [session, band.status, band.mode, band.modeLoaded, watchMode]);
 
-  // ---- the band's own way in, for when this process is gone ---------------
+  // ---- the band's own way in: SWITCHED OFF --------------------------------
   //
+  // Turned off on purpose on 1 Sep 2026. The full reasoning, and the exact
+  // steps to turn it back on, are in docs/BAND_WAKE_DISABLED.md. Nothing was
+  // deleted: the three effects that drove it are kept verbatim below this one,
+  // commented out, and the module they call is switched off at
+  // `BAND_WAKE_ENABLED` in src/bandWake.js and `BandWake.FEATURE_ENABLED` in
+  // BandWake.kt.
+  //
+  // The short version: the wake carries no band identity, so one band's press
+  // is accepted by every Nigehban phone in range (BUG-012) and swallows the
+  // second wearer's own SOS on the way past (BUG-013). Both are Critical, both
+  // need a band id in the advertisement, and that means new firmware in the
+  // field before this can be trusted again. On the reporter's Android 8 Vivo
+  // the wake also drags unrelated apps to the foreground (BUG-018).
+  //
+  // What is given up by switching it off, said plainly: on an OEM skin that
+  // runs `kill -9` on a Recents swipe, a press with the app killed now reaches
+  // nobody. The band is only a working safety device while this app or its
+  // foreground service is alive.
+  //
+  // This effect is the one live remnant, and it is a cleanup rather than a
+  // feature: a phone updating from a build that had the wake armed still has a
+  // registration in the Bluetooth stack and an `armed` flag in the module's
+  // storage that BandWakeBootReceiver would act on after the next reboot.
+  // `stopBandWake()` clears both. It is cheap, idempotent and a no-op on a
+  // phone that never had it.
+  useEffect(() => { stopBandWake(); }, []);
+
+  /* ---- SWITCHED OFF: the beacon path, kept for whoever turns it back on ----
+
   // The foreground service above is the app's attempt to stay alive. On most
   // non-Samsung skins it loses: a swipe on the Recents screen is `kill -9`, and
   // the GATT link dies with the process. From that moment the band looks linked
@@ -662,6 +696,8 @@ function Main() {
     });
     return () => sub.remove();
   }, [session?.token]);
+
+  ---- end of the switched-off beacon path ---- */
 
   // ---- U3.4 battery: one alert per threshold crossing, per device --------
   //
