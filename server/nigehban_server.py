@@ -256,9 +256,21 @@ class RateLimit:
     walking the code space or the password space over a tunnel, which is
     otherwise unbounded and completely silent.
 
-    Note what is NOT limited: raising an alert. Throttling an SOS is the wrong
-    instinct in a safety product; a person mashing the button in a panic must
-    get through every time.
+    Note what is NOT limited, and why each one is deliberate:
+
+      /alert            Throttling an SOS is the wrong instinct in a safety
+                        product; a person mashing the button in a panic must
+                        get through every time.
+      /heartbeat        A 429 here is indistinguishable from a dead phone. The
+                        beat never reaches the UPDATE, last_beat goes stale,
+                        and BEAT_LOST_S later the sweeper pages the family for
+                        an emergency that is not happening. A rate limit that
+                        invents an emergency is worse than no rate limit.
+
+    Everything on the emergency path that IS limited -- ack, resolve, samaritan
+    respond -- is limited generously: the ceiling is set to stop a script, not
+    a frightened person pressing twice. When in doubt on this file, the bias is
+    to let the request through.
     """
 
     def __init__(self):
@@ -481,15 +493,24 @@ async def lifespan(_app):
 
 app = FastAPI(title="Nigehban local server", lifespan=lifespan)
 
-# Wide open on purpose, and only defensible because of what this server is: a
-# development box behind a tunnel whose URL changes every restart, holding test
-# accounts. It exists so a browser tab, a second laptop or a teammate's phone
-# can be pointed at the same server without a config change.
+# CORS is now an allowlist, and the default is empty.
 #
-# This MUST be narrowed to the real origins before anything real is stored.
+# Nothing in this project is a browser: the app is React Native, which does not
+# enforce CORS at all, and the server hands out no HTML. So an empty allowlist
+# costs exactly nothing today -- every real client keeps working -- while `*`
+# was standing invitation for any page on the internet to drive this API with a
+# token it had got hold of.
+#
+# Set ALLOWED_ORIGINS (comma-separated) when something that IS a browser needs
+# in -- a web console, a dashboard. The failure mode of getting it wrong is a
+# loud CORS error in the devtools console, not a silent one.
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -764,6 +785,8 @@ def list_invites(u=Depends(me)):
 
 @app.post("/invite/{invite_id}/accept")
 async def accept_invite(invite_id: int, u=Depends(me)):
+    LIMIT.check("invite_answer", u["id"], 30, 600,
+                "too many invite answers - wait a few minutes")
     now = time.time()
     with closing(db()) as c:
         inv = c.execute("SELECT * FROM invites WHERE id=%s", (invite_id,)).fetchone()
@@ -794,6 +817,11 @@ def decline_invite(invite_id: int, u=Depends(me)):
     afraid of somebody must never make refusing them the risky option. To the
     sender this looks exactly like an invite nobody has opened yet.
     """
+    # Shares a bucket with accept on purpose: the pair of them is one decision,
+    # and a script walking invite ids should not get twice the budget by
+    # alternating between the two endpoints.
+    LIMIT.check("invite_answer", u["id"], 30, 600,
+                "too many invite answers - wait a few minutes")
     with closing(db()) as c:
         inv = c.execute("SELECT * FROM invites WHERE id=%s", (invite_id,)).fetchone()
         if not inv or inv["to_id"] != u["id"]:
@@ -814,6 +842,8 @@ def add_family_gone():
 
 @app.delete("/family/{member_id}")
 def remove_family(member_id: str, u=Depends(me)):
+    LIMIT.check("family_remove", u["id"], 20, 600,
+                "too many changes to your family list - wait a few minutes")
     with closing(db()) as c:
         c.execute("DELETE FROM links WHERE (owner_id=%s AND member_id=%s) "
                   "OR (owner_id=%s AND member_id=%s)",
@@ -1111,6 +1141,12 @@ async def raise_alert(b: AlertIn, u=Depends(me)):
 
 @app.post("/alert/{alert_id}/resolve")
 async def resolve(alert_id: int, u=Depends(me)):
+    # Emergency path: generous. Standing an alert down is the thing that stops
+    # four phones sirening, so the ceiling is set to stop a script walking
+    # alert ids, not a wearer tapping the button again because the first tap
+    # did not look like it worked.
+    LIMIT.check("alert_resolve", u["id"], 60, 300,
+                "too many stand-downs at once - wait a moment")
     with closing(db()) as c:
         row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
         if not row:
@@ -1196,6 +1232,11 @@ async def notify_owner_of_ack(row, responder, total, samaritan=False):
 @app.post("/alert/{alert_id}/ack")
 async def ack(alert_id: int, u=Depends(me)):
     """A family member saying 'I've seen this, I'm on it.'"""
+    # Emergency path: generous, for the same reason as resolve. A duplicate ack
+    # is already harmless -- the ON CONFLICT below makes the second tap a
+    # no-op -- so this ceiling exists only against a script.
+    LIMIT.check("alert_ack", u["id"], 60, 300,
+                "too many responses at once - wait a moment")
     with closing(db()) as c:
         row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
         if not row:
@@ -1254,6 +1295,8 @@ def register_device(b: DeviceIn, u=Depends(me)):
     somebody else moves the row rather than leaving a second account's push
     token pointed at the same handset.
     """
+    LIMIT.check("device_register", u["id"], 30, 600,
+                "too many device registrations - wait a few minutes")
     # Brackets are allowed because builds up to now sent the Expo push token
     # itself as the install id, and "ExponentPushToken[...]" failed this check
     # -- so every registration 400'd, the devices table stayed empty, and no
@@ -1297,6 +1340,11 @@ def stop_push_to_device(install_id: str, u=Depends(me)):
     else's phone. Deliberately idempotent -- signing out twice, or from a phone
     that never registered, is not an error and must not fail the sign-out.
     """
+    # Generous, and it stays that way: a 429 on the way out would leave a live
+    # push token on a handset the user believes they have signed out of, which
+    # is the exact leak this endpoint was added to close.
+    LIMIT.check("device_forget", u["id"], 60, 600,
+                "too many sign-outs at once - wait a few minutes")
     with closing(db()) as c:
         c.execute("UPDATE devices SET push_token=NULL WHERE id=%s AND user_id=%s",
                   (install_id, u["id"]))
@@ -1518,6 +1566,11 @@ async def ack_open_checkins(uid, by="app"):
 @app.post("/checkin/{member_id}")
 async def request_checkin(member_id: str, b: Optional[CheckinIn] = None, u=Depends(me)):
     """A parent asking 'are you okay?'. Only works inside the family."""
+    # This one buzzes somebody else's wrist, so the limit is a courtesy bound
+    # as much as a load one -- a family member should not be able to make a
+    # wristband vibrate on demand all afternoon.
+    LIMIT.check("checkin_ask", u["id"], 20, 600,
+                "too many check-in requests - wait a few minutes")
     window = max(5, min(int((b.window if b else None) or CHECKIN_WINDOW_S), 3600))
     now = time.time()
     with closing(db()) as c:
@@ -1552,6 +1605,12 @@ async def request_checkin(member_id: str, b: Optional[CheckinIn] = None, u=Depen
 @app.post("/checkin/{checkin_id}/ack")
 async def ack_checkin(checkin_id: int, u=Depends(me)):
     """The band or the app answering. Answers everything outstanding."""
+    # Nearly the /heartbeat case: this is someone answering "yes, I'm fine",
+    # and a 429 here leaves the check-in open for the sweeper to escalate --
+    # the family gets paged because the answer was rate-limited, not because
+    # it never came. Set high enough that only a script can reach it.
+    LIMIT.check("checkin_ack", u["id"], 60, 300,
+                "too many answers at once - wait a moment")
     with closing(db()) as c:
         row = c.execute("SELECT * FROM checkins WHERE id=%s", (checkin_id,)).fetchone()
     if not row or row["user_id"] != u["id"]:
@@ -1574,6 +1633,8 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
     This is the endpoint that makes the mode real. Held in the app it would
     die with the app -- which is the exact scenario the mode exists for.
     """
+    LIMIT.check("high_alert", u["id"], 40, 300,
+                "too many High Alert changes - wait a moment")
     now = time.time()
     with closing(db()) as c:
         watch_row(c, u["id"])
@@ -1674,6 +1735,11 @@ def put_presence(b: PresenceIn, u=Depends(me)):
     stored at about a hundred metres, it is only read while it is fresh, and
     the only thing it is ever used for is deciding who to ask.
     """
+    # The app posts this at most every five minutes (PRESENCE_EVERY_MS), but a
+    # failed post clears its own throttle and retries on the next fix, so the
+    # honest ceiling is well above the happy-path rate.
+    LIMIT.check("presence", u["id"], 30, 600,
+                "too many presence updates - wait a few minutes")
     lat, lon = round(b.lat, 3), round(b.lon, 3)
     with closing(db()) as c:
         c.execute("INSERT INTO presence (user_id,geohash6,lat,lon,at) VALUES (%s,%s,%s,%s,%s) "
@@ -1693,6 +1759,12 @@ async def samaritan_respond(alert_id: int, u=Depends(me)):
     way, and so a stranger who wanted the address rather than to help has to
     put their own name to the request.
     """
+    # The one limit here that is about disclosure rather than load: this
+    # endpoint hands out a name and an exact position, so the ceiling bounds
+    # how many alert ids one account can walk. A genuine responder answers one
+    # alert; thirty in ten minutes is not a person helping.
+    LIMIT.check("samaritan_respond", u["id"], 30, 600,
+                "too many responses - wait a few minutes")
     with closing(db()) as c:
         row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
         if not row:

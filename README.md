@@ -252,7 +252,11 @@ to anything.
   services silently. The app ships an onboarding flow for the required toggles,
   and the family's screen shows the watch's own health so a silent failure is
   visible before an emergency rather than during one.
-- **Tokens do not expire.** Fine for a demo, not for deployment.
+- **Tokens do not expire.** Fine for a demo, not for deployment. Access+refresh
+  was considered and rejected: it does not address a stolen phone, where both
+  credentials sit in the same storage, and rotation races with the 60 s
+  heartbeat in a way that logs a wearer out mid-emergency. B4.4 is a sliding
+  session window instead.
 - **An SOS survives a dead network, but nobody is reached until signal returns.**
   The press is dispatched locally first, persisted, and flushed automatically on
   reconnect, and the SOS screen says *"not delivered yet, retrying"* rather than
@@ -304,5 +308,10 @@ stored hashed. The reasoning is in §13 of
 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md), and
 [tests/](tests/) is the proof.
 
-**Still open:** tokens do not expire, and CORS is `*`. Both are fine for a
-tunnelled dev box holding test accounts and must change before deployment.
+CORS is an allowlist that is empty by default (`ALLOWED_ORIGINS`), every write
+endpoint is rate limited except the two where a 429 would invent an emergency,
+and release builds refuse plain http.
+
+**Still open:** tokens do not expire. That is fine for a tunnelled dev box
+holding test accounts and must change before deployment — the design argument
+is in [DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) under B4.4.
