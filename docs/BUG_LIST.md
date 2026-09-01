@@ -30,13 +30,29 @@ against the real database — the handset provably stops being a delivery target
 and provably becomes one again on the next sign-in. Its app half has not been
 run on a phone at all, which leaves it in the same position as BUG-008.
 
+**The band's beacon wake was switched off on 1 Sep 2026.** Not reverted —
+switched off behind two booleans, with the code left in place. That makes four
+entries here **STALE**: BUG-012, BUG-013, BUG-014 and the beacon half of
+BUG-018 describe defects that are still in the code but sit behind a path
+nothing can now reach. They are not fixed, they are unreachable, and they come
+back the moment the feature does. The decision, the cost and the order things
+have to be done in to turn it back on are in
+[BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md).
+
+Two things not to misread from that. **BUG-011 is not stale** — its cause is
+server-side, the switch only removed the reported reproduction, and it should
+still be fixed. And **BUG-010 gets worse, not better**: its severity note used
+to soften itself by pointing at the beacon as the emergency path's floor, and
+that floor is gone.
+
 ---
 
 ## Summary
 
-**18 filed — 8 fixed, 1 partial, 9 open**, one of those deferred by decision.
-Titles only; the entry below each row carries the symptom, the cause and the
-reasoning.
+**18 filed — 8 fixed, 1 partial, 9 open.** Three of the open ones (012, 013,
+014) and half of a fourth (018) are **stale**: still in the code, no longer
+reachable, because the feature that reached them was switched off. Titles only;
+the entry below each row carries the symptom, the cause and the reasoning.
 
 | # | Bug | Severity | Status |
 |---|---|---|---|
@@ -49,21 +65,32 @@ reasoning.
 | 007 | The band gets no confirmation buzz for an SOS | Medium | ✅ Fixed · device-verified |
 | 008 | Responders are lost if the app was closed when they answered | Medium | ✅ Fixed — **not device-verified** |
 | 009 | One SOS produces 2–3 notifications while the app is open | Medium | ✅ Fixed · device-verified — `presentAlarm` finding still open |
-| 010 | The band only reconnects while the screen is on | High | ⬜ Open |
-| 011 | Every SOS from a killed app also raises a false `watch_lost` | High | ⬜ Open |
-| 012 | Any band's SOS beacon fires on every Nigehban phone in range | Critical | ⬜ Open |
-| 013 | A stranger's press silently discards your own band's SOS | Critical | ⬜ Open |
-| 014 | A band reboot can discard the next real press | High | ⬜ Open |
+| 010 | The band only reconnects while the screen is on | High — **raised**, see entry | ⬜ Open |
+| 011 | Every SOS from a killed app also raises a false `watch_lost` | High | ⬜ Open — repro removed, cause not |
+| 012 | Any band's SOS beacon fires on every Nigehban phone in range | Critical | 💤 Stale — beacon wake switched off |
+| 013 | A stranger's press silently discards your own band's SOS | Critical | 💤 Stale — beacon wake switched off |
+| 014 | A band reboot can discard the next real press | High | 💤 Stale — beacon wake switched off |
 | 015 | Nothing restores the band link after the app is killed | High | ⬜ Open |
 | 016 | Advertising fields fail silently when they no longer fit | Low now, High on the next field | ⬜ Open · latent |
 | 017 | Sign-out leaves the handset receiving the old account's alerts | High | ✅ Fixed — **untested in the app** |
-| 018 | Beacon wake opens the app for an SOS — and other apps on one phone | Low · one handset | 🟦 Deferred — may be removed rather than fixed |
+| 018 | Beacon wake opens the app for an SOS — and other apps on one phone | Low · one handset | 💤 Stale in the beacon · ⬜ open in `nigehban-alarm` |
 
-**Key:** ✅ fixed · 🟨 partially fixed · ⬜ open · 🟦 deferred by decision.
+**Key:** ✅ fixed · 🟨 partially fixed · ⬜ open · 🟦 deferred by decision ·
+💤 **stale** — the defect is still in the code, but the feature that reached it
+is switched off, so nothing can currently trigger it.
+
 "Device-verified" means the 1 Sep 2026 pass saw it working on a real phone
 against the real band; a fix without it is written but unproven, and on a
 safety device those are not the same claim. "Deferred" means the decision not
 to work on it is itself recorded, in the entry, with the reasoning.
+
+**Stale is not fixed, and the distinction matters here more than usual.** Every
+line of BUG-012, BUG-013 and BUG-014 is still in the tree, correct as written,
+and will describe live behaviour again on the day the two booleans in
+[BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md) go back to `true`. They stay in
+this file at full detail for exactly that reason — the work to close them is the
+precondition for turning the feature back on, not something that stopped being
+needed.
 
 Three rows are worth reading twice. **008** and **017** are both fixed with the
 same gap: in each case the unverified half is the behaviour of a phone that is
@@ -75,11 +102,20 @@ why the fallback notification was posting at all.
 
 The open list splits into three groups. The beacon cluster — **012**, **013**,
 **014**, **016** — is one branch, `fix/beacon-identity-and-dedup`, and two of
-those are Critical. The background-timer cluster — **010** then **015** — is
-strictly ordered, because 015 cannot work until 010 has replaced the JS timer.
-The rest — **003**, **004**, **011** — stand alone. **018** touches both
-clusters and is deliberately not scheduled; it may be closed by removing the
-feature rather than by fixing it.
+those are Critical; three of the four are now stale, and that branch has become
+the *precondition for turning the feature back on* rather than a fix to
+schedule. The background-timer cluster — **010** then **015** — is strictly
+ordered, because 015 cannot work until 010 has replaced the JS timer, and it is
+now the only thing standing between a wearer and a dead band on an OEM that
+kills the app. The rest — **003**, **004**, **011** — stand alone. **018** is
+half stale and half live, and the live half is in a different module.
+
+**What to do next, given the switch-off.** BUG-010 is first, and by some
+distance: it was already the highest-value item, and removing the beacon took
+away the one thing that made its severity note read tolerably. BUG-011 is next
+and is cheap — one line in one `UPDATE`, on the server, entirely independent of
+any of this. The beacon cluster comes back when, and only when, somebody is
+ready to reflash every band in the field.
 
 *(File order note: BUG-010 was written up after BUG-016 and physically sits at
 the end of the file, ahead of BUG-017 and BUG-018. The numbering above is
@@ -541,7 +577,11 @@ tidiness is the wrong direction on a safety device.
 
 ## BUG-011 — Every SOS from a killed app also raises a false `watch_lost`
 
-**Status:** OPEN
+**Status:** OPEN — **still open, and deliberately not marked stale.** The beacon
+wake being switched off on 1 Sep 2026
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)) removed the *reproduction*
+below, because an SOS can no longer be raised from a killed app at all. It
+removed nothing of the cause. See "Why this is not stale" at the end.
 **Severity:** High — a contradictory alert lands on the family beside a real emergency
 **Area:** [server/nigehban_server.py](../server/nigehban_server.py)
 
@@ -628,11 +668,41 @@ Making the app send a heartbeat before it raises. It would win the race most of
 the time, and it buys that by delaying a real SOS in order to suppress a
 cosmetic alert. Wrong trade on a safety device, and it leaves the race intact.
 
+### Why this is not stale
+
+The reporter's account attributes this bug to the beacon wake, and the logcat
+above is indeed a beacon SOS. But the beacon is only how the request *arrived*.
+The defect is one `UPDATE` in `/alert` that arms the watchdog against a
+heartbeat it does not refresh, and every ingredient of it is server-side:
+
+```
+mode was 'idle'  +  last_beat is older than BEAT_LOST_S  +  an /alert arrives
+```
+
+Nothing in that requires a killed app or a beacon. Any gap in heartbeating long
+enough to age `last_beat` past `BEAT_LOST_S`, followed by an SOS, reproduces it
+— and BUG-010's collateral section documents exactly such a gap in the ordinary
+case: `useHeartbeat` posts on a `setInterval`, and RN stops those whenever the
+Activity is paused, which is every time the screen goes off. A phone in a
+pocket for ten minutes and then a press on a *connected* band is the same three
+ingredients with no beacon anywhere near it.
+
+So: the switch-off makes this much harder to see, which is worse rather than
+better — a High-severity contradictory alert that now only shows up
+occasionally is one that gets shrugged off. Fix it on the server as planned.
+The change is one line, it has no dependency on any of the band work, and it is
+the cheapest item left on this list.
+
 ---
 
 ## BUG-012 — Any band's SOS beacon fires on every Nigehban phone in range
 
-**Status:** OPEN
+**Status:** STALE — the defect is unchanged and still in the code; the beacon
+wake that reaches it was switched off on 1 Sep 2026
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)), so no phone currently
+registers a filter and no phone can be woken by any band. **This is the reason
+the feature was switched off**, and closing it is the precondition for turning
+the feature back on — not optional work that went away.
 **Severity:** Critical — an emergency is raised on the wrong account, to the wrong family
 **Area:** [BandWake.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWake.kt) · [BandWakeReceiver.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt) · [nigehban_band_nrf52.ino](../nigehban_band_nrf52/nigehban_band_nrf52.ino)
 
@@ -717,7 +787,11 @@ This has to be decided before the firmware is written, not after.
 
 ## BUG-013 — A stranger's press silently discards your own band's SOS
 
-**Status:** OPEN
+**Status:** STALE — unchanged in the code, unreachable while the beacon wake is
+switched off ([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)). Nothing writes
+`KEY_LAST_SEQ` any more, so nothing can poison it. The other half of the reason
+the feature was switched off; closing it is a precondition for turning it back
+on.
 **Severity:** Critical — a real emergency is dropped with no trace on either side
 **Area:** [BandWakeReceiver.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt) · [BandWake.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWake.kt)
 
@@ -777,7 +851,11 @@ lets a stranger poison the state.
 
 ## BUG-014 — A band reboot can discard the next real press
 
-**Status:** OPEN
+**Status:** STALE — same latch as BUG-013, same reason: the beacon wake is
+switched off ([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)) and the dedup
+state is never written. Worth keeping in mind that this one **reproduced on the
+bench with a single band**, so it is the entry most likely to reappear the
+moment anybody re-enables the feature to try it out.
 **Severity:** High — reproduces with one phone and one band, on the bench
 **Area:** [BandWake.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWake.kt) · [nigehban_band_nrf52.ino](../nigehban_band_nrf52/nigehban_band_nrf52.ino)
 
@@ -813,7 +891,12 @@ by definition and there is nothing left to dedup against.
 
 ## BUG-015 — Nothing restores the band link after the app is killed
 
-**Status:** OPEN
+**Status:** OPEN — **and now the only thing covering this case.** The beacon
+wake was switched off on 1 Sep 2026
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)), so the fake-linked state
+described here is no longer merely a state the wearer is *unaware* of: it is
+now a state in which a press reaches nobody at all. Everything below still
+applies; the closing note about the beacon remaining as a floor no longer does.
 **Severity:** High — the wearer walks around in the fake-linked state the beacon was built to escape
 **Area:** [BandWake.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWake.kt) · [App.js](../nigehban-app/App.js) · [bgService.js](../nigehban-app/src/bgService.js)
 
@@ -897,14 +980,24 @@ The open implementation question, and the thing to prototype before committing t
 the rest: the reconnect logic is JavaScript and the receiver has no JS context,
 so something has to bring the RN runtime up headlessly from that service.
 
-### Note
+### Note — **partly overtaken by the switch-off**
 
-This does **not** replace the SOS beacon, and the two must not be merged. At the
-moment of an emergency there is no time to wait on a reconnect that may not
-succeed — a snatch is precisely the case where phone and band are moving apart,
-so it is when a relink is least likely and an alert most needed. This shortens
-the window during which the wearer is unknowingly unprotected; the beacon
-remains the thing that works when the window is still open.
+This was written while the beacon existed, and said: this does **not** replace
+the SOS beacon, and the two must not be merged. At the moment of an emergency
+there is no time to wait on a reconnect that may not succeed — a snatch is
+precisely the case where phone and band are moving apart, so it is when a relink
+is least likely and an alert most needed. This shortens the window during which
+the wearer is unknowingly unprotected; the beacon remains the thing that works
+when the window is still open.
+
+**The argument is still correct and the beacon is no longer there.** With the
+wake switched off, this relink is not a complement to a working emergency path —
+it is the whole of it. That does not make it a sufficient answer; it makes it an
+insufficient answer that is currently the only one on offer, which is worth
+being clear-eyed about before treating BUG-015 as closing the gap. If the
+beacon comes back (BUG-012 and BUG-013 first, then the band-id firmware), this
+paragraph reverts to its original meaning and the two paths should compose
+exactly as described above.
 
 On Android 12+ starting a foreground service from the background is blocked, and
 a BLE scan broadcast is not on the exemption list. `CompanionDeviceManager`
@@ -918,7 +1011,14 @@ survive a Funtouch `kill -9` either.
 
 ## BUG-016 — Advertising fields fail silently when they no longer fit
 
-**Status:** OPEN — latent
+**Status:** OPEN — latent, and **not** stale. This one is firmware-side and the
+firmware was not touched by the beacon switch-off
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)): the band still builds the same
+29-byte advertisement and still discards the return values. What the switch-off
+defers is the *pressure* — the 2-byte band id from BUG-012 that would have taken
+it to exactly 31 of 31 is not being added right now. So the margin is unchanged
+and the trap is unchanged; only the next thing that would have sprung it has
+moved.
 **Severity:** Low today, High the moment anyone adds a field
 **Area:** [nigehban_band_nrf52.ino](../nigehban_band_nrf52/nigehban_band_nrf52.ino)
 
@@ -1081,18 +1181,29 @@ TaskService.java:688), and Doze defers location once the screen has been off a
 while. A minute-plus of dead wristband is not an acceptable floor on a safety
 device even when it does work.
 
-### Severity, honestly
+### Severity, honestly — **revised upward, 1 Sep 2026**
 
-Lower than it first looks, because of `bandWake`. The band's SOS advertisement
-is matched by a `ScanFilter` registered with the **system** via a PendingIntent
+**This section used to soften itself, and the thing it leaned on is gone.** It
+read: lower than it first looks, because of `bandWake` — the band's SOS
+advertisement is matched by a `ScanFilter` registered with the **system** via a
+PendingIntent
 ([BandWake.kt:141-149](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWake.kt#L141-L149)),
-so a press still gets out with the GATT link down and with the app dead. The
-emergency path has a floor here.
+so a press still got out with the GATT link down and the app dead. The emergency
+path had a floor.
 
-Still High, because everything else on the wrist rides the GATT link and stops:
-check-in requests and their buzz, battery, armed / anti-snatch state, and the
-confirmation buzz from BUG-007. The wearer also sees "disconnected" on a band
-they are wearing, which on this product is its own harm.
+**It no longer does.** The beacon wake was switched off
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)), so with the link down there is
+no path at all: the press reaches nothing. High is now the floor of this
+entry's severity rather than a generous reading of it, and **BUG-010 is the
+single highest-value item on this list** — everything about the band's
+availability now rests on the GATT link coming back, and this is the bug that
+stops it doing so.
+
+The rest of the original reasoning stands unchanged: everything on the wrist
+rides the GATT link and stops with it — check-in requests and their buzz,
+battery, armed / anti-snatch state, and the confirmation buzz from BUG-007. The
+wearer also sees "disconnected" on a band they are wearing, which on this
+product is its own harm.
 
 ### Fix — the shape of it
 
@@ -1397,10 +1508,26 @@ exactly who most needs the push to still work.
 
 ## BUG-018 — The beacon wake opens the app for an SOS, and on one phone opens other apps too
 
-**Status:** DEFERRED — recorded 1 Sep 2026, not being worked on, and the feature
-may be removed rather than fixed
-**Severity:** Low as it stands — the SOS is delivered correctly on every phone
-including this one; the cost is unexpected app launches on one handset
+**Status:** SPLIT, and the two halves have different statuses.
+
+- **The beacon half: STALE.** Outcome 3 below was taken on 1 Sep 2026 — the
+  beacon wake was switched off, not removed
+  ([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)).
+  `BandWakeReceiver.onReceive` now returns before it can post a notification or
+  launch anything, so neither the intended app launch nor the Vivo's extra ones
+  can happen through this path.
+- **The implicit-intent half: OPEN, and it is not in this module.** Candidate
+  cause 1 below is duplicated code, and the copy in `nigehban-alarm` was not
+  touched:
+  [NigehbanAlarmModule.kt:433](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt#L433).
+  That one fires on an **incoming family emergency**, which is a live feature on
+  every phone in the field. If the Vivo's other-apps behaviour was cause 1
+  rather than cause 2, switching off the beacon has not fixed it — it has only
+  moved which event triggers it, from your own band's press to a family
+  member's. Untested either way.
+
+**Severity:** Low as it stands — the SOS was delivered correctly on every phone
+including this one; the cost was unexpected app launches on one handset
 **Area:** [BandWakeReceiver.kt](../nigehban-app/modules/nigehban-bandwake/android/src/main/java/com/nigehban/bandwake/BandWakeReceiver.kt) ·
 [NigehbanAlarmModule.kt](../nigehban-app/modules/nigehban-alarm/android/src/main/java/com/nigehban/alarm/NigehbanAlarmModule.kt)
 
@@ -1455,7 +1582,22 @@ Nothing has been captured from the device yet. `adb logcat -b events` filtered o
 `am_` at the moment of a press would separate the two in a single run, and that
 is the first thing to do whenever this is picked up.
 
-### Decision — deferred, and the feature may not survive
+### Decision — taken 1 Sep 2026: outcome 3, by switching off rather than removing
+
+Superseded by the switch-off. The original deferral reasoning is kept below,
+because it is what the decision was made against; what changed is that the
+reporter asked for the feature to stop rather than be fixed, and the two
+Critical entries in the beacon cluster made that the cheap answer rather than a
+sacrifice. The feature is **off, not deleted** — every line of it is still in
+the tree behind two booleans, and
+[BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md) records the cost, the parts it
+does not cover, and the order things must be done in to bring it back.
+
+The cost, stated once more here because this entry is where somebody will look
+for it: on an OEM that runs `kill -9` on a Recents swipe, a band press with the
+app killed now reaches nobody.
+
+**The original deferral reasoning, for the record:**
 
 Deferred deliberately, not forgotten. The reasoning, so it does not have to be
 rebuilt later:
@@ -1494,12 +1636,19 @@ succeed and an alert most needed — the argument already made in BUG-015's clos
 note against merging the two paths. Dropping the direct beacon-to-SOS path buys a
 cleaner wake and pays for it in the worst case the product exists for.
 
-Three outcomes are all still live, and nothing here commits to any of them:
+Three outcomes were live when this was written. **Outcome 3 was taken**, in its
+cheapest form — the beacon-to-SOS path is switched off, and the relink that was
+meant to replace it (BUG-015) has not been built, so there is currently nothing
+in its place. That gap is the deliberate cost, and BUG-010 → BUG-015 is the
+work that closes it.
 
 1. Keep the path as it is and accept the Vivo's behaviour.
 2. Keep it, but stop launching an activity — post the notification and let the
-   wearer tap SEND IT NOW, at the cost of the hands-free case.
-3. Remove the beacon-to-SOS path in favour of the relink.
+   wearer tap SEND IT NOW, at the cost of the hands-free case. **Still the most
+   likely shape of a return**, and worth reconsidering alongside the band-id
+   work rather than reflexively restoring the launch.
+3. ✅ **Taken.** Remove the beacon-to-SOS path in favour of the relink — done as
+   a switch-off, with the relink still outstanding.
 
 ### Not to be confused with
 

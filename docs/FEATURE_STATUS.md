@@ -59,11 +59,16 @@ most of them were invisible from the UI:
 |---|---|---|
 | BUG-010 | The band only reconnects while the screen is on — `retrySoon` is a `setTimeout`, and Android stops those when the activity is not visible | High |
 | BUG-011 | Every SOS from a killed app also raises a false `watch_lost`, so a contradictory alert lands beside a real emergency | High |
-| BUG-012 | Any band's SOS beacon fires on **every** Nigehban phone in range — an emergency raised on the wrong account, to the wrong family | Critical |
-| BUG-013 | A stranger's press silently discards your own band's SOS | Critical |
-| BUG-014 | A band reboot can discard the next real press | High |
+| BUG-012 | Any band's SOS beacon fires on **every** Nigehban phone in range — an emergency raised on the wrong account, to the wrong family | Critical — 💤 stale |
+| BUG-013 | A stranger's press silently discards your own band's SOS | Critical — 💤 stale |
+| BUG-014 | A band reboot can discard the next real press | High — 💤 stale |
 | BUG-015 | Nothing restores the band link after an OEM kills the app — the wearer carries a band that looks linked and is not | High |
 | BUG-016 | Advertising fields fail silently once they no longer fit in 31 bytes | Low today |
+
+💤 **stale** — the defect is still in the code, but the band's beacon wake was
+switched off on 1 Sep 2026, so nothing can currently reach it. It is not fixed;
+it comes back with the feature. See
+[BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md).
 
 Still open from the original nine: **BUG-003** (`lastError` is collected and
 rendered by nothing), **BUG-004** (the `error:` status path can still put a raw
@@ -74,8 +79,16 @@ which matters because §3.11 below treats it as observed and working.
 **What that does to the scoreboard:** the ✅ column is stronger than it reads
 below on the app's own behaviour and weaker on the band link. Nothing in the
 band's connection story should be treated as settled until BUG-010 and BUG-015
-are fixed, and BUG-012/013 mean the beacon path is **not** safe to demo with
-more than one band in the room.
+are fixed.
+
+**The beacon path is switched off as of 1 Sep 2026** — BUG-012 and BUG-013 made
+it unsafe with more than one band in the room, and rather than fix them now the
+feature was disabled behind two booleans, with the code left in place
+([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)). The consequence to hold on to
+while reading anything below about the band: **an SOS only leaves the wrist
+while the app or its foreground service is alive.** On an OEM that runs `kill
+-9` on a Recents swipe, a press with the app killed reaches nobody, which is
+the pre-`3d5efb9` behaviour restored on purpose.
 
 ---
 
@@ -773,9 +786,12 @@ leave in either direction.
       list now. BUG-010 (the retry timer does not fire with the screen off) and
       BUG-015 (nothing survives an OEM kill to retry at all). BUG-010 has to
       land first: BUG-015's fix needs a timer that actually fires.
-- [ ] **Put a band id in the beacon** — BUG-012 and BUG-013. Today any band's
-      press is accepted by every Nigehban phone in range, and a stranger's press
-      can discard your own band's SOS. Not safe to demo with two bands present.
+- [ ] **Put a band id in the beacon** — BUG-012 and BUG-013. Any band's press is
+      accepted by every Nigehban phone in range, and a stranger's press can
+      discard your own band's SOS. **The beacon wake is switched off** because
+      of these two ([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)), so this is
+      no longer a fix to schedule — it is the precondition for turning the
+      feature back on, and it needs new firmware on every band in the field.
 - [ ] Surface `lastError` (BUG-003), and stop the `error:` path putting raw
       library strings on screen (BUG-004) — one change, since the second needs
       the first.

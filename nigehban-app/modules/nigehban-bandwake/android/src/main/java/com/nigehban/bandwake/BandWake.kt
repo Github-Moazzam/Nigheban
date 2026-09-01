@@ -56,6 +56,30 @@ import android.os.Build
  */
 object BandWake {
 
+  /**
+   * THE SWITCH. `false` means this phone is never woken by the band.
+   *
+   * Turned off on purpose on 1 Sep 2026 -- nothing below is deleted, and
+   * flipping this back to `true` (with `BAND_WAKE_ENABLED` in
+   * `src/bandWake.js`, and the commented-out effects in App.js) restores the
+   * feature exactly as it was. The reasoning is in docs/BAND_WAKE_DISABLED.md;
+   * the short version is BUG-012 and BUG-013, which are Critical and which need
+   * a band id in the advertisement -- new firmware in the field -- before the
+   * wake can be trusted with more than one band in the room.
+   *
+   * This switch is separate from the JavaScript one, and both are needed. The
+   * JS one stops the app *asking* to be woken. This one stops the *system*
+   * delivering a wake that no JavaScript ever asked for: a registration left in
+   * the Bluetooth stack by an earlier build, or one put back by
+   * `BandWakeBootReceiver` after a reboot, an app update or a Bluetooth toggle.
+   * Those paths run in a process with no React context and would not see the JS
+   * switch at all.
+   */
+  const val FEATURE_ENABLED = false
+
+  private const val DISABLED_REASON =
+    "band beacon wake is switched off (see docs/BAND_WAKE_DISABLED.md)"
+
   // ---- the wire format, shared with nigehban_band_nrf52.ino ----------------
   //
   //     FF FF   'N' 'G'   flag   seq
@@ -187,6 +211,18 @@ object BandWake {
   @SuppressLint("MissingPermission")
   fun start(context: Context): String? {
     val app = context.applicationContext
+
+    // Switched off. Take down anything an earlier build left registered rather
+    // than merely declining to add to it: a phone updating from a build that
+    // had this on is carrying both a live registration in the Bluetooth stack
+    // and an `armed` flag that BandWakeBootReceiver would act on after the next
+    // reboot. `stop` clears both, and this is the one call site that reliably
+    // runs on such a phone.
+    if (!FEATURE_ENABLED) {
+      stop(app)
+      return recordError(app, DISABLED_REASON)
+    }
+
     prefs(app).edit().putBoolean(KEY_ARMED, true).apply()
 
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -227,8 +263,20 @@ object BandWake {
 
   fun isArmed(context: Context): Boolean = prefs(context).getBoolean(KEY_ARMED, false)
 
-  /** Re-arm after a reboot or a Bluetooth toggle, but only if it was armed. */
+  /**
+   * Re-arm after a reboot or a Bluetooth toggle, but only if it was armed.
+   *
+   * While the feature is off this does the opposite: a standing instruction
+   * left behind by an earlier build is withdrawn instead of acted on. Without
+   * this the switch would be defeated by the first reboot -- the boot receiver
+   * runs in a process with no JavaScript in it, so the JS switch cannot be
+   * consulted, and `armed` is still `true` in storage from before the update.
+   */
   fun restartIfArmed(context: Context) {
+    if (!FEATURE_ENABLED) {
+      if (isArmed(context)) stop(context)
+      return
+    }
     if (isArmed(context)) start(context)
   }
 
