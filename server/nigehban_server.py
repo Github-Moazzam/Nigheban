@@ -1276,6 +1276,34 @@ def register_device(b: DeviceIn, u=Depends(me)):
     return {"ok": True}
 
 
+@app.delete("/device/{install_id}")
+def stop_push_to_device(install_id: str, u=Depends(me)):
+    """Stop pushing to this handset, because nobody is signed in on it any more.
+
+    Sign-out used to be entirely local: the phone dropped its session and the
+    server was never told. The row here kept this account's user_id and a live
+    token, so every alert to this person's family went on being delivered to a
+    handset they had signed out of -- name, alert kind, and the maps link to
+    where they are. On a phone that has changed hands, a stranger reads it.
+
+    **Only the token is cleared. The account is not touched.** Nothing about the
+    user, their family, their history or their band changes, and the next
+    sign-in on this phone fills the token straight back in through POST /device.
+    `user_id` stays because the column is NOT NULL, and because there is no
+    reason to disturb it: push_tokens_for() already filters on the token, so
+    clearing that is the entire fix.
+
+    Scoped with `AND user_id=%s` so a guessed install id cannot silence somebody
+    else's phone. Deliberately idempotent -- signing out twice, or from a phone
+    that never registered, is not an error and must not fail the sign-out.
+    """
+    with closing(db()) as c:
+        c.execute("UPDATE devices SET push_token=NULL WHERE id=%s AND user_id=%s",
+                  (install_id, u["id"]))
+        c.commit()
+    return {"ok": True}
+
+
 def push_tokens_for(uids):
     """Push tokens for a set of users."""
     if not uids:

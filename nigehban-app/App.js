@@ -27,7 +27,9 @@ import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
 import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/watch';
 import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
-import { registerBackgroundNotifications } from './src/bgNotifications';
+import {
+  registerBackgroundNotifications, unregisterBackgroundNotifications,
+} from './src/bgNotifications';
 import { activeAlarm, consumeLaunchAlertId, presentAlarm, stopAlarm } from './src/alarm';
 import {
   consumePendingBandSos, startBandWake, stopBandWake, subscribeBandSos,
@@ -36,7 +38,7 @@ import { runFirstRunAsks } from './src/permissions';
 import {
   DEFAULT_CHANNEL_ID, clearOwnSosNotification, registerPushToken,
   sendEmergencyAlarmIfNothingShown, setupNotificationChannels,
-  showOwnSosNotification, subscribeNotificationTaps,
+  showOwnSosNotification, stopPushToThisPhone, subscribeNotificationTaps,
 } from './src/notifications';
 
 const TABS = [
@@ -975,6 +977,20 @@ function Main() {
     // -- a different person, on a different database -- inherited the previous
     // one's wristband and started auto-connecting to it on launch.
     try { await band.disconnect?.(); } catch { /* nothing paired, or already down */ }
+
+    // Sign-out used to be entirely local, so the server went on pushing this
+    // account's family emergencies -- names, and a link to where somebody is
+    // right now -- to a handset nobody was signed in on. Two halves, and the
+    // order matters:
+    //
+    //   1. Tell the server to stop. This must come *before* clearSession(),
+    //      which destroys the token the call authenticates with. Best effort:
+    //      a sign-out with no signal must still sign the person out.
+    //   2. Take the wake-up away locally, which needs no network and is
+    //      therefore what actually covers the offline case in 1.
+    await stopPushToThisPhone(session);
+    await unregisterBackgroundNotifications();
+
     await stopBackgroundWatch();
     await clearSession();
     await clearQueue();
