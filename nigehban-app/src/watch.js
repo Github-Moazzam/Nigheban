@@ -106,6 +106,18 @@ export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt, vir
   const state = useRef({ mode, bandLink, bandBatt, phoneBatt, virtual });
   state.current = { mode, bandLink, bandBatt, phoneBatt, virtual };
 
+  // The beat is also how a band DISCONNECT reaches the server -- see
+  // server/watch_lost.py. `band_link` going true -> false between two beats is
+  // the disconnect event as far as the server is concerned, and on a sixty
+  // second interval that event could be reported anything up to a minute late.
+  // A minute is a long time in the middle of an SOS, so a link change while
+  // armed sends one immediately rather than waiting for the tick.
+  //
+  // `beatNow` is held in a ref for the same reason `raise` is in App.js: the
+  // effect below must depend on the link state alone, not on a closure that is
+  // rebuilt whenever a battery reading changes.
+  const beatNow = useRef(null);
+
   useEffect(() => {
     if (!session?.token || mode === 'idle') return undefined;
     let alive = true;
@@ -144,10 +156,24 @@ export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt, vir
       } catch { /* the watchdog exists precisely to notice this */ }
     };
 
+    beatNow.current = beat;
     beat();                                  // one immediately, so arming counts
     const id = setInterval(beat, BEAT_MS);
-    return () => { alive = false; clearInterval(id); };
+    return () => { alive = false; beatNow.current = null; clearInterval(id); };
   }, [session, mode]);
+
+  // The link changed while armed: tell the server now.
+  //
+  // Deliberately not skipped on the first run. The first pass through this
+  // effect coincides with the beat the effect above already fires on arming,
+  // so the cost of not tracking "is this the first render" is one duplicate
+  // heartbeat per arming -- an idempotent write. The cost of getting the
+  // tracking wrong in the other direction is a real disconnect that goes
+  // unreported for a minute, and those are not the same mistake.
+  useEffect(() => {
+    if (!session?.token || mode === 'idle') return;
+    beatNow.current?.();
+  }, [session, mode, bandLink]);
 }
 
 /**
