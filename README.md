@@ -247,6 +247,23 @@ python tests/test_consent_and_sweeper.py
 A check-in created there escalates on its own deadline with nothing connected
 to anything.
 
+> `watch_lost` needs migration 006. Run `python server/migrate_pg.py` after
+> pulling this — without it every `POST /heartbeat` fails with
+> `UndefinedColumn`, which is a wearer's "I am still here" being thrown away
+> once a minute. The server checks at startup and says so in the terminal.
+
+The one exception to the end-to-end rule is `watch_lost` — the alert that pages
+a family about an absence. It fires on a *transition* (there was a live band
+link, an alert was running, and then the link went), and the states that get it
+wrong are the ones nobody can stage on a desk: a band dropping in the same
+second an SOS is pressed, a phone silent since lunch, a link flapping in a
+stairwell. So the rule lives in `server/watch_lost.py` as pure functions and is
+asserted directly, with no server and no database:
+
+```bash
+python tests/test_watch_lost_transition.py
+```
+
 ---
 
 ## Known limits
@@ -255,6 +272,15 @@ to anything.
   the phone is gone, the server's heartbeat watchdog tells the family with the
   last known position — the BLE mesh that would let the band reach help directly
   is designed but not built (see the roadmap).
+- **`watch_lost` needs a real wristband, and virtual mode cannot raise it at
+  all.** The alert fires on one transition: a live link to a *physical* band,
+  an alert running, and then the link goes. Virtual mode reports
+  `band_link=true` because the phone runs the band's firmware itself, but there
+  is no wristband to lose — so a virtual-mode phone that dies mid-SOS raises no
+  `watch_lost`, and neither does switching a linked band over to virtual mode.
+  The SOS itself still pages the family; what they do not get is a second alert
+  about a device that was never in play. `physical_link` and the `if virtual:`
+  branch in `server/watch_lost.py` are the two places that decide it.
 - **Android only.** iOS forbids background BLE scanning without a service-UUID
   filter and has no foreground-service equivalent.
 - **Some OEMs will still kill the app.** Xiaomi, Huawei and Oppo kill foreground
