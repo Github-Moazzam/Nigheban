@@ -1068,17 +1068,11 @@ function Main() {
   // there is no asking afterwards how fast somebody was going -- which is why
   // this is a standing watch and not something the detector starts.
   //
-  // >>> TEST SETTING: unconditionally on.
-  //
-  // It used to be gated on `!!session && (band connected || virtual)`, which is
-  // the right production answer -- a GPS watch is the most expensive thing this
-  // app does and a family member watching from across town has no impacts to
-  // classify. It is also why the readout could not be checked: in BLE mode with
-  // no band paired, nothing was watching, and the Band console's speed tile
-  // reported an empty sky rather than a watch that had never been started.
-  //
-  // Restore the condition above once the speedometer is trusted.
-  useSpeedWatch(true);
+  // It costs battery, so it is tied to the phone actually acting as a safety
+  // device rather than merely being signed in. A family member watching from
+  // across town has no impacts to classify, and their emergencies arrive by
+  // push whether or not this is running.
+  useSpeedWatch(!!session && (band.status === 'connected' || band.mode !== MODES.BLE));
 
   // ---- live socket --------------------------------------------------------
   const serverOnline = useLive(session, {

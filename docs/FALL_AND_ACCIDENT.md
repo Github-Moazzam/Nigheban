@@ -358,73 +358,22 @@ finding.
 fixes:
 
 1. **`coords.speed`** — the GNSS chip's own Doppler measurement. Direct,
-   instantaneous, accurate to a fraction of a km/h, and it works at walking
-   pace. This is the good one.
-2. **Distance between fixes ÷ time**, when the chip declines to report a speed.
+   instantaneous, accurate to a fraction of a km/h. This is the good one.
+2. **Distance between consecutive fixes ÷ time**, when the chip declines to
+   report speed at all.
 
-#### Android does not report an absent speed as absent. It reports it as zero.
+The second is not a nicety. Android satisfies a `Balanced`-accuracy request
+from fused/network location, and those fixes routinely carry **no speed field**.
+That is a deadlock rather than a degradation: the watch idles on Balanced to
+save battery and only opens up to real GNSS once it sees road speed — so with
+`speed` null it never sees road speed, never opens up, and **accident detection
+is silently off for the whole journey.** It needs speed in order to start
+measuring speed. `noteFix()` breaks that loop.
 
-This is the single most expensive misunderstanding this file has held, and it
-was live for three releases.
-
-`android.location.Location` carries a speed alongside a `hasSpeed()` flag, and
-`getSpeed()` returns **0.0f** when that flag is false. expo-location passes the
-number through without consulting the flag
-(`LocationResults.kt`: `speed = location.speed.toDouble()`), so on Android
-`coords.speed` is **never null**. iOS uses the opposite convention — CLLocation
-reports **-1** for "no reading" — and the old `speed == null` guard was written
-against that one.
-
-Both halves of the detector broke, silently:
-
-- Every fix without a real speed was stored as **a genuine 0 km/h sample**. The
-  live readout flickered between the true speed and zero, and an impact landing
-  on one of those zeros was described to the family as *"the vehicle stopped
-  dead"*.
-- The distance fallback became **unreachable on Android**, because it sits
-  behind "did the chip decline to answer" and the chip appeared to answer every
-  time.
-
-So the test is `speed > 0`, and a zero is treated as the non-answer it usually
-is — corroborated against the positions before it is believed.
-
-#### What guards the derived figure
-
-- **The baseline widens.** It is not "the previous fix": it is the newest fix
-  that is *further away than the uncertainty*. At a 1 s cadence a person on foot
-  covers ~1.4 m, far inside any fix's accuracy, so measured against the previous
-  fix alone **walking is indistinguishable from standing still**. Measured
-  against the newest fix that has cleared the noise, it reads as walking.
-- **Movement must beat the uncertainty by 2×** (`DERIVE_SLOP_K`), with an 8 m
-  floor. `accuracy` is a confidence radius, so a still phone scatters its fixes
-  across it and two of them can sit a full diameter apart having gone nowhere.
-  Requiring only "further apart than the accuracy" reads stationary wander as
-  motion — measured against a real still phone it produced a confident 11 km/h
-  out of nothing, which is how a parked car arms crash detection.
-- **The interval is 1–30 s.** Under a second there is nothing to measure; past
-  thirty the straight line stops describing the route.
-- **Over 300 km/h is a provider jump**, not a car, and is discarded.
-- **A standstill has to be earned.** A zero is recorded only when the positions
-  agree, after 5 s of watching, from a fix accurate to 25 m or better. Anything
-  less precise records *nothing* rather than asserting a stop nobody observed.
-
-#### Everything that sees a position feeds the same history
-
-`noteFix()` is the only entry point, and all four callers use it, so a fix is
-indistinguishable downstream from wherever it arrived:
-
-| Source | When it runs |
-|---|---|
-| `useSpeedWatch` (`motion.js`) | whenever the app is on screen |
-| The Home screen's watch | whenever Home is on screen |
-| The background foreground-service task (`bgService.js`) | whenever the service is up, **including off screen** |
-| The heartbeat and SOS last-known reads (`watch.js`) | every 60 s, and on every alert |
-
-The background one is not an optimisation. Android stops delivering foreground
-location the moment the app leaves the screen, and a phone in a pocket is where
-a phone is during a crash — that service had been receiving positions all along
-and discarding every one of them, while `motion.js` went blind. Duplicate fixes
-are dropped on their timestamp.
+The derived figure is guarded: the movement must exceed the fixes' own accuracy
+(a 100 m-accurate fix wanders ~100 m on a table, which over 15 s reads as
+24 km/h out of nothing), the interval must be 1–60 s, and anything over
+300 km/h is a provider jump rather than a car.
 
 **It is never integrated from the accelerometer, and never will be.** Velocity
 from a wrist IMU means double-integrating a noisy signal; the error compounds so
@@ -463,10 +412,6 @@ Check it before concluding a real impact was missed by the thresholds.
 | `STOP_KMH` | 5 km/h | `motion.js` |
 | `SPEED_MEMORY_MS` | 20 s | `motion.js` |
 | `RESUME_STABLE_MS` | 20 s | `motion.js` |
-| `DERIVE_MIN_S` / `DERIVE_MAX_S` | 1 s / 30 s | `motion.js` |
-| `DERIVE_SLOP_K` / `DERIVE_MIN_M` | 2× accuracy / 8 m | `motion.js` |
-| `STILL_MIN_S` / `STILL_MAX_ACC_M` | 5 s / 25 m | `motion.js` |
-| `WATCH_OPTS` | **BestForNavigation, 1 s, no distance floor** | `motion.js` |
 | `INCIDENT_WINDOW_S` | fall 45 s, accident 30 s | `motion.js` **and** `nigehban_server.py` |
 
 **The fall and impact numbers exist twice on purpose** — once in the firmware,
@@ -631,30 +576,6 @@ Do this as a passenger, with somebody else driving.
 | 20 | Repeat 16 and pull over immediately | **Not** stood down — the question stands |
 
 **Test 20 is the one that proves the design.** Stopping must never cancel.
-
-### 6. The speedometer itself, on foot
-
-The Band console's crash-test card carries a raw GPS line under the tile —
-source, speed, the chip's own number, accuracy, age, sample count. Read it
-before concluding the speedometer is broken; it is the difference between the
-three completely different faults that all render as "0 km/h".
-
-| # | Test | Expect |
-|---|---|---|
-| 21 | Stand still outdoors, phone in hand | `still` or `chip`, under 1 km/h, ± under 10 m |
-| 22 | Walk twenty paces | ticks every 1–2 s, 4–6 km/h, source `chip` or `derived` |
-| 23 | Put the phone on a table for a minute | stays under ~1 km/h and **never** reads as travelling |
-| 24 | Stand indoors, away from a window | mostly `none` with a large ± — this is GPS, not a bug |
-
-**Test 23 is the one that matters.** A speedometer that invents motion from
-stationary GPS wander arms crash detection in a car park.
-
-> ⚠️ **The watch is currently pinned to its test settings** — always on,
-> BestForNavigation, 1 s, foreground *and* background, regardless of whether a
-> band is connected. It holds the GPS on continuously and the battery cost is
-> visible. The production gating is written down in the comments at
-> `motion.js`'s `WATCH_OPTS`, `bgService.js`'s `startLocationUpdatesAsync`, and
-> `App.js`'s `useSpeedWatch(true)`; all three say what to restore.
 
 ### 6. Power
 

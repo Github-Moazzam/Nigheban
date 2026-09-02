@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { call } from './api';
-import { noteFix } from './motion';
 
 // expo-location is loaded defensively, as everywhere else: an older build must
 // degrade to "no position with this heartbeat", never take the app down.
@@ -70,12 +69,6 @@ export async function lastKnownFix() {
   try {
     const pos = Location ? await Location.getLastKnownPositionAsync() : null;
     if (!pos?.coords) return null;
-    // Free, and occasionally the only thing there is. A cached fix is usually
-    // one motion.js already has -- noteFix keys on the timestamp and drops the
-    // repeat -- but when the watch has been shut down or has never run, this is
-    // the sole position the app sees, and a stale sample that knows it is stale
-    // beats no history at all.
-    noteFix(pos.coords, pos.timestamp || Date.now());
     return {
       lat: pos.coords.latitude,
       lon: pos.coords.longitude,
@@ -128,10 +121,6 @@ export function useHeartbeat(session, { mode, bandLink, bandBatt, phoneBatt, vir
       let pos = null;
       try {
         pos = Location ? await Location.getLastKnownPositionAsync() : null;
-        // Same reasoning as lastKnownFix: this already reads a position every
-        // minute for the watchdog, and dropping it on the floor afterwards was
-        // free data thrown away.
-        if (pos?.coords) noteFix(pos.coords, pos.timestamp || Date.now());
       } catch { /* permission denied, or no fix yet */ }
       try {
         await call(session, '/heartbeat', {

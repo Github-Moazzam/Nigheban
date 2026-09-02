@@ -43,32 +43,11 @@ export default function Band({ band, serverOnline }) {
   }, []);
   const speedCtx = speedWatchStatus();
 
-  // ---- what the GPS actually said, in words ------------------------------
-  //
-  // The tile above it is one number, and one number cannot be debugged from a
-  // moving vehicle: "0 km/h" is the same pixel whether the chip measured a
-  // standstill, handed back Android's fake zero, or was never asked because
-  // nothing was watching. This line is the difference, and it is the whole
-  // reason a speed fault is now findable without a laptop attached.
-  //
-  //   chip    -- the GNSS Doppler reading, the good one
-  //   derived -- measured from how far the fix moved, because the chip said 0
-  //   still   -- a zero corroborated by positions that did not move
-  //   none    -- no reading, and the reason why
-  const gps = (() => {
-    const f = speedCtx.fix;
-    if (speedCtx.error) return `watch not running — ${speedCtx.error}`;
-    if (!f) return 'no fix yet — the watch is running, nothing has arrived';
-    const bits = [f.source];
-    bits.push(f.kmh == null ? 'no speed' : `${f.kmh.toFixed(1)} km/h`);
-    bits.push(`raw ${f.raw == null ? 'null' : `${Number(f.raw).toFixed(2)} m/s`}`);
-    bits.push(`±${f.acc == null ? '?' : Math.round(f.acc)} m`);
-    if (f.movedM != null) bits.push(`${Math.round(f.movedM)} m / ${f.dtS.toFixed(0)} s`);
-    bits.push(`${Math.round(f.ageMs / 1000)} s ago`);
-    bits.push(`${speedCtx.samples} samples`);
-    if (f.why) bits.push(f.why);
-    return bits.join('  ·  ');
-  })();
+  // Whether the watch is even running. App.js only arms it for a phone acting
+  // as a safety device, so BLE mode with no band connected legitimately has no
+  // speed at all -- and reporting that as "no fix yet" would send you looking
+  // for a GPS fault that is not there.
+  const speedWatchOff = !virtual && band.status !== 'connected';
   // Only so the note can say "armed". The seeded samples age out of
   // motion.js on their own; nothing here holds the arming.
   const [armedAt, setArmedAt] = useState(0);
@@ -145,16 +124,14 @@ export default function Band({ band, serverOnline }) {
                 latch carrying it through a tunnel -- the case a driver hit at
                 speed depends on, and the one that would be invisible if this
                 only ever reported the live reading. */}
-            {/* One decimal, not a rounded integer. The difference between
-                "0 km/h" and "0.4 km/h" is the difference between a chip that
-                measured a standstill and one that is idling on noise, and
-                rounding it away is rounding away the diagnosis. */}
             <Stat label="Speed seen" icon="activity"
-                  value={speedCtx.nowKmh == null ? '—' : `${speedCtx.nowKmh.toFixed(1)} km/h`}
-                  sub={!speedCtx.wasTravelling ? 'an impact now = ignored'
+                  value={speedCtx.nowKmh == null ? '—' : `${Math.round(speedCtx.nowKmh)} km/h`}
+                  sub={speedWatchOff ? 'not watching — no band connected'
+                       : !speedCtx.wasTravelling ? 'an impact now = ignored'
                        : speedCtx.sawSpeed ? 'an impact now = accident'
                        : 'an impact now = accident (in a vehicle, no fix)'}
-                  tone={speedCtx.wasTravelling ? C.amber : C.dim} />
+                  tone={speedWatchOff ? C.dim
+                        : speedCtx.wasTravelling ? C.amber : C.dim} />
           </View>
         </View>
         <Text style={s.note}>
@@ -164,15 +141,6 @@ export default function Band({ band, serverOnline }) {
           accident countdown. Do it the other way round and nothing happens — that is
           the speed gate working, not a fault.
           {armedAt ? ' Armed — the window closes 20s after you pressed it.' : ''}
-        </Text>
-        <Text style={s.gps}>{gps}</Text>
-        <Text style={s.note}>
-          The line above is the last position fix, raw. Walk with the phone and it
-          should tick every second or so: "chip" while GNSS has you, "derived" when
-          the chip hands back a zero and the distance between fixes has to answer
-          instead. "still" is a standstill it can vouch for. Indoors you will mostly
-          see "none" and a large ±, because GPS does not work through a roof — take
-          it outside before concluding anything is broken.
         </Text>
       </Card>
 
@@ -304,8 +272,9 @@ export default function Band({ band, serverOnline }) {
                   almost always this reading being blank. */}
               <Stat label="Speed" icon="navigation"
                     value={speedCtx.nowKmh == null ? '—'
-                                                   : `${speedCtx.nowKmh.toFixed(1)} km/h`}
-                    sub={speedCtx.error ? 'GPS unavailable — crash detection OFF'
+                                                   : `${Math.round(speedCtx.nowKmh)} km/h`}
+                    sub={speedWatchOff ? 'not watching — no band connected'
+                         : speedCtx.error ? 'GPS unavailable — crash detection OFF'
                          : speedCtx.wasTravelling ? 'crash detection armed'
                          : speedCtx.armed ? 'not travelling'
                          : 'no fix yet'}
@@ -449,8 +418,4 @@ const s = StyleSheet.create({
   logText: { fontFamily: mono, color: C.dim, fontSize: 11, flex: 1, lineHeight: 16 },
 
   note: { ...T.meta, color: C.faint },
-  // Monospace, like the wire log and for the same reason: this line is read by
-  // comparing it against itself a second ago, and a proportional face makes the
-  // numbers jump about while you are trying to watch them change.
-  gps: { fontFamily: mono, color: C.dim, fontSize: 11, lineHeight: 16 },
 });
