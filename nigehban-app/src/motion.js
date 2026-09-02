@@ -53,7 +53,7 @@
  * holding does the rest.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 
 let Location = null;
@@ -110,20 +110,40 @@ export const INCIDENT_WINDOW_S = { fall: 45, accident: 30 };
 /** Samples older than this are dropped outright. */
 const HISTORY_MS = 60000;
 
-// ---- how hard the sampling works, and when -------------------------------
+// ---- how hard the sampling works -------------------------------------------
 //
-// A high-accuracy GPS watch costs 30-50 mA. Held on all day it is a bigger
-// drain than everything else in this app combined, and a safety device whose
-// battery does not last the day is not a safety device.
+// ONE WATCH, FLAT OUT, FROM THE MOMENT IT IS ARMED.
 //
-// So the watch is adaptive. It idles on a cheap, coarse fix that is easily good
-// enough to answer "is this person in a vehicle", and only opens up to a real
-// GNSS rate once the answer is yes. Standing still, in a house, asleep -- the
-// state the phone is in for most of its life -- it costs almost nothing.
-const IDLE_WATCH  = { timeInterval: 15000, distanceInterval: 25 };
-const RIDE_WATCH  = { timeInterval: 2000,  distanceInterval: 0 };
-/** How long below VEHICLE_KMH before dropping back to the cheap watch. */
-const RIDE_EXIT_MS = 90000;
+// >>> THIS IS THE TEST SETTING. It is deliberately the most expensive thing
+// >>> this app does, and it is meant to be walked back once the readings are
+// >>> trusted. See the note at the bottom of this block.
+//
+// What was here was adaptive: a cheap 15 s Balanced fix that only opened up to
+// real GNSS after it had already seen 25 km/h. That saved 30-50 mA and it made
+// the feature both untestable and partly self-defeating:
+//
+//   - The cheap fixes are exactly the ones that carry no usable speed, so the
+//     watch needed a speed reading in order to start asking for speed
+//     readings. On a phone where the coarse provider answered every request,
+//     the fast watch never opened for the whole journey.
+//   - Nothing below vehicle speed was ever measured at all, so there was no way
+//     to check the speedometer short of driving. You cannot verify a
+//     speedometer by walking across a room if it only wakes up in a car.
+//   - A 15 s cadence behind a readout that ticks at 1 Hz looks like a frozen
+//     display, which is indistinguishable from GPS that is not working.
+//
+// BestForNavigation (set in the hook, where `Location` is in scope) asks
+// Android for PRIORITY_HIGH_ACCURACY with no update-distance floor, which is
+// what gets GNSS Doppler -- the only source that reports a real speed at
+// walking pace.
+//
+// TO PUT THE BATTERY BACK: restore the two-tier watch from this file's git
+// history (`git log -p -- nigehban-app/src/motion.js`), but keep the noteFix
+// repair below -- the adaptive version cannot work without it.
+const WATCH_OPTS = {
+  timeInterval: 1000,
+  distanceInterval: 0,
+};
 
 const MPS_TO_KMH = 3.6;
 
@@ -193,12 +213,24 @@ const JOURNEY_BLIND_MS = 300000;   // 5 minutes with no fix at all = give up
  */
 let watchError = null;
 
-export function speedWatchStatus() {
-  const ctx = speedContext();
+export function speedWatchStatus(now = Date.now()) {
+  const ctx = speedContext(now);
   return {
     error: watchError,
     /** Can an impact be classified as an accident at all right now? */
     armed: !watchError && ctx.known,
+    /**
+     * What the last fix actually was, before any interpretation -- the chip's
+     * raw number, the accuracy, and which of the three paths in `noteFix` it
+     * took. The console renders this verbatim.
+     *
+     * A speed readout alone cannot be debugged on a phone in a car: "0 km/h"
+     * is the same pixel whether the chip measured a standstill, declined to
+     * answer, or was never asked. This is the difference, in words.
+     */
+    fix: lastNote ? { ...lastNote, ageMs: now - lastNote.at } : null,
+    /** How many speed samples are in the history behind the reading. */
+    samples: samples.length,
     ...ctx,
   };
 }
@@ -222,13 +254,31 @@ function trim(now) {
 export function noteSpeed(speedMps, at = Date.now()) {
   if (speedMps == null || !(speedMps >= 0)) return;
   const kmh = speedMps * MPS_TO_KMH;
-  samples.push({ at, kmh });
-  trim(at);
+
+  // An ordered insert, not a push. Four callers feed this history now -- the
+  // speed watch, the Home screen's own watch, the background service and the
+  // heartbeat's last-known read -- and the last two read the OS cache, which
+  // can hand back a fix stamped earlier than one already stored. `speedContext`
+  // treats the final element as "now", so one out-of-order push would present a
+  // stale reading as the live one.
+  const newest = !samples.length || at >= samples[samples.length - 1].at;
+  if (newest) {
+    samples.push({ at, kmh });
+  } else {
+    let i = samples.length;
+    while (i > 0 && samples[i - 1].at > at) i--;
+    samples.splice(i, 0, { at, kmh });
+  }
+  trim(samples[samples.length - 1].at);
 
   // ---- the journey latch ---------------------------------------------------
   //
   // See `inJourney` below. Updated here, on real fixes only, because the whole
   // point of it is that NOT getting a fix must never look like stopping.
+  //
+  // Only a sample that is genuinely the newest may move it: a late cached fix
+  // must not re-open a journey that a newer fix has already closed.
+  if (!newest) return;
   if (kmh >= VEHICLE_KMH) {
     journeyFrom = at;
     stoppedSince = 0;
@@ -251,26 +301,91 @@ export function noteImpact(at = Date.now()) {
 // ---- the second source of speed, and why there has to be one ---------------
 //
 // `coords.speed` is the GNSS chip's own Doppler measurement and it is the good
-// one: direct, instantaneous, and accurate to a fraction of a km/h. It is also
-// frequently ABSENT.
+// one: direct, instantaneous, accurate to a fraction of a km/h, and it works at
+// walking pace. It is also, on most fixes, NOT THERE -- and the way it is not
+// there is a trap that this code fell into for three releases.
 //
-// Android satisfies a Balanced-accuracy request from fused/network location,
-// and those fixes routinely carry no speed at all. That is a deadlock, not a
-// degradation: the watch idles on Balanced to save battery and only opens up to
-// real GNSS once it sees road speed -- so with `speed` null it never sees road
-// speed, never opens up, and accident detection is silently off for the entire
-// journey. It needs speed in order to start measuring speed.
+// ANDROID DOES NOT REPORT AN ABSENT SPEED AS ABSENT. IT REPORTS IT AS ZERO.
 //
-// So when the chip declines to say, the distance between two consecutive fixes
-// over the time between them answers instead. Still GPS -- two positions, not
-// dead reckoning -- and good enough for a 25 km/h threshold even though it is
-// far too coarse to quote at somebody.
+// `android.location.Location` carries speed alongside a `hasSpeed()` flag, and
+// `getSpeed()` returns 0.0f when that flag is false. expo-location passes the
+// number straight through without consulting the flag
+// (LocationResults.kt: `speed = location.speed.toDouble()`), so on Android
+// `coords.speed` is NEVER null. iOS is the opposite convention -- CLLocation
+// reports -1 for "no reading" -- and the old `speed == null` guard here was
+// written against that one.
+//
+// The cost of the confusion was total, and silent, in both directions:
+//
+//   - Every fix without a real speed was stored as a genuine 0 km/h sample.
+//     The live readout flickered between the true speed and zero, and an
+//     impact landing on one of those zeros was described to the wearer's family
+//     as "the vehicle stopped dead".
+//   - The whole distance-between-fixes fallback below became unreachable on
+//     Android, because it sits behind "did the chip decline to answer" and the
+//     chip appeared to answer every single time.
+//
+// So the test is now `speed > 0`, and a zero is treated as the non-answer it
+// usually is -- corroborated against the positions before it is believed.
+//
+// When the chip says nothing, the distance between fixes over the time between
+// them answers instead. Still GPS -- two positions, not dead reckoning.
 //
 // It is NOT integrated from the accelerometer, and never will be. Velocity from
 // a wrist IMU means double-integrating a noisy signal, and the error compounds
 // so quickly that it is confidently wrong within seconds. A detector that
 // believes a made-up speed is worse than one that admits it does not know.
-let lastFix = null;      // { lat, lon, at, acc }
+
+/** Recent positions, oldest first. The baseline for the derived speed. */
+let fixes = [];
+
+/**
+ * What the most recent fix produced, in full, for the Band console.
+ *
+ * { at, kmh, source, raw, acc, movedM?, dtS?, why? } where `source` is one of
+ * 'chip' | 'derived' | 'still' | 'none'.
+ */
+let lastNote = null;
+
+/** How far back a position is still usable as a baseline. */
+const FIX_MEMORY_MS = 60000;
+
+// The baseline widens rather than being fixed at "the previous fix", and that
+// is the difference between a speedometer that works when walking and one that
+// does not. At a 1 s cadence a person on foot covers about 1.4 m, which is far
+// inside the uncertainty of any fix -- so measured against the previous fix
+// alone, walking is indistinguishable from standing still and reads as zero.
+// Measured against the newest fix that is FURTHER AWAY THAN THE UNCERTAINTY,
+// it reads as walking. Under 1 s there is nothing to measure; beyond 30 s the
+// straight line between two points stops describing the route taken.
+const DERIVE_MIN_S = 1;
+const DERIVE_MAX_S = 30;
+
+// And movement has to BEAT the uncertainty, not merely tie with it.
+//
+// `accuracy` is a confidence radius, so a phone lying still on a table scatters
+// its fixes across roughly that radius -- which means two of them can sit a
+// full diameter apart while nothing has moved at all. Requiring only "further
+// apart than the accuracy" therefore reads stationary GPS wander as motion, and
+// with a widening baseline it will always eventually find two samples that
+// qualify. Measured against a real still phone this produced a confident
+// 11 km/h out of nothing, which is how a parked car arms crash detection.
+//
+// Doubling it is what separates the two: wander oscillates inside the radius,
+// while somebody actually travelling keeps getting further away.
+const DERIVE_SLOP_K = 2;
+/** A floor, for a fix that claims an accuracy it has not earned. */
+const DERIVE_MIN_M = 8;
+
+// A standstill has to stay recordable -- `stopped` and the journey latch both
+// depend on positively observing one -- but "not moving" is a claim, and a fix
+// that is uncertain by half a street cannot support it. So a zero is believed
+// only from a fix precise enough to mean it, after long enough to be sure.
+const STILL_MIN_S = 5;
+const STILL_MAX_ACC_M = 25;
+
+/** Above this it is a bad fix or a jump between providers, not a speed. */
+const MAX_PLAUSIBLE_KMH = 300;
 
 const EARTH_M = 6371000;
 /** Metres between two fixes. Equirectangular -- exact enough at these ranges. */
@@ -282,42 +397,112 @@ function metresBetween(a, b) {
 }
 
 /**
+ * The newest fix far enough away from `here` to have measured real movement.
+ *
+ * Walks back from the most recent, widening the baseline until the distance
+ * beats the uncertainty of both ends. Returns null when nothing inside
+ * DERIVE_MAX_S resolves any movement at all, which is the honest answer for a
+ * phone on a table -- and the reason a parked phone cannot arm crash detection
+ * out of GPS wander alone.
+ */
+function baseline(here) {
+  for (let i = fixes.length - 1; i >= 0; i--) {
+    const p = fixes[i];
+    const dt = (here.at - p.at) / 1000;
+    if (dt < DERIVE_MIN_S) continue;          // too close in time to resolve
+    if (dt > DERIVE_MAX_S) break;             // ordered, so everything older is worse
+    const slop = Math.max(p.acc || 0, here.acc || 0);
+    if (metresBetween(p, here) > Math.max(slop * DERIVE_SLOP_K, DERIVE_MIN_M)) return p;
+  }
+  return null;
+}
+
+/**
  * Take a position fix, however it arrived, and get a speed out of it.
  *
- * Prefers the chip's own reading and falls back to the distance between fixes.
- * Everything that watches position should come through here rather than calling
- * `noteSpeed` directly, so the fallback exists on every path.
+ * Everything that sees a position comes through here -- the speed watch, the
+ * Home screen's watch, the background service, the heartbeat -- so that the
+ * chip-versus-derived decision exists on every path and cannot drift between
+ * them.
  */
 export function noteFix(coords, at = Date.now()) {
-  if (!coords) return;
+  if (!coords || coords.latitude == null || coords.longitude == null) return;
 
-  if (coords.speed != null && coords.speed >= 0) {
-    noteSpeed(coords.speed, at);
-    lastFix = { lat: coords.latitude, lon: coords.longitude, at, acc: coords.accuracy ?? null };
+  // Two of the four callers read the OS location cache, which hands back the
+  // same fix over and over. Storing it twice would invent a second measurement
+  // out of one, and a run of them would look like a steady stream of data
+  // arriving when in fact nothing has been measured since.
+  //
+  // Keyed on the timestamp alone, and checked against the whole ring rather
+  // than just the newest. Two genuinely different fixes do not share a GPS
+  // clock reading, and comparing coordinates instead would let a re-read of the
+  // same cached fix through on nothing worse than a rounding difference.
+  if (fixes.some((f) => f.at === at)) return;
+
+  const seen = fixes.length ? fixes[fixes.length - 1] : null;
+
+  const here = {
+    lat: coords.latitude,
+    lon: coords.longitude,
+    at,
+    acc: coords.accuracy ?? null,
+  };
+  const raw = coords.speed;
+
+  const newest = !seen || at >= seen.at;
+  fixes.push(here);
+  if (!newest) fixes.sort((a, b) => a.at - b.at);
+  if (at - fixes[0].at > FIX_MEMORY_MS) {
+    fixes = fixes.filter((f) => at - f.at <= FIX_MEMORY_MS);
+  }
+
+  // A cached fix stamped before one already held is worth keeping as a
+  // baseline, but must never be measured FROM: the distance between it and
+  // something newer, divided by a negative interval, is not a speed.
+  if (!newest) return;
+
+  // ---- 1. the chip measured it ---------------------------------------------
+  // Strictly greater than zero. See the block above: on Android a zero is
+  // usually the absence of a reading wearing the costume of one.
+  if (raw != null && raw > 0) {
+    noteSpeed(raw, at);
+    lastNote = { at, kmh: raw * MPS_TO_KMH, source: 'chip', raw, acc: here.acc };
     return;
   }
 
-  const prev = lastFix;
-  lastFix = { lat: coords.latitude, lon: coords.longitude, at, acc: coords.accuracy ?? null };
-  if (!prev || coords.latitude == null) return;
+  // ---- 2. it did not, so measure it from the positions ----------------------
+  const base = baseline(here);
+  if (base) {
+    const dtS = (at - base.at) / 1000;
+    const movedM = metresBetween(base, here);
+    const mps = movedM / dtS;
+    if (mps * MPS_TO_KMH > MAX_PLAUSIBLE_KMH) {
+      lastNote = { at, kmh: null, source: 'none', raw, acc: here.acc,
+                   why: `${Math.round(mps * MPS_TO_KMH)} km/h — bad fix, discarded` };
+      return;
+    }
+    noteSpeed(mps, at);
+    lastNote = { at, kmh: mps * MPS_TO_KMH, source: 'derived', raw, acc: here.acc,
+                 movedM, dtS };
+    return;
+  }
 
-  const dt = (at - prev.at) / 1000;
-  // Under a second is noise; over a minute is two different journeys.
-  if (!(dt >= 1 && dt <= 60)) return;
-
-  const d = metresBetween(prev, lastFix);
-
-  // A 100 m-accurate fix wanders by ~100 m while sitting on a table, which over
-  // 15 s reads as 24 km/h out of nothing at all. Requiring the movement to
-  // exceed the uncertainty is what stops a parked phone arming crash detection.
-  const slop = Math.max(prev.acc || 0, lastFix.acc || 0);
-  if (d <= slop) return;
-
-  const mps = d / dt;
-  // 300 km/h is not a car, it is a bad fix or a jump between providers.
-  if (mps * MPS_TO_KMH > 300) return;
-
-  noteSpeed(mps, at);
+  // ---- 3. nothing moved far enough to measure ------------------------------
+  // Only now is a zero from the chip worth recording, and only when the fix is
+  // precise enough for "not moving" to mean anything. Everything else records
+  // NOTHING -- which leaves the reading stale and then unknown, rather than
+  // asserting a standstill nobody observed.
+  const watchedFor = (at - fixes[0].at) / 1000;
+  if (raw === 0 && watchedFor >= STILL_MIN_S
+      && here.acc != null && here.acc <= STILL_MAX_ACC_M) {
+    noteSpeed(0, at);
+    lastNote = { at, kmh: 0, source: 'still', raw, acc: here.acc };
+    return;
+  }
+  lastNote = {
+    at, kmh: null, source: 'none', raw, acc: here.acc,
+    why: raw === 0 ? 'no movement resolvable yet' : 'chip reported no speed',
+  };
 }
 
 /**
@@ -474,56 +659,67 @@ export function describeImpact(ev, ctx) {
  * to turn it off and get their battery back.
  */
 export function useSpeedWatch(enabled) {
-  const [state, setState] = useState({ kmh: null, riding: false, error: null });
-  const sub = useRef(null);
-  const riding = useRef(false);
-  const slowSince = useRef(0);
-  const restart = useRef(null);
+  const [state, setState] = useState({ kmh: null, error: null });
 
   useEffect(() => {
     if (!enabled || !Location || Platform.OS === 'web') return undefined;
     let alive = true;
+    let sub = null;
+    let gen = 0;
+    let shown = null;
 
-    const open = async (fast) => {
-      try { sub.current?.remove(); } catch { /* never opened */ }
-      sub.current = null;
+    const onFix = (pos) => {
       if (!alive) return;
-      try {
-        sub.current = await Location.watchPositionAsync(
-          {
-            accuracy: fast ? Location.Accuracy.High : Location.Accuracy.Balanced,
-            ...(fast ? RIDE_WATCH : IDLE_WATCH),
-          },
-          (pos) => {
-            if (!alive) return;
-            // Through noteFix, not noteSpeed: a Balanced-accuracy fix often
-            // carries no `speed` field at all, and without the distance
-            // fallback this watch could never see the road speed it needs in
-            // order to open up to real GNSS. See noteFix.
-            noteFix(pos?.coords, pos?.timestamp || Date.now());
-            // Read back what actually landed, so the throttle below reacts to
-            // the derived speed as well as the chip's own.
-            const ctx = speedContext();
-            const kmh = ctx.known ? ctx.nowKmh : null;
+      noteFix(pos?.coords, pos?.timestamp || Date.now());
+      watchError = null;            // fixes are arriving: whatever it was, it lifted
 
-            // Open the throttle when they start moving, close it when they
-            // have been slow for a while. The exit is deliberately lazy: a bus
-            // at a red light must not drop the app back to a coarse fix it
-            // then takes thirty seconds to recover from when the light changes.
-            const now = Date.now();
-            if (kmh != null && kmh >= VEHICLE_KMH) {
-              slowSince.current = 0;
-              if (!riding.current) { riding.current = true; restart.current?.(true); }
-            } else if (riding.current) {
-              if (!slowSince.current) slowSince.current = now;
-              else if (now - slowSince.current > RIDE_EXIT_MS) {
-                riding.current = false; slowSince.current = 0; restart.current?.(false);
-              }
-            }
-            watchError = null;          // fixes are arriving: whatever it was, it lifted
-            setState({ kmh, riding: riding.current, error: null });
-          },
+      // Only when the visible number changes. Nothing reads this hook's return
+      // value today -- App.js calls it for the side effect -- so an
+      // unconditional setState at the watch's cadence would re-render the whole
+      // app tree once a second on behalf of nobody. The Band console reads the
+      // module state directly and ticks itself.
+      const ctx = speedContext();
+      const kmh = ctx.known ? ctx.nowKmh : null;
+      const key = kmh == null ? 'none' : String(Math.round(kmh));
+      if (key === shown) return;
+      shown = key;
+      setState({ kmh, error: null });
+    };
+
+    const open = async () => {
+      const mine = ++gen;
+      try { sub?.remove(); } catch { /* never opened */ }
+      sub = null;
+      try {
+        // Asked for here rather than assumed. This watch now starts with the
+        // app rather than with a band connection, so it can easily be the first
+        // thing to want a position -- and a watch that was never granted
+        // permission is precisely the silent failure this file exists to avoid.
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (!alive || mine !== gen) return;
+        if (status !== 'granted') {
+          watchError = 'location permission not granted';
+          setState((s) => ({ ...s, error: watchError }));
+          return;
+        }
+
+        const opened = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.BestForNavigation, ...WATCH_OPTS },
+          onFix,
         );
+
+        // The race this closes: `sub` used to be assigned only after the await,
+        // so a fix arriving before the promise resolved could start a second
+        // watch which the first then overwrote -- leaving a live subscription
+        // that nothing held a handle to, feeding the same history at a
+        // different rate and never cleaned up. The newest caller wins; every
+        // superseded one closes what it opened.
+        if (!alive || mine !== gen) {
+          try { opened.remove(); } catch { /* already gone */ }
+          return;
+        }
+        sub = opened;
+        watchError = null;
       } catch (e) {
         // Permission revoked, location switched off, no provider. The detector
         // degrades to fall-only rather than the screen breaking -- but it says
@@ -531,13 +727,13 @@ export function useSpeedWatch(enabled) {
         // of failure this product cannot afford to hide. Recorded at module
         // scope as well as in state, so a diagnostic screen can read it without
         // this hook having to be threaded through the whole tree.
+        if (mine !== gen) return;
         watchError = e?.message || String(e);
         if (alive) setState((s) => ({ ...s, error: watchError }));
       }
     };
 
-    restart.current = open;
-    open(false);
+    open();
 
     // Android stops delivering foreground location the moment the app leaves
     // the screen, and hands back a stale subscription when it returns. Nothing
@@ -545,15 +741,15 @@ export function useSpeedWatch(enabled) {
     // keeps the history from having a hole exactly the size of the last time
     // the phone was in a pocket.
     const appSub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') open(riding.current);
+      if (s === 'active') open();
     });
 
     return () => {
       alive = false;
-      restart.current = null;
+      gen++;                        // anything still in flight closes itself
       try { appSub.remove(); } catch { /* older RN */ }
-      try { sub.current?.remove(); } catch { /* never opened */ }
-      sub.current = null;
+      try { sub?.remove(); } catch { /* never opened */ }
+      sub = null;
     };
   }, [enabled]);
 
@@ -567,5 +763,6 @@ export function __resetMotion() {
   watchError = null;
   journeyFrom = 0;
   stoppedSince = 0;
-  lastFix = null;
+  fixes = [];
+  lastNote = null;
 }
