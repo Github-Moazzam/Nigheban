@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Platform, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
@@ -28,7 +28,26 @@ export default function Band({ band, serverOnline }) {
   // Read on each render rather than watched. This is a diagnostic panel,
   // and a subscription that re-rendered the console on every GPS fix would
   // cost more than the number is worth.
+  // Ticked, not just read. `speedWatchStatus()` is a plain read of module state,
+  // so without this the tile only refreshes when something else re-renders the
+  // screen -- which is almost never while you are sitting still watching it.
+  // The one job this tile has is being watched live from a moving vehicle, and
+  // a frozen readout there looks exactly like GPS that is not working.
+  //
+  // 1 Hz on a diagnostic console is free, and the effect only runs while the
+  // Band tab is actually mounted.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
   const speedCtx = speedWatchStatus();
+
+  // Whether the watch is even running. App.js only arms it for a phone acting
+  // as a safety device, so BLE mode with no band connected legitimately has no
+  // speed at all -- and reporting that as "no fix yet" would send you looking
+  // for a GPS fault that is not there.
+  const speedWatchOff = !virtual && band.status !== 'connected';
   // Only so the note can say "armed". The seeded samples age out of
   // motion.js on their own; nothing here holds the arming.
   const [armedAt, setArmedAt] = useState(0);
@@ -107,10 +126,12 @@ export default function Band({ band, serverOnline }) {
                 only ever reported the live reading. */}
             <Stat label="Speed seen" icon="activity"
                   value={speedCtx.nowKmh == null ? '—' : `${Math.round(speedCtx.nowKmh)} km/h`}
-                  sub={!speedCtx.wasTravelling ? 'an impact now = ignored'
+                  sub={speedWatchOff ? 'not watching — no band connected'
+                       : !speedCtx.wasTravelling ? 'an impact now = ignored'
                        : speedCtx.sawSpeed ? 'an impact now = accident'
                        : 'an impact now = accident (in a vehicle, no fix)'}
-                  tone={speedCtx.wasTravelling ? C.amber : C.dim} />
+                  tone={speedWatchOff ? C.dim
+                        : speedCtx.wasTravelling ? C.amber : C.dim} />
           </View>
         </View>
         <Text style={s.note}>
@@ -252,7 +273,8 @@ export default function Band({ band, serverOnline }) {
               <Stat label="Speed" icon="navigation"
                     value={speedCtx.nowKmh == null ? '—'
                                                    : `${Math.round(speedCtx.nowKmh)} km/h`}
-                    sub={speedCtx.error ? 'GPS unavailable — crash detection OFF'
+                    sub={speedWatchOff ? 'not watching — no band connected'
+                         : speedCtx.error ? 'GPS unavailable — crash detection OFF'
                          : speedCtx.wasTravelling ? 'crash detection armed'
                          : speedCtx.armed ? 'not travelling'
                          : 'no fix yet'}
