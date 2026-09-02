@@ -54,6 +54,19 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# The watch_lost rule, kept in its own module and kept pure: no database, no
+# clock, no network. It is the one piece of this server whose bugs are only
+# ever discovered at 2 a.m. by somebody's family, so it is the one piece that
+# has to be exhaustively testable in milliseconds. See server/watch_lost.py for
+# the rule itself and tests/test_watch_lost_transition.py for every case.
+#
+# Imported by path rather than as `server.watch_lost`: this file is run
+# directly (`python server/nigehban_server.py`), so there is no package.
+try:
+    import watch_lost as WL
+except ImportError:                                   # imported as a package
+    from . import watch_lost as WL
+
 PORT = 8000
 
 
@@ -241,7 +254,40 @@ def close_db():
 
 
 def init_db():
-    pass
+    """The schema is applied by `python server/migrate_pg.py`, not from here.
+
+    But the server has to know whether that was actually run, because it does
+    not fail the way a missing schema should. `watch_state` gained three
+    columns with migration 006, and starting this build against a database
+    without them does not break at boot: it breaks on the first POST
+    /heartbeat, as an UndefinedColumn inside a 500, once a minute, per armed
+    phone. Every one of those is a wearer's "I am still here" being thrown
+    away -- and after three minutes of them the sweeper decides she has gone
+    quiet. A safety product silently converting a forgotten migration into
+    missed heartbeats is the worst reading of that mistake available.
+
+    So it is checked once, at startup, where somebody is looking at the
+    terminal. It prints and does not raise: a server that refuses to start
+    reaches nobody at all, and everything except the watch_lost transition
+    works perfectly well against the older schema.
+    """
+    want = {"beat_band_link", "beat_armed", "lost_rearm_at", "link_lost_at",
+            "high_alert"}
+    try:
+        with closing(db()) as c:
+            have = {r["column_name"] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='watch_state'").fetchall()}
+    except Exception as e:
+        print(f"  [schema] could not be checked ({type(e).__name__}: {e})")
+        return
+    missing = sorted(want - have)
+    if missing:
+        print("\n  *** watch_state is missing " + ", ".join(missing) + " ***")
+        print("  Migrations 006-008 have not been applied. Every heartbeat will")
+        print("  fail with UndefinedColumn until they are, and an armed phone")
+        print("  that cannot report in gets reported lost. Fix it with:\n")
+        print("      python server/migrate_pg.py\n")
 
 
 def migrate(c):
@@ -1196,8 +1242,25 @@ async def raise_alert(b: AlertIn, u=Depends(me)):
         await ack_open_checkins(u["id"])
     if b.kind == "sos":
         with closing(db()) as c:
-            watch_row(c, u["id"])
-            c.execute("UPDATE watch_state SET mode='sos' WHERE user_id=%s", (u["id"],))
+            row = watch_row(c, u["id"])
+            # An SOS arms the watch, and arming starts the silence clock -- so
+            # it writes the same witnessed state High Alert does, through the
+            # same rule. This is the fix for the case that used to page a
+            # family for nothing: mode='sos' written against a `last_beat` from
+            # hours ago satisfied the old watchdog's `mode != 'idle' AND
+            # last_beat < now - 180` on the very next tick, so a wearer whose
+            # phone had been idle and quiet all afternoon pressed SOS and their
+            # family got a watch_lost on top of it -- for a link that had ended
+            # long before, if it ever existed. `on_arm` moves last_beat to now
+            # and refuses to inherit a stale band link, so there is no
+            # retroactive transition left to find.
+            armed = WL.on_arm(WL.Watch.from_row(row), now=time.time(),
+                              beat_lost_s=BEAT_LOST_S)
+            c.execute("UPDATE watch_state SET mode='sos', last_beat=%s, "
+                      "beat_band_link=%s, beat_armed=TRUE, "
+                      "lost_notified=FALSE, lost_rearm_at=NULL, link_lost_at=NULL "
+                      "WHERE user_id=%s",
+                      (armed.last_beat, armed.beat_band_link, u["id"]))
             c.commit()
 
     return {"ok": True, "alert": payload, "delivered_to": len(targets)}
@@ -1220,8 +1283,22 @@ async def resolve(alert_id: int, u=Depends(me)):
         c.execute("UPDATE alerts SET resolved_at=%s WHERE id=%s", (time.time(), alert_id))
         # Standing down an SOS clears the watch's sos mode too, or the
         # heartbeat watchdog keeps treating a finished emergency as a live one.
-        c.execute("UPDATE watch_state SET mode='idle' WHERE user_id=%s AND mode='sos'",
-                  (u["id"],))
+        # `beat_armed` goes with it for the same reason as in /watch/high_alert:
+        # the phone stops beating when it goes idle, and a witnessed "armed"
+        # left behind would have the silence watchdog page the family three
+        # minutes after the emergency was stood down.
+        #
+        # It falls back to High Alert rather than to idle when High Alert is
+        # still armed. The emergency is over; the standing watch the wearer
+        # switched on before it is not, and it was never the SOS's to end.
+        # This is the other half of migration 008 -- with one column those two
+        # states could not both be represented, so resolving an SOS silently
+        # disarmed a High Alert that nobody had touched.
+        c.execute("UPDATE watch_state SET "
+                  "mode=CASE WHEN high_alert THEN 'high_alert' ELSE 'idle' END, "
+                  "beat_armed=high_alert, "
+                  "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
+                  "WHERE user_id=%s AND mode='sos'", (u["id"],))
         c.commit()
 
     await HUB.fanout(family_of(u["id"]),
@@ -1826,18 +1903,50 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
                 "too many High Alert changes - wait a moment")
     now = time.time()
     with closing(db()) as c:
-        watch_row(c, u["id"])
+        row = watch_row(c, u["id"])
         if b.on:
             first = b.first_buzz_s if b.first_buzz_s is not None else \
                 random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
             first = max(5, min(float(first), HIGH_ALERT_MAX_S))
-            c.execute("UPDATE watch_state SET mode='high_alert', next_buzz_at=%s, "
-                      "last_beat=%s, lost_notified=FALSE WHERE user_id=%s",
-                      (now + first, now, u["id"]))
+            # Arming starts the silence clock, so it also has to write the
+            # witnessed state the watchdog will judge that silence against.
+            # `on_arm` inherits the band link only if the last beat is recent
+            # enough to still be true -- a phone silent since morning is armed
+            # with no witnessed link at all, so going quiet again cannot page
+            # anyone about a band that was already gone. See watch_lost.py.
+            armed = WL.on_arm(WL.Watch.from_row(row), now=now, beat_lost_s=BEAT_LOST_S)
+            # `high_alert` is the armed flag and the sweeper's check-ins run on
+            # it. `mode` is only ever the HIGHEST live alert, so arming High
+            # Alert during an emergency must not demote a live SOS to something
+            # less serious -- see migration 008.
+            c.execute("UPDATE watch_state SET high_alert=TRUE, "
+                      "mode=CASE WHEN mode='sos' THEN 'sos' ELSE 'high_alert' END, "
+                      "next_buzz_at=%s, last_beat=%s, beat_band_link=%s, "
+                      "beat_armed=TRUE, lost_notified=FALSE, lost_rearm_at=NULL, "
+                      "link_lost_at=NULL WHERE user_id=%s",
+                      (now + first, now, armed.beat_band_link, u["id"]))
             nxt = now + first
         else:
-            c.execute("UPDATE watch_state SET mode='idle', next_buzz_at=NULL "
-                      "WHERE user_id=%s", (u["id"],))
+            # Standing down clears the witnessed armed flag as well as the
+            # mode. The phone stops beating the moment it goes idle, so leaving
+            # `beat_armed` true would leave the silence watchdog holding a
+            # snapshot that says "armed" for a watch its wearer just switched
+            # off -- and it would page the family three minutes later.
+            #
+            # Every CASE below reads the row as it was BEFORE this statement,
+            # and they all ask the same question: was High Alert the live
+            # alert? If an SOS is running, this switch turns the check-ins off
+            # and touches nothing else. Writing mode='idle' flatly here -- as
+            # it did -- stood a live emergency down along with the schedule,
+            # and took the heartbeat watchdog with it.
+            c.execute("UPDATE watch_state SET high_alert=FALSE, next_buzz_at=NULL, "
+                      "mode=CASE WHEN mode='high_alert' THEN 'idle' ELSE mode END, "
+                      "beat_armed=CASE WHEN mode='high_alert' THEN FALSE "
+                      "                ELSE beat_armed END, "
+                      "link_lost_at=CASE WHEN mode='high_alert' THEN NULL "
+                      "                  ELSE link_lost_at END "
+                      "WHERE user_id=%s",
+                      (u["id"],))
             nxt = None
         c.commit()
     print(f"  high alert {'ON' if b.on else 'off'} for {u['name']}")
@@ -1851,10 +1960,59 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
 
 @app.post("/heartbeat")
 def heartbeat(b: HeartbeatIn, u=Depends(me)):
-    """'I am still here.' Every 60 s while armed. Silence is the signal."""
+    """'I am still here.' Every 60 s while armed. Silence is the signal.
+
+    And, since the band-link fix, the other half of that: this is also where a
+    *reported* loss arrives. The phone is alive and healthy and telling us
+    itself that the band is gone -- which is the disconnect event, as close to
+    first-hand as this server ever gets to one. The app fires a beat the
+    instant the link changes while armed rather than waiting out the minute,
+    so this path sees the drop within a second or two of it happening.
+
+    Seeing it is not reporting it. What a drop starts here is a two-minute
+    grace window (`link_lost_at`); the sweeper pages if the band is still gone
+    when it runs out, and a later beat saying the band is back cancels the
+    whole thing. Bluetooth drops for reasons that are not emergencies, and the
+    family hears about none of them.
+
+    Sync rather than async on purpose: this is the highest-frequency endpoint
+    in the product, its work is blocking database calls, and it no longer
+    awaits anything -- so FastAPI running it in a threadpool keeps every beat
+    in the field off the event loop the sweeper and the sockets share.
+    """
     now = time.time()
     with closing(db()) as c:
-        watch_row(c, u["id"])
+        prev_row = watch_row(c, u["id"])
+        # The state as it stood BEFORE this beat is applied. Everything the
+        # watch_lost rule needs is read here, while the row still describes the
+        # moment before the disconnect -- once the UPDATE below lands, that
+        # moment is gone. See server/watch_lost.py.
+        prev = WL.Watch.from_row(prev_row)
+
+        # The mode is the server's to hold, not the phone's to declare -- the
+        # phone may have been restarted and forgotten. It may only *raise* to
+        # sos, never quietly stand High Alert down.
+        #
+        # Worked out before the write because the rule needs both sides of it:
+        # `prev.mode` is the pre-disconnect armed state (the one that wins the
+        # race, per the rule), and `mode_after` is what the new witnessed
+        # snapshot records.
+        mode_after = "sos" if b.mode == "sos" else prev.mode
+
+        # `virtual` goes in alongside `band_link` because the two together are
+        # the only honest answer to "is there a wristband". In virtual mode the
+        # phone runs the firmware itself and reports band_link=true, and a
+        # watch_lost raised off that tells a family a band stopped answering
+        # when there was never a band. So virtual mode is inert to this rule in
+        # both directions -- it never qualifies, and it never counts as the
+        # disconnect either, not even on the beat that switches a real band
+        # over to it. `nxt.beat_band_link` comes back already meaning the
+        # physical link and nothing else.
+        decision, nxt = WL.on_heartbeat(prev, band_link=bool(b.band_link),
+                                        virtual=bool(b.virtual),
+                                        mode_after=mode_after, now=now,
+                                        beat_lost_s=BEAT_LOST_S)
+
         # COALESCE on the batteries for the same reason as the position: an
         # older build sends no band_batt at all, and a null from it must not
         # erase a good reading the family is looking at.
@@ -1863,20 +2021,43 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
         # is the band, there is no second cell, and COALESCE would otherwise
         # keep showing whatever a real band last said -- for as long as the
         # account exists. So that case clears the column outright.
+        #
+        # `lost_notified` is no longer cleared unconditionally here. It used to
+        # be, and that was the flap: a band bouncing in and out of range at the
+        # edge of a corridor cleared the latch on every re-link and paged the
+        # family again on every re-drop. The rule decides when the latch comes
+        # off, and it waits out `lost_rearm_at` first.
         c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, band_virtual=%s, "
                   "phone_batt=COALESCE(%s,phone_batt), "
                   "band_batt=CASE WHEN %s THEN NULL ELSE COALESCE(%s,band_batt) END, "
                   "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
-                  "lost_notified=FALSE WHERE user_id=%s",
-                  (now, bool(b.band_link), bool(b.virtual), b.phone_batt,
-                   bool(b.virtual), b.band_batt,
-                   b.lat, b.lon, u["id"]))
-        # The mode is the server's to hold, not the phone's to declare -- the
-        # phone may have been restarted and forgotten. It may only *raise* to
-        # sos, never quietly stand High Alert down.
+                  "beat_band_link=%s, beat_armed=%s, "
+                  "lost_notified=%s, lost_rearm_at=%s, link_lost_at=%s "
+                  "WHERE user_id=%s",
+                  (now, bool(b.band_link), bool(b.virtual),
+                   b.phone_batt, bool(b.virtual), b.band_batt,
+                   b.lat, b.lon,
+                   nxt.beat_band_link, nxt.beat_armed,
+                   nxt.lost_notified, nxt.lost_rearm_at, nxt.link_lost_at,
+                   u["id"]))
+        # The raise to sos stays its own statement rather than joining the
+        # UPDATE above: `mode` is written by /alert and /alert/{id}/resolve too,
+        # and writing back the value read a few lines ago would quietly undo a
+        # stand-down that landed in between.
         if b.mode == "sos":
             c.execute("UPDATE watch_state SET mode='sos' WHERE user_id=%s", (u["id"],))
         c.commit()
+
+    # No alert is raised from here any more. A drop starts the grace window
+    # (`link_lost_at`, written above) and the sweeper pages two minutes later
+    # if the band has not come back. The two lines this endpoint can move
+    # through are worth seeing in the log, because between them lies every
+    # brief Bluetooth drop the family is deliberately not being told about.
+    if nxt.link_lost_at is not None and prev.link_lost_at is None:
+        print(f"  [watch_lost] {u['name']}: {decision.reason} "
+              f"({int(WL.WATCH_LOST_DELAY_S)}s)")
+    elif prev.link_lost_at is not None and nxt.link_lost_at is None:
+        print(f"  [watch_lost] {u['name']}: {decision.reason} — nobody paged")
     return {"ok": True, "t": now}
 
 
@@ -1896,12 +2077,23 @@ def watch_of(member_id: str, u=Depends(me)):
                 raise HTTPException(403, "they are not in your family list")
         w = c.execute("SELECT * FROM watch_state WHERE user_id=%s", (member_id,)).fetchone()
         pend = open_checkin(c, member_id)
+        # Who asked, when a person did. On the same connection rather than a
+        # second checkout: this endpoint is polled by every family screen.
+        asker = None
+        if pend and pend["asked_by"]:
+            row = c.execute("SELECT name FROM users WHERE id=%s",
+                            (pend["asked_by"],)).fetchone()
+            asker = row["name"] if row else None
 
     now = time.time()
     return {
         "user_id": member_id,
         "online": HUB.online(member_id),
         "mode": w["mode"] if w else "idle",
+        # Separate from `mode` since migration 008: an SOS raises the mode
+        # above it without ending it, so "is High Alert armed" cannot be read
+        # off the mode any more.
+        "high_alert": bool(w["high_alert"]) if w else False,
         "band_link": bool(w["band_link"]) if w else False,
         # The family screen has to say which device it is looking at. Without
         # this it showed "band connected" for a phone standing in for one.
@@ -1912,6 +2104,18 @@ def watch_of(member_id: str, u=Depends(me)):
         "beat_age_s": (now - w["last_beat"]) if (w and w["last_beat"]) else None,
         "next_buzz_at": w["next_buzz_at"] if w else None,
         "checkin_due_at": pend["due_at"] if pend else None,
+        # The id and the reason, not just the deadline. `checkin_due_at` alone
+        # told the family screen a question was open; it did not give the
+        # WEARER'S phone enough to answer one, and answering is the whole
+        # point. With these two a phone that missed the socket frame -- the
+        # app was backgrounded, killed, out of signal -- can pick the question
+        # up when it comes back and put it on screen with the deadline that is
+        # actually left, rather than the question expiring unasked and the
+        # family being told she did not answer.
+        "checkin_id": pend["id"] if pend else None,
+        "checkin_reason": pend["reason"] if pend else None,
+        "checkin_from": ({"id": pend["asked_by"], "name": asker}
+                         if pend and pend["asked_by"] and asker else None),
     }
 
 
@@ -2028,8 +2232,16 @@ async def sweep_once(now):
                       ([r["id"] for r in due],))
 
         # 2. High Alert: time to ask again?
+        #
+        # On `high_alert`, not on `mode='high_alert'`. `mode` is the highest
+        # live alert and POST /alert overwrites it with 'sos', so this query
+        # used to stop matching the moment an emergency was raised -- and never
+        # matched again, because nothing puts 'high_alert' back. Arm High
+        # Alert, press SOS, and the check-ins ended there for good while the
+        # phone went on drawing a countdown to `next_buzz_at`. See migration
+        # 008.
         buzz = c.execute(
-            "SELECT * FROM watch_state WHERE mode='high_alert' AND next_buzz_at IS NOT NULL "
+            "SELECT * FROM watch_state WHERE high_alert=TRUE AND next_buzz_at IS NOT NULL "
             "AND next_buzz_at<=%s", (now,)).fetchall()
         opened = {}
         for w in buzz:
@@ -2041,15 +2253,66 @@ async def sweep_once(now):
                             (w["user_id"], now + CHECKIN_WINDOW_S, now))
             opened[w["user_id"]] = (cur.fetchone()["id"], nxt)
 
-        # 3. heartbeat watchdog: armed, and gone quiet
-        lost = c.execute(
+        # 3. heartbeat watchdog: armed, WITH A BAND LINK, and then gone quiet
+        #
+        # The SQL is the cheap filter, not the rule. It narrows the table to
+        # rows that could conceivably qualify -- still armed, not already
+        # paged, silent past the deadline -- and `WL.on_silence` decides,
+        # because the decision is about a transition and SQL over the current
+        # row cannot see one.
+        #
+        # What the SQL alone used to decide, and got wrong twice over:
+        #
+        #   - `mode != 'idle'` is the mode NOW, and /alert writes it. A silent
+        #     idle phone raising an SOS matched instantly and paged the family
+        #     about a loss that never happened. `beat_armed` is the mode as it
+        #     was at the last beat, and no endpoint can rewrite history into it.
+        #   - `band_link` was never consulted at all, so an armed phone with no
+        #     band in the room reported its wearer's watch lost. A link that
+        #     never existed cannot be lost -- `beat_band_link` is that check.
+        candidates = c.execute(
             "SELECT * FROM watch_state WHERE mode!='idle' AND lost_notified=FALSE "
             "AND last_beat IS NOT NULL AND last_beat < %s", (now - BEAT_LOST_S,)).fetchall()
+        lost = [r for r in candidates
+                if WL.on_silence(WL.Watch.from_row(r), now=now,
+                                 beat_lost_s=BEAT_LOST_S).notify]
         if lost:
-            c.execute("UPDATE watch_state SET lost_notified=TRUE WHERE user_id = ANY(%s)",
-                      ([r["user_id"] for r in lost],))
+            # The latch AND the flap window, so a phone that comes back for one
+            # beat and goes again does not page a second time.
+            c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
+                      "WHERE user_id = ANY(%s)",
+                      (now + WL.REARM_S, [r["user_id"] for r in lost]))
 
-        if due or buzz or lost:
+        # 4. the grace window: a band that went away and has not come back
+        #
+        # /heartbeat sees the disconnect and starts the clock; this is where it
+        # runs out. Here rather than on the next heartbeat because the tick is
+        # five seconds and a heartbeat is sixty -- a two-minute promise kept to
+        # within seconds, instead of anything up to a minute late.
+        #
+        # It also means the countdown does not depend on the phone still
+        # beating. If the band goes and then the phone dies too, this still
+        # pages at the two-minute mark, and the latch it sets stops branch 3
+        # adding a second alert about the same silence a minute later.
+        waiting = c.execute(
+            "SELECT * FROM watch_state WHERE link_lost_at IS NOT NULL "
+            "AND link_lost_at <= %s", (now - WL.WATCH_LOST_DELAY_S,)).fetchall()
+        elapsed = [(r, WL.on_grace_elapsed(WL.Watch.from_row(r), now=now,
+                                           delay_s=WL.WATCH_LOST_DELAY_S))
+                   for r in waiting]
+        gone = [r for r, d in elapsed if d.notify]
+        # Every row whose window is up stops counting, whether it pages or not.
+        # A countdown abandoned because the wearer stood down must not sit in
+        # the table being re-evaluated every five seconds for ever.
+        if waiting:
+            c.execute("UPDATE watch_state SET link_lost_at=NULL WHERE user_id = ANY(%s)",
+                      ([r["user_id"] for r in waiting],))
+        if gone:
+            c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
+                      "WHERE user_id = ANY(%s)",
+                      (now + WL.REARM_S, [r["user_id"] for r in gone]))
+
+        if due or buzz or lost or waiting:
             c.commit()
 
     # Process results after releasing the connection -- emit_alert and HUB.to
@@ -2108,20 +2371,61 @@ async def sweep_once(now):
                                     "window": CHECKIN_WINDOW_S,
                                     "due_at": now + CHECKIN_WINDOW_S,
                                     "next_buzz_at": nxt})
+        # And a push, because the socket is not a delivery guarantee -- it is
+        # a delivery *optimisation*. HUB.to writes to whatever sockets happen
+        # to be open and drops the frame silently when there are none, which on
+        # Android is most of the time: the app is backgrounded, or the OEM
+        # killed it, or the phone is on a train.
+        #
+        # The row is already in the database at this point, so the deadline is
+        # real whether or not the wearer ever hears the question. Ninety
+        # seconds later the sweeper escalates it and the family is told she did
+        # not answer -- a `checkin_missed` for a question that was never put to
+        # her. A person's own check-in gets a push (see /checkin/ask); the
+        # server's own knock was the one path that did not, and it is the path
+        # that runs while nobody is watching.
+        await send_expo_push_notifications(
+            [w["user_id"]], "Nigehban is checking on you",
+            "Tap 'I am fine' to answer.",
+            {"checkin_id": checkin_id, "severity": 2, "reason": "high_alert",
+             "due_at": now + CHECKIN_WINDOW_S})
 
     for w in lost:
         silent_s = int(now - w["last_beat"])
         mins = max(1, round(silent_s / 60))
         await emit_alert(w["user_id"], "watch_lost", source="server",
                          lat=w["last_lat"], lon=w["last_lon"],
-                         note=(f"Armed, then went quiet {mins} min ago. "
+                         note=(f"Armed, with the band linked, then went quiet "
+                               f"{mins} min ago. "
                                "The phone lost signal, was switched off, or the app "
                                "was stopped — Nigehban cannot tell which. "
                                "The pin is where it last reported. "
                                "Try calling; if there is no answer, treat this as real."))
 
+    for r, d in elapsed:
+        if not d.notify:
+            # Worth a line each: these are the disconnects the family was
+            # deliberately not told about, and "why did nobody hear anything"
+            # is a question this product has to be able to answer afterwards.
+            print(f"  [watch_lost] {r['user_id']}: {d.reason}")
+            continue
+        away = int(now - r["link_lost_at"])
+        # The pin and the wording both come from `link_lost_at`, not from now:
+        # the alert is about a moment two minutes in the past, and saying so is
+        # the difference between a family looking where she is and a family
+        # looking where she was when it started.
+        await emit_alert(
+            r["user_id"], "watch_lost", source="server",
+            lat=r["last_lat"], lon=r["last_lon"],
+            note=(f"The band stopped answering {away}s ago, while an alert was "
+                  "running, and has not come back. The phone is still reporting, "
+                  "so this is the wristband: out of range, switched off, taken "
+                  "off, or its battery is flat. The pin is where the phone was. "
+                  "Try calling; if there is no answer, treat this as real."))
+
     LIMIT.sweep()
-    return {"missed": len(due), "buzzed": len(buzz), "lost": len(lost)}
+    return {"missed": len(due), "buzzed": len(buzz),
+            "lost": len(lost), "band_gone": len(gone)}
 # ---- live socket --------------------------------------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str = ""):

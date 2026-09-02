@@ -1197,6 +1197,80 @@ function Main() {
     prevOnline.current = serverOnline;
   }, [serverOnline, flushNow]);
 
+  // ---- a question the socket never delivered ------------------------------
+  //
+  // `buzz_now` and `checkin_req` arrive over the websocket, and a websocket is
+  // not a delivery guarantee -- it is a delivery optimisation. The server
+  // writes to whatever sockets happen to be open and drops the frame silently
+  // when there are none, which on Android is most of the time: backgrounded,
+  // killed by the OEM, or on a train.
+  //
+  // The check-in row exists either way and its deadline is real. Ninety
+  // seconds later the sweeper escalates it and the family is told she did not
+  // answer -- a page about a question that was never put to her, which is the
+  // worst failure this screen has. There is now a push behind the socket frame
+  // as well, but a push is not a guarantee either.
+  //
+  // So whenever this phone gets back in touch -- socket up, or app brought to
+  // the foreground -- it asks the server outright whether it owes anybody an
+  // answer, and shows the question with the deadline that is ACTUALLY left
+  // rather than a fresh ninety seconds it has no right to.
+  //
+  // The same read repairs the other half of a killed process: the machine is
+  // memory-only, so a restart forgets High Alert, `watchMode` falls back to
+  // idle and the heartbeat stops -- while the server still has her armed and
+  // pages the family for silence three minutes later. The server is the one
+  // that owns that flag, so this takes its answer.
+  const recoverOpenWork = useCallback(async () => {
+    if (!session?.token) return;
+    let w;
+    try {
+      w = await call(session, `/watch/${session.user_id}`);
+    } catch {
+      return;                       // still out of touch; the next trigger retries
+    }
+
+    if (w.high_alert && !ctxRef.current.highAlert) {
+      dispatch('HIGH_ALERT_SET', { on: true, nextBuzzAt: w.next_buzz_at || null });
+    }
+
+    // Nothing open, or this is the question already on screen.
+    if (!w.checkin_id) return;
+    if (ctxRef.current.checkin?.checkin_id === w.checkin_id) return;
+
+    const checkin = {
+      checkin_id: w.checkin_id,
+      due_at: w.checkin_due_at,
+      // Only for the progress bar's denominator; the countdown itself runs to
+      // `due_at`, which is the server's clock and the only one that escalates.
+      window: 90,
+      reason: w.checkin_reason,
+      system: !w.checkin_from,
+      ...(w.checkin_from || {}),
+      _startAt: Date.now() / 1000,
+    };
+    dispatch('CHECKIN_ASKED', { checkin });
+    setAskSheet(checkin);
+    Vibration.vibrate([0, 400, 200, 400]);
+    band.send({ c: 'checkin_req', window: 90 });
+  }, [session, dispatch, band]);
+
+  const recoverRef = useRef(recoverOpenWork);
+  recoverRef.current = recoverOpenWork;
+
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    // On the socket coming up, and on every return to the foreground. Both,
+    // because they fail independently: the socket can be up on a phone whose
+    // app was never in front of anyone, and the app can be opened by hand on a
+    // phone whose socket is still down.
+    if (serverOnline) recoverRef.current?.();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') recoverRef.current?.();
+    });
+    return () => sub.remove();
+  }, [session?.token, serverOnline]);
+
   // ---- an emergency this React tree never saw ------------------------------
   //
   // The state machine is memory-only, and Android destroys this whole tree
