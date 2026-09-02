@@ -80,7 +80,7 @@
 // LED_BUILTIN is 11 and ACTIVE LOW on this board -- always go through
 // ledWrite(), never digitalWrite(), or every indicator reads inverted.
 
-#define HAS_IMU         0       // flip to 1 in F3, with the LSM6DS3 library
+#define HAS_IMU         1       // F3 — needs the "Seeed Arduino LSM6DS3" library
 
 // Gesture timing (ms) — must stay identical to DEFAULT_GESTURES in the app's
 // virtualBand.js. Changing one without the other silently breaks the demo.
@@ -214,6 +214,69 @@
 // out of range or in Doze still gets its chance; short enough that a band left
 // unpaired in a drawer is not still crying SOS tomorrow.
 #define SOS_BEACON_MS          600000UL   // 10 minutes
+
+// ------------------------------------------------- FALL AND IMPACT (F3) ---
+//
+// TWO DETECTORS, AND ONLY ONE OF THEM DECIDES ANYTHING.
+//
+// A fall has a shape the band can recognise on its own: the wrist goes light
+// (free-fall), then it is hit, then it stops moving. All three parts are
+// visible from the accelerometer alone, so the band is entitled to call it and
+// say `fall`.
+//
+// A crash does not have that shape. There is no free-fall -- a rider hits a car
+// at 40 km/h with 1 g of gravity on the wrist the whole way -- and what is left
+// is a spike, which on a WRIST is also a clap, a door slammed, a hand put down
+// hard on a table, a cricket bat. The band cannot tell those apart and must not
+// pretend to. So it reports the measurement and nothing more: `impact`, with
+// the peak, the rotation and whether the arm went still afterwards.
+//
+// What turns that into an accident is the ONE fact the band does not have and
+// the phone does: how fast this person was travelling ten seconds ago. An 11 g
+// spike at walking pace is furniture. The same spike at 45 km/h is a crash.
+// src/motion.js owns that judgement; see docs/FALL_AND_ACCIDENT.md.
+//
+// This split is the same one the press feedback already uses: each side says
+// only what it actually knows.
+
+// 100 Hz. Free-fall from standing lasts 300-500 ms and the minimum below is
+// 70 ms, so this samples the shortest thing we care about seven times.
+//
+// It is NOT enough to catch a true impact peak: the spike itself is 5-15 ms
+// wide, so `peak_g` here is a LOWER BOUND on what the wrist actually felt.
+// That is fine for a threshold and wrong for a physics claim -- if a reading
+// ever has to be exact, it needs the LSM6DS3's own FIFO at 416 Hz, not a
+// faster loop(). Every threshold below is calibrated at THIS rate; changing it
+// changes what they mean.
+#define IMU_PERIOD_MS         10
+
+// ---- a fall: light, then hit, then still -----------------------------------
+// Identical to FALL in nigehban-app/src/virtualBand.js. Two implementations of
+// one decision, exactly like the gesture map, and they drift the same way: in
+// silence, until a demo behaves differently on the phone and on the wrist.
+#define FALL_FREEFALL_G       0.45f   // below this, something is falling
+#define FALL_FREEFALL_MIN_MS  70      // ...for this long: rejects a flick
+#define FALL_IMPACT_G         2.40f   // then a spike above this
+#define FALL_IMPACT_WINDOW_MS 1400    // ...this soon after the free-fall ends
+#define FALL_STILL_BAND_G     0.28f   // then |g - 1| inside this
+#define FALL_STILL_MS         1600    // ...held: they did not get straight up
+
+// ---- an impact: a spike big enough to be worth telling the phone about -----
+//
+// 8 g is chosen against the false positive, not the true positive. A wrist
+// clears 2-3 g walking downstairs and 10-16 g clapping, so anything lower is a
+// stream of noise; a vehicle impact is 20 g and up and saturates the sensor
+// long before it gets here. Tune this from a real CSV capture before trusting
+// it -- docs/FALL_AND_ACCIDENT.md has the bench protocol.
+#define IMPACT_G              8.00f
+#define IMPACT_SETTLE_MS      1200    // watch this long to see if the arm stops
+
+// One event per episode. A crash is not one spike -- it is a spike, a tumble,
+// a landing, and a bike coming down on top of it, over several seconds. Each
+// of those clears the threshold, and without this the phone would get six
+// `impact` lines for one accident and the wearer six buzzes.
+#define FALL_REFRACTORY_MS    15000
+#define IMPACT_REFRACTORY_MS  10000
 
 // ------------------------------------------------------------------ STATE ---
 BLEUart bleuart;                // this IS the Nordic UART Service
@@ -758,6 +821,233 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
   }
 }
 
+// ------------------------------------------------------------- IMU (F3) ---
+// The on-board LSM6DS3TR-C at 0x6A. The MPU6050 path from the ESP32 prototype
+// is gone for good (F2.2) -- that was an external part we do not have.
+#if HAS_IMU
+#include "LSM6DS3.h"
+LSM6DS3 imu(I2C_MODE, 0x6A);     // the Seeed lib remaps to Wire1 internally
+
+bool     gImuOk   = false;       // begin() succeeded; false = detector is off
+bool     gImuCsv  = false;       // calibration stream, USB serial only
+
+// The fall machine. Named rather than numbered, because "stage 2" in a serial
+// log tells nobody anything at 1 a.m. on a bench.
+#define FS_IDLE      0
+#define FS_FREEFALL  1           // the wrist has gone light
+#define FS_IMPACT    2           // it landed; waiting to see if it stays put
+uint8_t  gFallStage = FS_IDLE;
+uint32_t gFallSince = 0;         // when this stage began
+uint32_t gFreefallMs = 0;        // how long the free-fall actually lasted
+float    gFallPeak  = 0;         // biggest |a| seen this episode
+uint32_t gFallStillFrom = 0;     // when the wrist last became still, 0 = not
+uint32_t gLastFallAt = 0;        // refractory
+
+// The impact reporter, which is a separate machine on purpose: a crash has no
+// free-fall to key off and would never reach FS_IMPACT above.
+#define IS_IDLE      0
+#define IS_SETTLING  1           // spike seen; measuring what happened next
+uint8_t  gImpStage  = IS_IDLE;
+uint32_t gImpSince  = 0;
+float    gImpPeak   = 0;
+float    gImpRot    = 0;         // peak |gyro|, deg/s -- a tumble, not a knock
+uint32_t gImpStillMs = 0;        // ms of stillness inside the settle window
+uint32_t gLastImpactAt = 0;
+
+void imuBegin() {
+  // THE POWER GATE. The Sense can switch the IMU off entirely for low power,
+  // and until this pin is HIGH, begin() fails on perfectly good hardware. The
+  // EXECUTION_PLAN.md section 8 skeleton is missing this line.
+  pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
+  digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
+  delay(10);
+
+  // ===========================================================================
+  // SET THE RANGE EXPLICITLY. A DEFAULT HERE IS A SILENTLY BROKEN DETECTOR.
+  //
+  // The accelerometer clips at its full-scale range and reports the clipped
+  // value as though it were real. On a +/-2 g setting every fall, every clap
+  // and every car crash reads as "2.0 g" -- the impact threshold is never
+  // crossed, nothing is ever detected, and there is no error anywhere to find:
+  // the numbers look plausible, they are just all the same.
+  //
+  // 16 g is this part's maximum and still not enough for a vehicle impact,
+  // which saturates it. That is a known and accepted limit: IMPACT_G is 8 g, so
+  // a saturated reading is unambiguously over the line. `peak_g` on a real
+  // crash means "at least 16", never "exactly 16".
+  // ===========================================================================
+  imu.settings.accelRange      = 16;    // g -- see above
+  imu.settings.accelSampleRate = 104;   // Hz, comfortably over IMU_PERIOD_MS
+  imu.settings.gyroRange       = 2000;  // dps -- a wrist in a crash spins hard
+  imu.settings.gyroSampleRate  = 104;
+
+  gImuOk = (imu.begin() == 0);
+  Serial.println(gImuOk
+    ? F("{\"t\":\"log\",\"msg\":\"imu up\",\"range_g\":16,\"odr\":104}")
+    : F("{\"t\":\"log\",\"msg\":\"IMU FAILED - fall detection is OFF\"}"));
+}
+
+/** |a| in g. 1.0 at rest, toward 0 in free-fall, high on impact. */
+float imuMagnitudeG() {
+  float x = imu.readFloatAccelX();
+  float y = imu.readFloatAccelY();
+  float z = imu.readFloatAccelZ();
+  return sqrtf(x * x + y * y + z * z);
+}
+
+/**
+ * |gyro| in deg/s.
+ *
+ * Read only while an impact is being measured, never on the idle path. Each
+ * axis is its own I2C transaction in this library, so reading all six every
+ * tick doubles the bus traffic for a number that is meaningless 99.9% of the
+ * time.
+ */
+float imuRotationDps() {
+  float x = imu.readFloatGyroX();
+  float y = imu.readFloatGyroY();
+  float z = imu.readFloatGyroZ();
+  return sqrtf(x * x + y * y + z * z);
+}
+
+/**
+ * The 100 Hz sampler and both detectors.
+ *
+ * Runs the fall machine and the impact reporter off the SAME sample. They are
+ * not exclusive and are not meant to be: a rider thrown off a bike produces a
+ * genuine free-fall AND a 20 g spike, and both events going out is correct --
+ * the phone raises one incident from whichever arrives first and the refractory
+ * windows keep the second from becoming a second buzz.
+ */
+void imuTick() {
+  if (!gImuOk) return;
+
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (now - last < IMU_PERIOD_MS) return;
+  last = now;
+
+  float g = imuMagnitudeG();
+  bool  still = fabsf(g - 1.0f) < FALL_STILL_BAND_G;
+
+  // ---- the calibration stream ---------------------------------------------
+  // USB serial only, and deliberately not through send(): this is 100 lines a
+  // second and would flood a BLE link that has an emergency to carry. It exists
+  // so a drop test produces a CSV you can plot, which is the only honest way to
+  // pick the numbers above. `{"c":"imucal","on":1}` turns it on.
+  if (gImuCsv) {
+    Serial.print(now);          Serial.print(',');
+    Serial.print(g, 3);         Serial.print(',');
+    Serial.print(gFallStage);   Serial.print(',');
+    Serial.println(gImpStage);
+  }
+
+  // ------------------------------------------------------- the fall machine ---
+  switch (gFallStage) {
+    case FS_IDLE:
+      if (g < FALL_FREEFALL_G) { gFallStage = FS_FREEFALL; gFallSince = now; gFallPeak = g; }
+      break;
+
+    case FS_FREEFALL:
+      if (g < FALL_FREEFALL_G) break;                       // still falling
+      gFreefallMs = now - gFallSince;
+      // A flick of the wrist also goes light, for about 30 ms. Requiring a
+      // minimum duration is what separates "this arm moved" from "this arm is
+      // no longer being held up".
+      if (gFreefallMs >= FALL_FREEFALL_MIN_MS) {
+        gFallStage = FS_IMPACT; gFallSince = now; gFallPeak = g; gFallStillFrom = 0;
+      } else {
+        gFallStage = FS_IDLE;
+      }
+      break;
+
+    case FS_IMPACT:
+      if (g > gFallPeak) gFallPeak = g;
+
+      // Nothing hit anything. Somebody lowered their arm slowly, or waved.
+      if (gFallPeak < FALL_IMPACT_G) {
+        if (now - gFallSince > FALL_IMPACT_WINDOW_MS) gFallStage = FS_IDLE;
+        break;
+      }
+
+      // Landed. Now the question that keeps a dropped bag from paging a mother
+      // at 2 a.m.: did the wrist STAY down? Someone who trips, catches
+      // themselves and walks on is moving again within a second. Someone who is
+      // on the floor is not.
+      if (!still) { gFallStillFrom = 0; }
+      else if (gFallStillFrom == 0) { gFallStillFrom = now; }
+
+      if (gFallStillFrom && now - gFallStillFrom >= FALL_STILL_MS) {
+        gFallStage = FS_IDLE;
+        // `== 0` is "nothing has ever fired". Without it the subtraction is
+        // measured from boot, and every fall in the first FALL_REFRACTORY_MS of
+        // uptime is silently swallowed -- which is a band that is deaf for the
+        // first fifteen seconds after a battery change or a reset. 0 is a safe
+        // sentinel because this is only ever assigned `now` at event time, and
+        // millis() is long past 0 by then.
+        if (gLastFallAt == 0 || now - gLastFallAt > FALL_REFRACTORY_MS) {
+          gLastFallAt = now;
+          // Five firm pulses, the pattern this event has always used. It is a
+          // question, not a confirmation -- the phone is about to ask whether
+          // the wearer is all right, and this is the wrist saying why.
+          feedback(5, 200, 150);
+          sendEvent("fall", "\"peak_g\":" + String(gFallPeak, 2)
+                          + ",\"ff_ms\":" + String(gFreefallMs));
+        }
+      } else if (now - gFallSince > FALL_IMPACT_WINDOW_MS + FALL_STILL_MS + 1000) {
+        gFallStage = FS_IDLE;                               // got up: not a fall
+      }
+      break;
+  }
+
+  // ---------------------------------------------------- the impact reporter ---
+  //
+  // Deliberately says nothing about what the spike WAS. It reports how hard,
+  // how much rotation, and how still the arm went afterwards, because those are
+  // the three things a wrist can honestly measure -- and then the phone, which
+  // knows the speed, decides whether this was a road accident or a door.
+  switch (gImpStage) {
+    case IS_IDLE:
+      // Same "never fired" sentinel as the fall path above, for the same
+      // reason: measured from boot, the band would ignore every impact in its
+      // first ten seconds of uptime.
+      if (g >= IMPACT_G
+          && (gLastImpactAt == 0 || now - gLastImpactAt > IMPACT_REFRACTORY_MS)) {
+        gImpStage = IS_SETTLING;
+        gImpSince = now;
+        gImpPeak  = g;
+        gImpRot   = imuRotationDps();
+        gImpStillMs = 0;
+      }
+      break;
+
+    case IS_SETTLING: {
+      if (g > gImpPeak) gImpPeak = g;
+      float rot = imuRotationDps();
+      if (rot > gImpRot) gImpRot = rot;
+      if (still) gImpStillMs += IMU_PERIOD_MS;
+
+      if (now - gImpSince >= IMPACT_SETTLE_MS) {
+        gImpStage = IS_IDLE;
+        gLastImpactAt = now;
+        // No buzz. This is not yet news -- most impacts are furniture, and a
+        // band that vibrates every time its wearer puts a hand down hard is a
+        // band that gets taken off. If the phone decides this was an accident
+        // it opens a check-in, and THAT buzzes.
+        sendEvent("impact",
+          "\"peak_g\":" + String(gImpPeak, 1)
+          + ",\"rot\":" + String((int) gImpRot)
+          // Fraction of the settle window the arm was still, 0-100. High means
+          // it stopped dead; low means it is still being thrown around, which
+          // in a vehicle is the worse of the two.
+          + ",\"still\":" + String((int)(gImpStillMs * 100 / IMPACT_SETTLE_MS)));
+      }
+      break;
+    }
+  }
+}
+#endif
+
 // ------------------------------------------------------ COMMANDS IN ---
 // Tiny dependency-free JSON field reader. Good enough for our fixed schema.
 String jsonStr(const String &s, const char *key) {
@@ -813,6 +1103,20 @@ void handleCommand(const String &line) {
     sendEvent("battery", "\"forced\":1");
   } else if (c == "ping") {
     sendEvent("pong");
+#if HAS_IMU
+  // ---- the calibration stream ----------------------------------------------
+  //
+  // `{"c":"imucal","on":1}`. Prints `ms,g,fall_stage,impact_stage` at 100 Hz to
+  // USB serial and to nothing else, so it cannot get anywhere near the BLE
+  // link. Paste the capture into a spreadsheet, plot column 2, and the drop you
+  // just did is the dip and the spike -- which is the only way to choose
+  // FALL_IMPACT_G and IMPACT_G honestly. docs/FALL_AND_ACCIDENT.md is the
+  // protocol; the header below is what a plotter expects to see first.
+  } else if (c == "imucal") {
+    gImuCsv = jsonInt(line, "on", 1) != 0;
+    if (gImuCsv) Serial.println(F("ms,g,fall_stage,impact_stage"));
+    else         Serial.println(F("{\"t\":\"log\",\"msg\":\"imu csv off\"}"));
+#endif
   }
 }
 
@@ -899,60 +1203,6 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   // restartOnDisconnect(true) re-advertises for us.
 }
 
-// ------------------------------------------------------------- IMU (F3) ---
-// Deliberately compiled out until F3. The MPU6050 path from the ESP32 prototype
-// is gone for good (F2.2) -- this is the on-board LSM6DS3TR-C at 0x6A.
-#if HAS_IMU
-#include "LSM6DS3.h"
-LSM6DS3 imu(I2C_MODE, 0x6A);     // the Seeed lib remaps to Wire1 internally
-uint8_t  gFallStage = 0;         // 0 idle, 1 free-fall seen, 2 impact seen
-uint32_t gFallStamp = 0;
-
-void imuBegin() {
-  // THE POWER GATE. The Sense can switch the IMU off entirely for low power,
-  // and until this pin is HIGH, begin() fails on perfectly good hardware. The
-  // EXECUTION_PLAN.md section 8 skeleton is missing this line.
-  pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
-  digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
-  delay(10);
-  imu.begin();
-}
-
-float imuMagnitudeG() {
-  float x = imu.readFloatAccelX();
-  float y = imu.readFloatAccelY();
-  float z = imu.readFloatAccelZ();
-  return sqrtf(x * x + y * y + z * z);
-}
-
-// Classic 3-phase fall: free-fall (<0.4g) -> impact (>2.5g) -> stillness.
-// F3.2 tunes these against real CSV; F3.3 says log from Phase 2 onward,
-// because a bag falling off a chair must not page a mother at 2 a.m.
-void imuTick() {
-  static uint32_t last = 0;
-  uint32_t now = millis();
-  if (now - last < 20) return;             // 50 Hz is plenty
-  last = now;
-
-  float g = imuMagnitudeG();
-  switch (gFallStage) {
-    case 0:
-      if (g < 0.40f) { gFallStage = 1; gFallStamp = now; }
-      break;
-    case 1:
-      if (g > 2.50f) { gFallStage = 2; gFallStamp = now; }
-      else if (now - gFallStamp > 800) gFallStage = 0;
-      break;
-    case 2:
-      if (now - gFallStamp > 1500) {       // still upset? call it a fall
-        gFallStage = 0;
-        feedback(5, 200, 150);
-        sendEvent("fall", "\"peak_g\":" + String(g, 2));
-      }
-      break;
-  }
-}
-#endif
 
 // ------------------------------------------------------------- SETUP ---
 void setup() {
