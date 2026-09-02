@@ -26,7 +26,7 @@ Audited against the working tree, not against intentions.
 | **UI** | Auth · Home · Band · Family · Alerts · Setup; client state machine; check-in countdown, High Alert with PIN disarm, fall countdown, battery/going-dark, SOS live view, watch-status tile, Samaritan respond; one design system (Outfit + Space Grotesk, semantic tokens, `ui.js` kit, no emoji) | Changing the server address after sign-in — it is still only on the Auth screen |
 | **Backend** | `server/nigehban_server.py` — 24 endpoints + `/ws`, SQLite, 11 tables, live push, **the sweeper**, two-party pairing consent, rate limits, hashed session tokens, `/presence` + `/samaritan`, push TTL | Qwen scoring, WhatsApp fan-out, token expiry |
 | **Android** | `app.json` with BLE/location/notification perms **and 9 more added by `plugins/withNigehbanAndroid.js`**; `eas.json` with 3 profiles; `expo-battery`, `expo-task-manager`, `expo-dev-client`; **FCM wired** (`google-services.json`, project `nigheban-d126d`); foreground service; OEM deep links in Setup.js; **`modules/nigehban-alarm/` — full-screen intent + looping siren, built in-house** | boot receiver · WorkManager watchdog |
-| **Firmware** | `nigehban_band_nrf52/` (591 lines) — full gesture map, protocol, feedback patterns, battery ADC code; bench sketches `t1`–`t6` all passed | `HAS_IMU 0` · battery divider uncalibrated · motor circuit unbuilt · haptic drive strength unresolved (firmware/README.md) |
+| **Firmware** | `nigehban_band_nrf52/` — full gesture map, protocol, feedback patterns, battery ADC code, **fall + impact detection on the on-board LSM6DS3TR-C (`HAS_IMU 1`) with a 100 Hz CSV calibration stream**; bench sketches `t1`–`t6` all passed | **fall/impact thresholds uncalibrated** ([protocol](FALL_AND_ACCIDENT.md)) · IMU polling costs 0.4–0.5 mA, wake-on-motion deferred · battery divider uncalibrated · motor circuit unbuilt · haptic drive strength unresolved (firmware/README.md) |
 | **Deployment** | `scripts/dev-tunnel.ps1` / `.sh` — server + HTTPS tunnel, self-verifying; CORS on the server | No Dockerfile, no compose, no Caddyfile, no Alibaba account |
 | **Glue** | `nigehban_hub.py` — Guardian logic in Python | Superseded by the server's sweeper; kept as the firmware test rig |
 
@@ -513,7 +513,7 @@ and the board should say so.
 | N3 Push + alarm | M2 | 2 | 4 h | ◐ N3.1 observed; N3.2 fixed §14; N3.3/N3.4 **built, await one EAS build** |
 | F1 Board bring-up | M4 | 0 | 3 h | ☑ done |
 | F2 Port the gesture layer | M4 | 0–1 | 5 h | ◐ F2.1/F2.2 done; battery uncalibrated |
-| F3 IMU / fall | M4 | 2 | 5 h | ☐ `HAS_IMU 0` on both sketches |
+| F3 IMU / fall | M4 | 2 | 5 h | ◑ `HAS_IMU 1`, both machines live; thresholds uncalibrated — see [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) |
 | F4 Hardware build | M4 | 0–2 | 4 h | ☐ |
 | F5 Spare band | M4 | 5 | — | ✗ struck 27 Aug — ESP32 retired, no spare exists |
 | D0 Account paperwork | M3 | 0 | 5 m | ☐ |
