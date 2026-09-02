@@ -34,7 +34,9 @@ const KIND_QUEUED = {
  * when signal returns. The user must never be told their family was alerted
  * when they have not been.
  */
-export default function SosLiveView({ alert, deliveredTo, deliveryStatus, responders = [], onStandDown, busy, fix }) {
+export default function SosLiveView({
+  alert, deliveredTo, deliveryStatus, responders = [], onStandDown, onOptinSamaritan, busy, fix,
+}) {
   const isQueued = deliveryStatus === 'queued';
   // Standing down owns its own flag. `busy` is the caller's, and on Home that
   // is the flag for *raising* an alert -- which is never true while this card
@@ -42,6 +44,7 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
   // like nothing had happened. It is still honoured, so a press cannot land
   // while the screen above is mid-dispatch.
   const [standingDown, setStandingDown] = useState(false);
+  const [samaritanBusy, setSamaritanBusy] = useState(false);
   const working = busy || standingDown;
   const kind = isQueued
     ? (KIND_QUEUED[alert?.kind] || KIND_QUEUED.sos)
@@ -56,6 +59,18 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
   const elapsed = alert?.created_at
     ? Math.max(0, Math.floor(Date.now() / 1000 - alert.created_at))
     : 0;
+
+  const samaritanStatus = alert?.samaritan_status || 'pending';
+
+  const handleSamaritan = async (action) => {
+    if (samaritanBusy || !alert?.id) return;
+    setSamaritanBusy(true);
+    try {
+      await onOptinSamaritan?.(alert.id, action);
+    } finally {
+      setSamaritanBusy(false);
+    }
+  };
 
   return (
     <Card tone={C.red} accent={C.red} style={{ gap: S.lg }}>
@@ -79,6 +94,49 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
               It will be sent to your family the moment signal returns. Stay where help can reach you.
             </Text>
           </View>
+        </View>
+      )}
+
+      {/* ---- Good Samaritan controls / status ---- */}
+      {!isQueued && samaritanStatus === 'pending' && (
+        <View style={s.samaritanCard}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: S.sm }}>
+            <Icon name="users" size={18} color={C.blue} />
+            <Text style={[T.bodyMed, { color: C.text, flex: 1 }]}>
+              Alert nearby people (Good Samaritan)?
+            </Text>
+          </View>
+          <Text style={[T.meta, { color: C.dim }]}>
+            Active Nigehban users within 800m can be asked to assist you.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: S.sm, marginTop: S.xs }}>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="📢 ALERT NEARBY"
+                tone={C.blue}
+                filled
+                loading={samaritanBusy}
+                onPress={() => handleSamaritan('allow')}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="FAMILY ONLY"
+                tone={C.dim}
+                loading={samaritanBusy}
+                onPress={() => handleSamaritan('deny')}
+              />
+            </View>
+          </View>
+        </View>
+      )}
+
+      {!isQueued && samaritanStatus === 'allowed' && (
+        <View style={s.samaritanBanner}>
+          <Icon name="check-circle" size={16} color={C.green} />
+          <Text style={[T.meta, { color: C.green, flex: 1 }]}>
+            Nearby Good Samaritans have been notified
+          </Text>
         </View>
       )}
 
@@ -110,32 +168,75 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
       <Divider />
 
       <View style={{ gap: S.sm }}>
-        <Label>{responders.length ? 'On their way' : (isQueued ? 'Nobody has been reached yet' : 'Waiting for someone to answer')}</Label>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Label color={responders.length ? C.green : (elapsed >= 20 ? C.amber : C.dim)}>
+            {responders.length
+              ? `On their way (${responders.length})`
+              : (isQueued ? 'Saved locally' : (elapsed >= 20 ? 'No responses yet' : 'Waiting for someone to answer'))}
+          </Label>
+          {!responders.length && !isQueued && (
+            <Text style={[T.meta, { color: elapsed >= 20 ? C.amber : C.faint }]}>
+              {fmtCount(elapsed)}
+            </Text>
+          )}
+        </View>
+
         {responders.length ? (
-          responders.map((r) => (
-            <View key={r.id} style={s.responder}>
-              <Icon name="user-check" size={16} color={C.green} />
-              <Text style={[T.bodyMed, { color: C.text, flex: 1 }]}>{r.name}</Text>
-              <Text style={[T.meta, { color: C.faint }]}>{fmtAgo(r.at)}</Text>
+          <View style={{ gap: S.sm }}>
+            {responders.map((r) => (
+              <View key={r.id || `${r.name}-${r.at}`} style={s.responder}>
+                <Icon name="user-check" size={16} color={C.green} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[T.bodyMed, { color: C.text }]}>{r.name}</Text>
+                  <Text style={[T.meta, { color: C.green }]}>Confirmed on the way</Text>
+                </View>
+                <Text style={[T.meta, { color: C.faint }]}>{fmtAgo(r.at)}</Text>
+              </View>
+            ))}
+          </View>
+        ) : isQueued ? (
+          <Text style={[T.meta, { color: C.dim }]}>
+            Your family will be alerted as soon as your phone finds signal. The alert is safe — it cannot be lost.
+          </Text>
+        ) : elapsed >= 20 ? (
+          <View style={[s.noResponseCard, { borderColor: 'rgba(245, 158, 11, 0.3)', backgroundColor: 'rgba(245, 158, 11, 0.08)' }]}>
+            <Icon name="alert-triangle" size={18} color={C.amber} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[T.bodyMed, { color: C.amber }]}>
+                No one has answered yet ({fmtCount(elapsed)})
+              </Text>
+              <Text style={[T.meta, { color: C.dim }]}>
+                Emergency sirens continue sounding on your family's and nearby helpers' phones.
+              </Text>
             </View>
-          ))
+          </View>
         ) : (
           <Text style={[T.meta, { color: C.dim }]}>
-            {isQueued
-              ? 'Your family will be alerted as soon as your phone finds signal. The alert is safe — it cannot be lost.'
-              : 'Their phones are ringing, and they keep ringing while this is open — a closed app does not stop the alarm getting through.'}
+            Their phones are ringing, and they keep ringing while this is open — a closed app does not stop the alarm getting through.
           </Text>
         )}
       </View>
 
       <View style={{ gap: S.sm }}>
-        <Button title={working ? 'STANDING DOWN…' : "I'M SAFE — STAND DOWN"}
-                tone={C.green} filled icon="shield" loading={working}
-                onPress={async () => {
-                  if (working) return;
-                  setStandingDown(true);
-                  try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
-                }} />
+        {(() => {
+          const isSending = !alert?.id || deliveryStatus === 'sending';
+          const canStandDown = !isSending && !working;
+          return (
+            <Button
+              title={isSending ? 'SENDING ALERT…' : working ? 'STANDING DOWN…' : "I'M SAFE — STAND DOWN"}
+              tone={isSending ? C.dim : C.green}
+              filled
+              icon="shield"
+              loading={working || isSending}
+              disabled={!canStandDown}
+              onPress={async () => {
+                if (!canStandDown) return;
+                setStandingDown(true);
+                try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
+              }}
+            />
+          );
+        })()}
         <Text style={[T.meta, s.foot]}>
           The band can do this too: press key 1 to stand down without the phone.
         </Text>
@@ -143,6 +244,8 @@ export default function SosLiveView({ alert, deliveredTo, deliveryStatus, respon
     </Card>
   );
 }
+
+
 
 const s = StyleSheet.create({
   head: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: S.md },
@@ -158,4 +261,32 @@ const s = StyleSheet.create({
     borderRadius: 8,
     padding: S.md,
   },
+  samaritanCard: {
+    backgroundColor: C.card,
+    borderRadius: 12,
+    padding: S.md,
+    gap: S.xs,
+    borderWidth: 1,
+    borderColor: C.blueSoft || '#1E3A8A',
+  },
+  samaritanBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: S.sm,
+    backgroundColor: C.greenSoft || 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 8,
+    padding: S.md,
+  },
+  noResponseCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: S.sm,
+    padding: S.md,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderWidth: 1,
+    borderColor: C.raised || '#1F2937',
+  },
 });
+
+

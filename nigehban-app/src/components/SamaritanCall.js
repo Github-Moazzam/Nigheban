@@ -31,7 +31,13 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
     try {
       setRevealed(await onRespond?.(a.id));
     } catch (e) {
-      setError(e.message);
+      const msg = e.message || '';
+      setError(msg);
+      if (msg.toLowerCase().includes('stood down') || msg.toLowerCase().includes('410') || msg.toLowerCase().includes('not found')) {
+        setTimeout(() => {
+          onDismiss?.();
+        }, 1200);
+      }
     } finally {
       setBusy(false);
     }
@@ -89,7 +95,9 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
             <View style={s.detail}>
               <Label>Roughly where</Label>
               <Text style={[T.number, { color: C.text }]}>
-                {a.lat.toFixed(3)}, {a.lon.toFixed(3)}
+                {a.lat != null && a.lon != null
+                  ? `${a.lat.toFixed(3)}, ${a.lon.toFixed(3)}`
+                  : 'Nearby area'}
               </Text>
               <Text style={[T.meta, { color: C.faint }]}>
                 Snapped to a 300 m grid until you respond.
@@ -100,6 +108,7 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
               <Button title="SEE THE AREA" tone={C.blue} icon="map"
                       onPress={() => Linking.openURL(a.maps)} />
             ) : null}
+
 
             {error ? (
               <View style={s.errRow}>
