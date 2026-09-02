@@ -74,12 +74,22 @@ LSM6DS3 imu(I2C_MODE, 0x6A);
 // ---------------------------------------------------------------------------
 #define IMU_PERIOD_MS         10      // 100 Hz
 
+// PEOPLE DO NOT FREE-FALL, so there are two routes in. See the .ino.
+//   ROUTE A "it dropped"  free-fall -> impact (2.40 g) -> still 1.6 s
+//   ROUTE B "it was hit"  impact (4 g) -> ended up at a different angle
+//                         -> still 2.5 s.  No free-fall required.
 #define FALL_FREEFALL_G       0.45f
 #define FALL_FREEFALL_MIN_MS  70
 #define FALL_IMPACT_G         2.40f
 #define FALL_IMPACT_WINDOW_MS 1400
 #define FALL_STILL_BAND_G     0.28f
 #define FALL_STILL_MS         1600
+
+#define FALL_HARD_G           4.00f
+#define FALL_TILT_DEG         35.0f
+#define FALL_STILL_SLOW_MS    2500
+#define REST_ALPHA            0.02f
+#define REST_SLOW_ALPHA       0.003f
 
 #define IMPACT_G              8.00f
 #define IMPACT_SETTLE_MS      1200
@@ -135,13 +145,52 @@ uint32_t gFreefallMs = 0;
 float    gFallPeak  = 0;
 uint32_t gFallStillFrom = 0;
 uint32_t gFallStillBest = 0;          // longest stillness seen this attempt
+#define ROUTE_A 0
+#define ROUTE_B 1
+uint8_t  gFallRoute = ROUTE_A;
+float    gPreX = 0, gPreY = 0, gPreZ = 0;
+bool     gPreValid = false;
 
 // ---------------------------------------------------------------- helpers ---
+float gAx = 0, gAy = 0, gAz = 0;
+
 float magnitudeG() {
-  float x = imu.readFloatAccelX();
-  float y = imu.readFloatAccelY();
-  float z = imu.readFloatAccelZ();
-  return sqrtf(x * x + y * y + z * z);
+  gAx = imu.readFloatAccelX();
+  gAy = imu.readFloatAccelY();
+  gAz = imu.readFloatAccelZ();
+  return sqrtf(gAx * gAx + gAy * gAy + gAz * gAz);
+}
+
+// Gravity by low-pass, two speeds -- "where am I now" and "where was I before
+// any of this started". Verbatim from the shipping firmware; the reason the
+// second one has to be slow is that a topple lasts longer than the first one's
+// memory, so sampled at the impact it already holds a posture halfway down.
+float gRestX = 0, gRestY = 0, gRestZ = 0;
+float gSlowX = 0, gSlowY = 0, gSlowZ = 0;
+bool  gRestValid = false;
+
+void restTick() {
+  if (!gRestValid) {
+    gRestX = gSlowX = gAx; gRestY = gSlowY = gAy; gRestZ = gSlowZ = gAz;
+    gRestValid = true;
+    return;
+  }
+  gRestX += (gAx - gRestX) * REST_ALPHA;
+  gRestY += (gAy - gRestY) * REST_ALPHA;
+  gRestZ += (gAz - gRestZ) * REST_ALPHA;
+  gSlowX += (gAx - gSlowX) * REST_SLOW_ALPHA;
+  gSlowY += (gAy - gSlowY) * REST_SLOW_ALPHA;
+  gSlowZ += (gAz - gSlowZ) * REST_SLOW_ALPHA;
+}
+
+float tiltBetween(float ax, float ay, float az, float bx, float by, float bz) {
+  float na = sqrtf(ax * ax + ay * ay + az * az);
+  float nb = sqrtf(bx * bx + by * by + bz * bz);
+  if (na < 0.1f || nb < 0.1f) return 0;
+  float c = (ax * bx + ay * by + az * bz) / (na * nb);
+  if (c > 1.0f) c = 1.0f;
+  if (c < -1.0f) c = -1.0f;
+  return acosf(c) * 57.2957795f;
 }
 
 float rotationDps() {
@@ -170,18 +219,24 @@ void help() {
   Serial.println(F("    h  help        r  reset peak"));
   Serial.println(F("    c  raw CSV     s  session summary"));
   Serial.println(F(""));
-  Serial.print(F("  A FALL needs all three, in order:  free-fall <"));
+  Serial.println(F("  TWO ROUTES TO A FALL. People do not free-fall -- they topple --"));
+  Serial.println(F("  so free-fall is evidence, not a requirement."));
+  Serial.print(F("    A  it dropped: light <"));
   Serial.print(FALL_FREEFALL_G, 2);
   Serial.print(F("g for >="));
   Serial.print(FALL_FREEFALL_MIN_MS);
-  Serial.println(F("ms,"));
-  Serial.print(F("  then an impact >"));
+  Serial.print(F("ms -> impact >"));
   Serial.print(FALL_IMPACT_G, 2);
-  Serial.print(F("g within "));
-  Serial.print(FALL_IMPACT_WINDOW_MS);
-  Serial.print(F("ms, then STILL for "));
+  Serial.print(F("g -> still "));
   Serial.print(FALL_STILL_MS);
-  Serial.println(F("ms."));
+  Serial.println(F("ms"));
+  Serial.print(F("    B  it was hit: impact >"));
+  Serial.print(FALL_HARD_G, 2);
+  Serial.print(F("g -> angle moved >"));
+  Serial.print((int) FALL_TILT_DEG);
+  Serial.print(F("deg -> still "));
+  Serial.print(FALL_STILL_SLOW_MS);
+  Serial.println(F("ms"));
   Serial.print(F("  An IMPACT needs one thing: a spike over "));
   Serial.print(IMPACT_G, 2);
   Serial.println(F("g."));
@@ -277,6 +332,7 @@ void loop() {
 
   float g = magnitudeG();
   bool  still = fabsf(g - 1.0f) < FALL_STILL_BAND_G;
+  restTick();
 
   if (g > gSessionPeak) { gSessionPeak = g; gSessionPeakAt = now; }
   if (gCsv) { Serial.print(now); Serial.print(','); Serial.println(g, 3); }
@@ -351,11 +407,28 @@ void loop() {
     case FS_IDLE:
       if (g < FALL_FREEFALL_G) {
         gFallStage = FS_FREEFALL;
+        gFallRoute = ROUTE_A;
         gFallSince = now;
         gFallPeak = g;
         Serial.print(F("  ..going light ("));
         Serial.print(g, 2);
-        Serial.println(F(" g)"));
+        Serial.println(F(" g)  [route A: it dropped]"));
+      } else if (g >= FALL_HARD_G) {
+        // ROUTE B -- the topple. No free-fall, and there was never going to be
+        // one: a person rotating to the floor keeps gravity on the wrist all
+        // the way down. This is the route that catches a trip or a slump.
+        gFallStage = FS_IMPACT;
+        gFallRoute = ROUTE_B;
+        gFallSince = now;
+        gFallPeak  = g;
+        gFreefallMs = 0;
+        gFallStillFrom = 0;
+        gFallStillBest = 0;
+        gPreX = gSlowX; gPreY = gSlowY; gPreZ = gSlowZ;
+        gPreValid = gRestValid;
+        Serial.print(F("  ..hit hard with no free-fall ("));
+        Serial.print(g, 2);
+        Serial.println(F(" g)  [route B: a topple?]"));
       }
       break;
 
@@ -368,6 +441,8 @@ void loop() {
         gFallPeak = g;
         gFallStillFrom = 0;
         gFallStillBest = 0;
+        gPreX = gSlowX; gPreY = gSlowY; gPreZ = gSlowZ;
+        gPreValid = gRestValid;
         Serial.print(F("  ..free-fall "));
         Serial.print(gFreefallMs);
         Serial.println(F(" ms  OK -- now waiting for an impact"));
@@ -381,8 +456,11 @@ void loop() {
       }
       break;
 
-    case FS_IMPACT:
+    case FS_IMPACT: {
       if (g > gFallPeak) gFallPeak = g;
+      const float needG = (gFallRoute == ROUTE_B) ? FALL_HARD_G : FALL_IMPACT_G;
+      const uint32_t needStill =
+        (gFallRoute == ROUTE_B) ? FALL_STILL_SLOW_MS : FALL_STILL_MS;
 
       // Stillness is tracked from the moment we land, and the LONGEST run is
       // kept -- so a rejection can say how close it got rather than just "no".
@@ -394,13 +472,13 @@ void loop() {
         if (run > gFallStillBest) gFallStillBest = run;
       }
 
-      if (gFallPeak < FALL_IMPACT_G) {
+      if (gFallPeak < needG) {
         if (now - gFallSince > FALL_IMPACT_WINDOW_MS) {
           gFallStage = FS_IDLE;
           Serial.print(F("  REJECTED at stage 2: nothing hit hard enough. Best was "));
           Serial.print(gFallPeak, 2);
           Serial.print(F(" g, needs > "));
-          Serial.print(FALL_IMPACT_G, 2);
+          Serial.print(needG, 2);
           Serial.println(F(" g."));
           Serial.println(F("             (you lowered your arm, or landed on something soft --"));
           Serial.println(F("              carpet roughly halves peak g, a duvet kills it)"));
@@ -408,35 +486,68 @@ void loop() {
         break;
       }
 
-      if (gFallStillFrom && now - gFallStillFrom >= FALL_STILL_MS) {
+      if (gFallStillFrom && now - gFallStillFrom >= needStill) {
+        // Route B's second piece of evidence: did the wearer end up at a
+        // different angle? A clap, a slammed door and a palm on a desk all
+        // leave the arm where it started. Going to the floor does not.
+        float tilt = 0;
+        if (gFallRoute == ROUTE_B) {
+          tilt = (gPreValid && gRestValid)
+            ? tiltBetween(gPreX, gPreY, gPreZ, gRestX, gRestY, gRestZ) : 0;
+          if (!gPreValid || tilt < FALL_TILT_DEG) {
+            gFallStage = FS_IDLE;
+            Serial.print(F("  REJECTED at stage 3b: hit hard ("));
+            Serial.print(gFallPeak, 2);
+            Serial.print(F(" g) and went still, but the wrist ended up at the same"));
+            Serial.println(F(" angle it started at."));
+            Serial.print(F("             Moved "));
+            Serial.print((int) tilt);
+            Serial.print(F(" deg, needs "));
+            Serial.print((int) FALL_TILT_DEG);
+            Serial.println(F(" deg."));
+            Serial.println(F("             (a clap, a slammed door, a palm on a desk --"));
+            Serial.println(F("              you did not change posture, so you did not fall)"));
+            break;
+          }
+        }
         gFallStage = FS_IDLE;
         gFallCount++;
         Serial.println();
         Serial.println(F("  *** THIS WOULD RAISE A FALL ***"));
-        Serial.print(F("      free-fall "));
+        Serial.print(F("      route "));
+        Serial.print(gFallRoute == ROUTE_B ? F("B (topple, no free-fall)")
+                                           : F("A (dropped)"));
+        Serial.print(F(", free-fall "));
         Serial.print(gFreefallMs);
         Serial.print(F(" ms, impact "));
         Serial.print(gFallPeak, 2);
-        Serial.print(F(" g, then still for "));
-        Serial.print(FALL_STILL_MS);
+        Serial.print(F(" g"));
+        if (gFallRoute == ROUTE_B) {
+          Serial.print(F(", tilt "));
+          Serial.print((int) tilt);
+          Serial.print(F(" deg"));
+        }
+        Serial.print(F(", still for "));
+        Serial.print(needStill);
         Serial.println(F(" ms."));
         Serial.println(F("      On the band: 5 buzzes, `fall` to the phone, and the"));
         Serial.println(F("      wearer has 45 s to answer before the family is told."));
         Serial.println();
-      } else if (now - gFallSince > FALL_IMPACT_WINDOW_MS + FALL_STILL_MS + 1000) {
+      } else if (now - gFallSince > FALL_IMPACT_WINDOW_MS + needStill + 1000) {
         gFallStage = FS_IDLE;
         Serial.print(F("  REJECTED at stage 3: hit hard enough ("));
         Serial.print(gFallPeak, 2);
         Serial.print(F(" g) but never stayed still. Longest quiet run was "));
         Serial.print(gFallStillBest);
         Serial.print(F(" ms, needs "));
-        Serial.print(FALL_STILL_MS);
+        Serial.print(needStill);
         Serial.println(F(" ms."));
         Serial.println(F("             (this is the one that catches you out: you picked"));
         Serial.println(F("              it up. Somebody who trips and walks on looks"));
         Serial.println(F("              exactly like this, which is why the stage exists)"));
       }
       break;
+    }
   }
 
   // ---- proof of life ------------------------------------------------------
