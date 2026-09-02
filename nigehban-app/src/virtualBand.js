@@ -54,6 +54,24 @@ export const FALL = {
   STILL_MS:         1600,  // ...sustained: the person did not get straight up
 };
 
+// ---- an impact, which is a measurement and not a conclusion ---------------
+//
+// A crash has no free-fall to key off -- a rider hits a car with 1 g of gravity
+// on them the whole way -- so it never reaches the machine above. What is left
+// is a spike, and a spike on its own is also a phone dropped on a table, a door
+// slammed with it in a pocket, or a cricket bat.
+//
+// So this half deliberately concludes nothing. It reports how hard, how much
+// rotation and how still things went afterwards, and `motion.js` decides what
+// it was using the one fact neither this nor the band has: how fast the wearer
+// was travelling. Mirrors the IMPACT block in the .ino, and drifts the same way
+// if only one is edited.
+export const IMPACT = {
+  G:              8.0,   // tuned against the false positive -- see the .ino
+  SETTLE_MS:     1200,   // watch this long to see whether things stop
+  REFRACTORY_MS: 10000,  // one event per episode, not one per bounce
+};
+
 /**
  * THE GESTURE MAP — data, not control flow.
  *
@@ -455,6 +473,11 @@ export function useVirtualBand(onLine, active = true) {
   // accelerometer reports the same units (g), so the constants transfer.
   const fall        = useRef({ stage: 'idle', since: 0, freefallEnd: 0, peak: 0, stillFrom: 0 });
   const fallStageRef = useRef('idle');
+  // The impact reporter, run off the same samples. Separate state because the
+  // two are not exclusive: somebody thrown off a bike produces a real free-fall
+  // AND a 20 g spike, and both being reported is correct -- the phone raises
+  // one incident from whichever lands first and refuses to open a second.
+  const impact      = useRef({ stage: 'idle', since: 0, peak: 0, stillMs: 0, lastAt: 0 });
 
   useEffect(() => {
     if (!Accelerometer || !active) return undefined;
@@ -500,7 +523,11 @@ export function useVirtualBand(onLine, active = true) {
             if (t - f.stillFrom >= FALL.STILL_MS) {
               f.stage = 'idle';
               emit('fall', {
-                peak: Math.round(f.peak * 100) / 100,
+                // `peak_g`, spelled the way the .ino spells it. The whole point
+                // of this file is that the app cannot tell which band answered,
+                // and a field name that differs between them is exactly the
+                // kind of drift that makes one path work and the other not.
+                peak_g: Math.round(f.peak * 100) / 100,
                 still_ms: t - f.stillFrom,
                 src: 'imu',
               });
@@ -509,6 +536,34 @@ export function useVirtualBand(onLine, active = true) {
             break;
           }
           default: break;
+        }
+
+        // ---- the impact reporter, on the same sample ----------------------
+        const im = impact.current;
+        if (im.stage === 'idle') {
+          if (g >= IMPACT.G && t - im.lastAt > IMPACT.REFRACTORY_MS) {
+            im.stage = 'settling'; im.since = t; im.peak = g; im.stillMs = 0;
+          }
+        } else {
+          im.peak = Math.max(im.peak, g);
+          if (Math.abs(g - 1) < FALL.STILL_BAND_G) im.stillMs += 1000 / 104;
+          if (t - im.since >= IMPACT.SETTLE_MS) {
+            im.stage = 'idle';
+            im.lastAt = t;
+            // No buzz, deliberately. Most impacts are furniture, and a band
+            // that vibrates every time its wearer puts a hand down hard is a
+            // band that gets taken off. If the phone decides this was an
+            // accident it opens a check-in, and that buzzes.
+            emit('impact', {
+              peak_g: Math.round(im.peak * 10) / 10,
+              // No gyroscope is read here. The band has one and reports `rot`;
+              // this path leaves the field out rather than sending a zero,
+              // because a zero would read as "no rotation" -- a fact -- when it
+              // means "not measured".
+              still: Math.round(im.stillMs * 100 / IMPACT.SETTLE_MS),
+              src: 'imu',
+            });
+          }
         }
 
         if (f.stage !== fallStageRef.current) {

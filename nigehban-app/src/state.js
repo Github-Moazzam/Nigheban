@@ -56,6 +56,25 @@ const TRANSITIONS = {
   fall_pending: {
     SOS_RAISED:     'sos_live',          // countdown ran out, or they pressed SOS
     FALL_CANCELLED: 'rest',
+    // Stay put, but take the new detail. This is how the server's real deadline
+    // replaces the provisional one the phone drew a countdown from a moment
+    // earlier: `/checkin/self` answers with the `due_at` the SWEEPER will
+    // actually act on, and a countdown showing a different number is lying to
+    // the person deciding whether they still have time to press.
+    //
+    // It is not a way in for a second incident -- openIncidentCheckin refuses
+    // to start one while a question is already open, so nothing else reaches
+    // this row and a second impact cannot reset the clock on the first.
+    FALL_DETECTED:  null,
+    // The window ran out. Distinct from FALL_CANCELLED and doing exactly the
+    // same thing to the context, because the two are opposite events and a log
+    // that spells them the same way is a log that cannot answer the only
+    // question worth asking afterwards: did she press it, or did nobody?
+    FALL_ESCALATED: 'rest',
+    // The wearer answering. A fall check-in is answered by the same single tap
+    // as any other, and dropping it here is what would make the band's own
+    // "I'm fine" key do nothing during the one event it matters most for.
+    CHECKIN_CLOSED: 'rest',
     CHECKIN_ASKED:  null,                // answer the fall first
     HIGH_ALERT_SET: null,
   },
@@ -142,10 +161,26 @@ const APPLY = {
              responders: mergeResponders(same ? c.responders : [], alert?.acks) };
   },
   SOS_CLEARED:    (c)    => ({ ...c, activeSos: null, responders: [] }),
-  FALL_DETECTED:  (c, a) => ({ ...c, fall: { severity: a.severity ?? 4, endsAt: a.endsAt, note: a.note || '' } }),
+  // `checkinId` is the difference between a question the server is holding and
+  // one only this process is. Null means the phone was offline when the
+  // detector fired, and the countdown running out has to raise the alert here
+  // rather than leaving it to a sweeper that was never told. Everything that
+  // acts on the end of the window checks it.
+  FALL_DETECTED:  (c, a) => ({ ...c, fall: {
+    severity:  a.severity ?? 4,
+    reason:    a.reason || 'fall',
+    endsAt:    a.endsAt,
+    window:    a.window ?? null,
+    checkinId: a.checkinId ?? c.fall?.checkinId ?? null,
+    note:      a.note || '',
+  } }),
   FALL_CANCELLED: (c)    => ({ ...c, fall: null }),
+  FALL_ESCALATED: (c)    => ({ ...c, fall: null }),
   CHECKIN_ASKED:  (c, a) => ({ ...c, checkin: a.checkin }),
-  CHECKIN_CLOSED: (c)    => ({ ...c, checkin: null }),
+  // Also clears `fall`: in fall_pending this transition IS the fall being
+  // answered, and leaving the countdown in context would keep the modal on
+  // screen over a question that is closed.
+  CHECKIN_CLOSED: (c)    => ({ ...c, checkin: null, fall: null }),
   HIGH_ALERT_SET: (c, a) => ({ ...c, highAlert: !!a.on, nextBuzzAt: a.on ? (a.nextBuzzAt ?? c.nextBuzzAt) : null }),
 };
 
@@ -195,7 +230,11 @@ export function bandEventToAction(ev) {
   switch (ev.e) {
     case 'sos':
     case 'snatch':       return { type: 'SOS_RAISED' };
-    case 'fall':         return { type: 'FALL_DETECTED', severity: 4, note: ev.peak ? `peak ${ev.peak}g` : '' };
+    // App.js does not use this note any more -- it builds a richer one from the
+    // speed context, which this file has no business knowing about -- but the
+    // action type is still what routes a fall, and the field name has to match
+    // what both bands actually send. See `peak_g` in the .ino and virtualBand.
+    case 'fall':         return { type: 'FALL_DETECTED', severity: 4, note: ev.peak_g ? `peak ${ev.peak_g}g` : '' };
     case 'checkin_ack':  return { type: 'CHECKIN_CLOSED' };
 
     // The band's local nag timer expired. Two things this deliberately is not:

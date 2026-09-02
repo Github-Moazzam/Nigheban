@@ -12,6 +12,7 @@ const KIND = {
   sos:            { title: 'SOS',                 icon: 'alert-octagon' },
   snatch:         { title: 'Band torn off',       icon: 'alert-octagon' },
   fall:           { title: 'Fall detected',       icon: 'trending-down' },
+  accident:       { title: 'Road accident',       icon: 'alert-triangle' },
   checkin_missed: { title: 'Missed check-in',     icon: 'clock' },
   watch_lost:     { title: 'Went quiet while armed', icon: 'wifi-off' },
   going_dark:     { title: 'Phone about to die',  icon: 'battery' },

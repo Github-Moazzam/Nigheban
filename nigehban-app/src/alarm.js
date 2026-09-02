@@ -186,6 +186,10 @@ function alarmTitle(alert) {
     case 'sos':    return `EMERGENCY SOS — ${who}`;
     case 'snatch': return `BAND TORN OFF — ${who}`;
     case 'fall':   return `FALL DETECTED — ${who}`;
+    // Named as a road accident and not as a fall. A family member reading
+    // "fall" pictures a room; what they need to picture is a carriageway,
+    // because it changes who they call and how fast they leave.
+    case 'accident': return `ROAD ACCIDENT — ${who}`;
     default:       return `EMERGENCY — ${who}`;
   }
 }

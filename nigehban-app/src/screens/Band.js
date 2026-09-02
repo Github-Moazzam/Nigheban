@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Platform, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
@@ -6,6 +6,7 @@ import { MODES } from '../bandLink';
 import { C, MONO, S, T, fmtAgo } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, ProgressBar, Stat, Txt } from '../ui';
 import { HOLD_1_MS } from '../virtualBand';
+import { VEHICLE_KMH, noteSpeed, speedWatchStatus } from '../motion';
 
 const mono = Platform.select(MONO);
 
@@ -24,6 +25,13 @@ const mono = Platform.select(MONO);
 export default function Band({ band, serverOnline }) {
   const v = band.virtual;
   const virtual = band.mode === MODES.VIRTUAL;
+  // Read on each render rather than watched. This is a diagnostic panel,
+  // and a subscription that re-rendered the console on every GPS fix would
+  // cost more than the number is worth.
+  const speedCtx = speedWatchStatus();
+  // Only so the note can say "armed". The seeded samples age out of
+  // motion.js on their own; nothing here holds the arming.
+  const [armedAt, setArmedAt] = useState(0);
 
   // How far the finger is through the one hold threshold there is.
   const holdPhase = useMemo(() => {
@@ -61,6 +69,57 @@ export default function Band({ band, serverOnline }) {
               + 'difference, so everything downstream of the band is under test.'
             : 'Scanning for a physical Nigehban band over Bluetooth. Switch back to '
               + 'This phone if you have no band with you.'}
+        </Text>
+      </Card>
+
+      {/* ---- the accident path, at a desk, with no vehicle ----------------
+          Outside the `virtual` block on purpose. An impact on its own is
+          ignored -- motion.js only calls it an accident if the phone was
+          travelling in the twenty seconds before it -- so with a REAL band this
+          is the only way to test the crash path without actually driving
+          somewhere and hitting something. The band supplies the impact by being
+          struck; this supplies the speed that gives it meaning.
+
+          It writes real samples into the same history a GPS fix feeds, so
+          nothing downstream can tell them apart. That is the point, and it is
+          also why the window is short: twenty seconds, then it goes cold on its
+          own and cannot leave a phone permanently believing it is in traffic. */}
+      <Card>
+        <Txt variant="h2">Crash test</Txt>
+        <View style={s.btnRow}>
+          <View style={s.cell}>
+            <Button title="ARM CRASH TEST" tone={C.amber} icon="navigation"
+                    onPress={() => {
+                      // A run of samples, not one. `travellingSteadily` and the
+                      // peak both read a window, so a lone sample would prove
+                      // less than a real ride does.
+                      const t = Date.now();
+                      for (let i = 8; i >= 0; i--) {
+                        noteSpeed(VEHICLE_KMH * 1.8 / 3.6, t - i * 2000);
+                      }
+                      setArmedAt(Date.now());
+                    }} />
+          </View>
+          <View style={s.cell}>
+            {/* Three states, not two. "in a vehicle, no fix" is the journey
+                latch carrying it through a tunnel -- the case a driver hit at
+                speed depends on, and the one that would be invisible if this
+                only ever reported the live reading. */}
+            <Stat label="Speed seen" icon="activity"
+                  value={speedCtx.nowKmh == null ? '—' : `${Math.round(speedCtx.nowKmh)} km/h`}
+                  sub={!speedCtx.wasTravelling ? 'an impact now = ignored'
+                       : speedCtx.sawSpeed ? 'an impact now = accident'
+                       : 'an impact now = accident (in a vehicle, no fix)'}
+                  tone={speedCtx.wasTravelling ? C.amber : C.dim} />
+          </View>
+        </View>
+        <Text style={s.note}>
+          Pretends this phone has been doing {Math.round(VEHICLE_KMH * 1.8)} km/h for the
+          last 20 seconds. Press it, then within 20 seconds either hit the band hard
+          (real band) or press FORCE CRASH above (this phone). You should get the
+          accident countdown. Do it the other way round and nothing happens — that is
+          the speed gate working, not a fault.
+          {armedAt ? ' Armed — the window closes 20s after you pressed it.' : ''}
         </Text>
       </Card>
 
@@ -133,7 +192,7 @@ export default function Band({ band, serverOnline }) {
               </View>
               <View style={s.cell}>
                 <Button title="FORCE FALL" tone={C.amber} icon="trending-down"
-                        onPress={() => v.trigger('fall', { peak: 3.1 })} />
+                        onPress={() => v.trigger('fall', { peak_g: 3.1 })} />
               </View>
             </View>
             <View style={s.btnRow}>
@@ -146,10 +205,20 @@ export default function Band({ band, serverOnline }) {
                         onPress={() => v.deliver({ c: 'bat', v: 15 })} />
               </View>
             </View>
+
+            <View style={s.btnRow}>
+              <View style={s.cell}>
+                <Button title="FORCE CRASH" tone={C.red} icon="alert-triangle"
+                        onPress={() => v.trigger('impact', { peak_g: 19.4, rot: 640, still: 92 })} />
+              </View>
+              <View style={s.cell} />
+            </View>
+
             <Text style={s.note}>
-              Two events a thumb cannot produce at a desk. SNATCH has no gesture behind
+              Events a thumb cannot produce at a desk. SNATCH has no gesture behind
               it — anti-snatch is v2 — but the server already routes the event, so the
-              alert path stays testable.
+              alert path stays testable. FORCE CRASH needs ARM CRASH TEST pressed
+              first, in the card below; on its own it is correctly ignored.
             </Text>
           </Card>
 
@@ -177,6 +246,18 @@ export default function Band({ band, serverOnline }) {
                     tone={v.imu === 'live' ? C.green : C.dim} />
               <Stat label="Fall state" icon="trending-down" value={v.fallStage}
                     tone={v.fallStage === 'idle' ? C.dim : C.amber} />
+              {/* The other half of the accident detector, and the half that is
+                  invisible everywhere else. "Ignored" against a real impact is
+                  almost always this reading being blank. */}
+              <Stat label="Speed" icon="navigation"
+                    value={speedCtx.nowKmh == null ? '—'
+                                                   : `${Math.round(speedCtx.nowKmh)} km/h`}
+                    sub={speedCtx.error ? 'GPS unavailable — crash detection OFF'
+                         : speedCtx.wasTravelling ? 'crash detection armed'
+                         : speedCtx.armed ? 'not travelling'
+                         : 'no fix yet'}
+                    tone={speedCtx.error ? C.red
+                          : speedCtx.wasTravelling ? C.amber : C.dim} />
               <Stat label="Check-in" icon="help-circle"
                     value={v.awaitingAck ? 'Waiting' : 'Clear'}
                     tone={v.awaitingAck ? C.amber : C.dim} />
