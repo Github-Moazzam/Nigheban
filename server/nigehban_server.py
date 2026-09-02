@@ -63,7 +63,14 @@ def db_label():
     return f"{p.hostname}{p.path}" if p.hostname else "(DATABASE_URL not set)"
 
 SEVERITY = {
-    "sos": 5, "snatch": 5, "fall": 4, "checkin_missed": 3, "watch_lost": 3,
+    # A road accident sits with the SOS, not with the fall, and the difference
+    # is not a matter of degree. A fall is one person on the ground, and the
+    # thing that helps is somebody who knows them arriving. A crash is that
+    # plus traffic still moving through it, and the useful responder is
+    # whoever is closest -- which is what severity 5 buys: the Good Samaritan
+    # fan-out, and every family member paged rather than the nearest few.
+    "sos": 5, "snatch": 5, "accident": 5,
+    "fall": 4, "checkin_missed": 3, "watch_lost": 3,
     "going_dark": 3, "checkin_req": 2, "checkin_ack": 1, "low_battery": 1,
     # The band stopping is a maintenance problem -- the phone is still
     # reachable by push. going_dark is the phone, and that closes every path.
@@ -87,6 +94,40 @@ PRESENCE_FRESH_S   = 900
 # which is the situation this is actually for.
 PAIR_TTL_S      = 600
 CHECKIN_WINDOW_S = 90       # default deadline on "are you okay?"
+
+# ---- what an unanswered question turns into -------------------------------
+#
+# Every check-in that runs out used to become the same thing: `checkin_missed`,
+# severity 3, "she did not answer". For a parent's question that is exactly
+# right -- the only fact anyone has is the silence.
+#
+# For a fall or a crash it is a serious understatement, and the understatement
+# is the dangerous direction. Something measured an impact, asked the wearer
+# about it, and got nothing back. That is not "did not reply to a message", it
+# is "was hit and is not responding", and it has a location attached. Sending
+# that to a family as a severity-3 missed check-in buries the worst event the
+# product can detect under the same heading as a teenager ignoring their phone.
+#
+# So the reason the question was asked decides what the silence means. Anything
+# not named here is a question about nothing in particular and stays
+# `checkin_missed`.
+INCIDENT_ESCALATION = {
+    "fall":     "fall",       # severity 4
+    "accident": "accident",   # severity 5 -- see SEVERITY
+}
+
+# How long an incident check-in waits before it escalates, by reason.
+#
+# Shorter than the 90 s a parent's question gets, and deliberately so. A manual
+# check-in is answered at the wearer's convenience; these two are answered by
+# somebody who has just been hit, and every second of the window is a second in
+# which nobody has been called. Forty-five seconds is long enough to find the
+# phone in a pocket and short enough to matter.
+#
+# The accident window is the shorter of the two because the failure it guards
+# against is the worse one -- a motorway, at night, with traffic still coming.
+INCIDENT_WINDOW_S = {"fall": 45, "accident": 30}
+
 HIGH_ALERT_MIN_S = 300      # re-buzz window while High Alert is on
 HIGH_ALERT_MAX_S = 600
 BEAT_LOST_S      = 180      # armed and silent this long -> tell the family
@@ -415,6 +456,29 @@ class DeviceIn(BaseModel):
 
 class CheckinIn(BaseModel):
     window: int = CHECKIN_WINDOW_S
+
+
+class SelfCheckinIn(BaseModel):
+    """A detector on the phone asking its own wearer whether they are all right.
+
+    The one check-in nobody requested. `reason` is what fired -- see
+    INCIDENT_ESCALATION -- and it is the field that decides what the silence
+    becomes, so it is validated rather than trusted.
+
+    `lat`/`lon` are where the incident happened, captured at the impact and not
+    at the deadline; `note` is what the detector measured, in words a family
+    member can read.
+    """
+    reason: str = "fall"
+    window: Optional[int] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    note: str = ""
+    # The phone's id for one incident, reused across retries, exactly like
+    # AlertIn.client_id. An impact happens in the second the network is worst --
+    # under a flyover, in a ditch -- so this request WILL be retried, and two
+    # check-ins for one crash means two escalations and two pages.
+    client_id: Optional[str] = None
 
 
 class HighAlertIn(BaseModel):
@@ -1563,6 +1627,131 @@ async def ack_open_checkins(uid, by="app"):
     return len(rows)
 
 
+@app.post("/checkin/self")
+async def open_incident_checkin(b: SelfCheckinIn, u=Depends(me)):
+    """A detector fired. Ask the wearer, and tell NOBODY yet.
+
+    This is the endpoint that makes "a fall does not page your family" true.
+
+    The phone could hold this question by itself -- it has a clock and a screen
+    -- and for a while it did. The reason it cannot is the same reason the
+    sweeper exists at all: the scenarios this feature is FOR are the ones where
+    the phone stops being able to do anything a second after the impact. It
+    lands in a gutter and the screen breaks. The battery, already at 4%, goes
+    flat. An OEM battery manager kills the app because the screen has been off
+    for a minute. A rider is thrown one way and the phone the other.
+
+    In every one of those, a local timer means the question is asked, nobody
+    answers, and nothing ever happens -- the exact failure the product exists to
+    prevent, arrived at silently. Once the deadline is a row in this table, the
+    phone can be destroyed in the crash and the family is still told.
+
+    So: this writes the question down, buzzes the wrist through the socket if
+    the phone is still there to relay it, and returns. Nothing goes to the
+    family from here. The sweeper escalates it, and only if nobody answers.
+    """
+    reason = b.reason if b.reason in INCIDENT_ESCALATION else "fall"
+    # Generous, because throttling this is throttling the detector. The band's
+    # own refractory windows are the real rate limit; this only stops a wedged
+    # client hammering the table.
+    LIMIT.check("checkin_self", u["id"], 30, 300,
+                "too many incident check-ins - wait a moment")
+
+    window = b.window if b.window is not None else INCIDENT_WINDOW_S[reason]
+    window = max(10, min(int(window), 600))
+    now = time.time()
+
+    note = b.note[:400]
+
+    with closing(db()) as c:
+        # Idempotent on the phone's incident id -- see migration 005. The
+        # RETURNING is empty when the insert was swallowed as a duplicate,
+        # which is the retry case and is a success, not an error.
+        row = None
+        if b.client_id:
+            row = c.execute(
+                "INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at,"
+                " lat,lon,note,client_id) VALUES (%s,NULL,%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT (user_id,client_id) WHERE client_id IS NOT NULL"
+                " DO NOTHING RETURNING id,due_at,acked_at",
+                (u["id"], reason, now + window, now,
+                 b.lat, b.lon, note, b.client_id)).fetchone()
+            if row is None:
+                # Already open from the first attempt. Hand back that row's
+                # deadline, not a fresh one: the countdown the wearer is looking
+                # at must not restart every time the network retries.
+                row = c.execute(
+                    "SELECT id,due_at,acked_at FROM checkins"
+                    " WHERE user_id=%s AND client_id=%s",
+                    (u["id"], b.client_id)).fetchone()
+        else:
+            row = c.execute(
+                "INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at,"
+                " lat,lon,note) VALUES (%s,NULL,%s,%s,%s,%s,%s,%s)"
+                " RETURNING id,due_at,acked_at",
+                (u["id"], reason, now + window, now,
+                 b.lat, b.lon, note)).fetchone()
+        c.commit()
+
+    checkin_id, due_at = row["id"], row["due_at"]
+
+    # A retry that arrives after the wearer has already pressed "I'm fine".
+    #
+    # It happens in exactly the situation this endpoint is written for: the
+    # first request timed out in a dead zone, the wearer answered from the wrist
+    # in the meantime, and the phone's retry lands afterwards. Falling through
+    # would buzz them and re-open a countdown for an incident they have already
+    # settled -- the app telling somebody they might be hurt after they said
+    # they were not, which is precisely how a person stops trusting it.
+    #
+    # Nothing to escalate either: the row is acked, so the sweeper will not
+    # touch it. Answering the retry honestly is the whole job here.
+    if row["acked_at"] is not None:
+        return {"ok": True, "checkin_id": checkin_id, "due_at": due_at,
+                "reason": reason, "window": 0, "already_answered": True}
+
+    # Down the socket so the app can put the countdown on screen and buzz the
+    # band. `system: True` is how the phone tells this apart from a parent
+    # asking -- there is no `from` to show, and the wording has to be "we think
+    # you fell", not "Ammi is checking on you".
+    # `left`, not the window that was asked for. On a retry of a request that
+    # already succeeded, some of the window has gone -- and a countdown that
+    # restarts at 30 every time the network stutters is a countdown the sweeper
+    # is going to end before the screen does.
+    # `round`, not `int`. `now` was read before the insert, so on a fresh
+    # question this is 29.98 seconds rather than 30 -- and truncating turned a
+    # 30-second accident window into a reported 29, which is the app sizing its
+    # progress bar off a number the server does not actually mean. Rounding
+    # reports the window that was granted, and still shrinks honestly on a
+    # retry, where the time really has gone.
+    left = max(0, round(due_at - now))
+    await HUB.to(u["id"], {"t": "checkin_req", "checkin_id": checkin_id,
+                           "window": left, "due_at": due_at,
+                           "system": True, "reason": reason, "note": note})
+
+    # And to the OS, because the likeliest state of this app one second after a
+    # crash is "not running". A push is the only channel left that can put a
+    # full-screen question in front of somebody, and severity 4 is what
+    # notifications.js escalates to a heads-up alarm rather than a quiet row.
+    # Deliberately NOT paired with the silent data-only push that a severity-4
+    # ALERT gets. That one exists to drive the lock-screen takeover in
+    # bgNotifications.js, and that task reads `alert_id` and builds a screen
+    # that says a FAMILY MEMBER is in trouble. Firing it here would take the
+    # wearer's own screen over with somebody else's emergency -- their own,
+    # mislabelled -- at the exact moment they need to find one button. The
+    # visible push above is already on the DND-bypassing alarm channel, which
+    # is the part that has to work.
+    await send_expo_push_notifications(
+        [u["id"]],
+        "Are you okay?" if reason == "fall" else "Was that an accident?",
+        "Tap to say you are fine. Your family is told if you do not answer.",
+        {"checkin_id": checkin_id, "severity": 4, "reason": reason})
+
+    print(f"  {reason} check-in for {u['name']} - {left}s to answer")
+    return {"ok": True, "checkin_id": checkin_id, "due_at": due_at,
+            "reason": reason, "window": left}
+
+
 @app.post("/checkin/{member_id}")
 async def request_checkin(member_id: str, b: Optional[CheckinIn] = None, u=Depends(me)):
     """A parent asking 'are you okay?'. Only works inside the family."""
@@ -1867,8 +2056,50 @@ async def sweep_once(now):
     # each need their own, and holding one while awaiting would starve the pool.
     for r in due:
         late = int(now - r["due_at"])
-        await emit_alert(r["user_id"], "checkin_missed", source="server",
-                         note=f"no answer to a {r['reason']} check-in ({late}s late)")
+
+        # What the silence means depends on what was asked. A parent's question
+        # going unanswered is `checkin_missed` and always was. A fall or a crash
+        # going unanswered is the incident itself -- see INCIDENT_ESCALATION --
+        # and it carries the pin captured at the impact rather than nothing at
+        # all, because "she is not answering" and "she is not answering, here"
+        # are not the same message to send a family at 2 a.m.
+        kind = INCIDENT_ESCALATION.get(r["reason"], "checkin_missed")
+        if kind == "checkin_missed":
+            await emit_alert(r["user_id"], "checkin_missed", source="server",
+                             note=f"no answer to a {r['reason']} check-in ({late}s late)")
+            continue
+
+        what = ("A fall was detected" if kind == "fall"
+                else "A road accident was detected")
+
+        # `.get`, not `[...]`, and this is not defensive habit -- it is the
+        # sweeper. Migration 005 adds `lat`, `lon` and `note`, and on a database
+        # where it has not been applied yet a KeyError here does not just spoil
+        # the wording: it is raised inside the tick, caught by the loop, and
+        # EVERY deadline in the product stops passing -- missed check-ins, High
+        # Alert, the heartbeat watchdog -- while the server goes on printing one
+        # line every five seconds. Degrading to a placeless alert is bad; taking
+        # the whole escalation engine down with it is unacceptable.
+        #
+        # `lat`/`lon` come off the check-in row rather than from watch_state.
+        # The phone may have travelled a long way since -- carried in an
+        # ambulance, or thrown down the road -- and the place worth sending
+        # anyone is where the impact happened.
+        lat, lon = r.get("lat"), r.get("lon")
+        detail = r.get("note") or ""
+        # Only claim a pin when there is one. A fall detected indoors with no
+        # fix produces no coordinates, and telling a family "the pin is where it
+        # happened" over an empty map is worse than saying nothing -- they go
+        # looking at whatever the app last showed them.
+        placed = (" The pin is where the impact happened." if lat is not None
+                  else " There was no position fix, so this alert has no pin.")
+        await emit_alert(
+            r["user_id"], kind, source="detector", lat=lat, lon=lon,
+            note=(f"{what}, and there was no answer within "
+                  f"{int(r['due_at'] - r['created_at'])}s"
+                  + (f". {detail}" if detail else ".")
+                  + placed
+                  + " Try calling; if there is no answer, treat this as real."))
 
     for w in buzz:
         checkin_id, nxt = opened[w["user_id"]]

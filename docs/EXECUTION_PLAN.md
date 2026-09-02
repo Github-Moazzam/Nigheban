@@ -38,7 +38,7 @@ Samaritan · Alibaba Cloud deployment · Android background survival.
 | Old claim | What the plan has to account for |
 |---|---|
 | "Band firmware — working, unchanged" | Accurate for what it is. The ESP32 sketch is a **deliberate stand-in for early testing** — it says so in its own header, and it speaks the frozen protocol so the app never changes when the hardware does. That was the right call. The planning point is only that *porting* it to the XIAO is **a full day of work the old plan did not budget**. The board is in hand, so it starts Day 1. |
-| "Fall detection: `fall` event exists" | `HAS_IMU 0` — compiled out, never run. The code path targets an external **MPU6050 you do not need**: the XIAO Sense has an LSM6DS3TR-C on board. Delete that path rather than porting it. |
+| "Fall detection: `fall` event exists" | ~~`HAS_IMU 0` — compiled out, never run.~~ **Resolved 2 Sep 2026.** The MPU6050 path was deleted (F2.2) and the on-board LSM6DS3TR-C is now read at 100 Hz with `HAS_IMU 1`. A second detector, `impact`, was added for crashes — which have no free-fall stage — and the phone classifies it against GPS speed. See [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md). The thresholds are still uncalibrated. |
 | — | ~~The ESP32 band is **already your spare**.~~ **Retired 27 Aug 2026** — the board was dropped and its sketch deleted, so there is no spare band. See F5 in DEVELOPMENT_PLAN.md for what that costs and the two ways to cover it. |
 | "Guardian logic — working in Python" | True, and **stranded**. `nigehban_hub.py` is not wired into the app or the server. |
 | — | `POST /family` links two accounts **without the other person's consent**. Safety bug in a product for people avoiding stalkers. Fix in Phase 0. |

@@ -142,7 +142,7 @@ the pre-`3d5efb9` behaviour restored on purpose.
 
 | # | Feature | Done | Missing |
 |---|---|---|---|
-| 20 | **Fall detection** | Phone-side state machine at 104 Hz, 30 s/15 s countdown, `near_miss` written and told to nobody | `HAS_IMU 0` in the firmware — **the band cannot detect a fall at all**. Thresholds never calibrated against real CSV |
+| 20 | **Fall & accident detection** | `HAS_IMU 1`: both state machines on the band and on the phone, `impact` gated on GPS speed, the question routed through `/checkin/self` so the sweeper escalates with the app dead, `near_miss` written and told to nobody | **Thresholds are still the literature's starting values** — the drop tests and the false-positive set in [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) have not been run on the band yet. Wake-on-motion is deferred, so the IMU costs 0.4–0.5 mA of the 200–400 µA idle budget |
 | 21 | **Android background survival** | Foreground service, BLE reconnect loop, scan timeout, battery-optimisation prompt, OEM deep links | **N2.3** boot receiver · **N2.4** WorkManager watchdog. A rebooted phone does not come back on its own |
 
 ### ☐ Not built (7)
@@ -453,9 +453,11 @@ precisely so it cannot be timed by somebody watching.
 | Phone accelerometer state machine at 104 Hz | ✅ [`virtualBand.js`](../nigehban-app/src/virtualBand.js) |
 | 30 s (sev 4) / 15 s (sev 5) countdown, vibrating through the last five seconds | ✅ [`FallCountdown.js`](../nigehban-app/src/components/FallCountdown.js) |
 | "I'm fine" writes a `near_miss` the server records and tells nobody | ✅ |
-| PIN-gated cancel on the end-user shell | ✅ [`DisarmPad.js`](../nigehban-app/src/screens/user/DisarmPad.js) |
-| **On the band** | ❌ `#define HAS_IMU 0` — the LSM6DS3TR-C is never read |
-| **Threshold calibration** | ❌ F3.3's CSV logging was never run; thresholds are the exec plan's starting guesses |
+| Hold-to-cancel on the end-user shell, plus one press on the band | ✅ [`DisarmPad.js`](../nigehban-app/src/screens/user/DisarmPad.js) — **the PIN was removed from this screen on 2 Sep 2026.** Asking somebody who has just hit the ground to recall a passcode in 45 s was buying a false alarm, and the band's single tap already walked past the gate. A 1.5 s hold answers the real threat (a pocket) without a memory test. The PIN still gates High Alert disarm, family removal and the SOS drop, where there is an adversary. See [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) |
+| **On the band** | ✅ `#define HAS_IMU 1` — LSM6DS3TR-C at 100 Hz, range set to 16 g explicitly |
+| **Crash detection** | ✅ `impact` reported by the band, classified against GPS speed in [`motion.js`](../nigehban-app/src/motion.js) |
+| **Escalation survives the app being killed** | ✅ `POST /checkin/self` → `checkins` row → the sweeper raises `fall`/`accident` |
+| **Threshold calibration** | ❌ still the starting values. `{"c":"imucal","on":1}` streams the CSV; the protocol is in [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) |
 
 **Test (L2):** BAND tab → **FORCE FALL**, or actually drop the phone onto a
 cushion. The countdown appears; cancelling writes a `near_miss` that the family
@@ -695,7 +697,7 @@ reads as broken. [Blocker #11](#6-blockers-ranked).
 | Line framing — explicit chunking, retry only the failed piece | ✅ (the fault that made everything else look broken) |
 | Scan by service UUID, 10 s timeout, one connect guard, data watchdog | ✅ |
 | Battery ADC | ◑ code written, **unstable and uncalibrated** |
-| IMU / fall | ❌ `HAS_IMU 0` |
+| IMU / fall / impact | ✅ `HAS_IMU 1`, both machines live · ❌ thresholds uncalibrated, IMU power cost not measured |
 | Motor driver, LiPo, power budget, enclosure | ❌ not built |
 | Reconnect after the app is killed | ◐ written `59fc02d`, **not observed** |
 | Spare band | ✗ **struck** — the ESP32 was retired; there is no spare |
@@ -769,8 +771,9 @@ own**, on the **release** APK, against the **cloud**. None of that has happened.
 | 14 | **Phone** battery to 5 % → `going_dark` | ◐ | Untested |
 | 15 | High Alert buzz at 5–10 min; miss → alert | ✅ | L2 |
 | 16 | High Alert disarm without PIN → refused | ✅ | L1/L2 |
-| 17 | Fall: drop the band from 1.5 m | ❌ | **`HAS_IMU 0`** — phone-side only |
+| 17 | Fall: drop the band from 1.5 m | ◐ | Code is live; the drop tests themselves are unrun. [Protocol](FALL_AND_ACCIDENT.md) |
 | 18 | Fall: phone slides off a sofa → **no** alert | ◐ | Never measured against real CSV |
+| 18b | Hard impact at 40 km/h → accident check-in → family told if unanswered | ◐ | Bench path testable via FAKE SPEED + FORCE CRASH; in-vehicle tests unrun |
 | 19 | Kill the service from OEM settings → family amber in 3 min | ✅ | L2 |
 | 20 | Good Samaritan on a severity-5 alert | ✅ | L0 |
 
@@ -921,11 +924,21 @@ under-settled. `App.js` works around it with a 3-reading streak requirement.
 **Blast radius was reduced, not removed:** since the battery split this only
 drives a severity-1 notice, where it used to raise "phone about to die."
 
-### 6. `HAS_IMU 0` — the band cannot detect a fall
-**Severity: medium.** Matrix row 17 cannot pass. Row 18 (the false-positive
-check) has never been measured, because F3.3's CSV logging was never run —
-and untuned thresholds are the fastest way to lose trust: a bag falling off a
-chair must not page a mother at 2 a.m.
+### 6. The fall thresholds have never met a real wrist
+**Severity: medium.** `HAS_IMU` is now `1` and both detectors run, so rows 17
+and 18 are reachable — but every threshold is still the value the literature
+and the phone suggested, and **untuned thresholds are the fastest way to lose
+trust: a bag falling off a chair must not page a mother at 2 a.m.**
+
+The capture path exists now (`{"c":"imucal","on":1}` streams 100 Hz CSV to USB
+serial) and [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) carries the drop
+heights, the surfaces and — the half that matters more — the false-positive set
+that must stay silent. Until that has been run, treat the numbers as guesses.
+
+A second, quieter cost rides along: polling the IMU at 100 Hz draws 0.4–0.5 mA
+against a 200–400 µA idle budget, so **the 1–2 week battery claim does not
+survive this feature unchanged.** The fix is the part's own wake-on-motion
+interrupt, which is deferred.
 
 ### 7. The band hardware does not exist
 **Severity: medium.** No motor driver, no LiPo, no power budget. The band cannot

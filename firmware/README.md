@@ -19,7 +19,7 @@ Covers milestone **F1** and de-risks **F2 / F3 / F4** in
 |---|---|
 | Core | **Seeed nRF52 Boards** (`Seeeduino:nrf52`) — the Adafruit Bluefruit core |
 | Board | Tools → Board → **Seeed XIAO nRF52840 Sense** (must say *Sense*) |
-| Library | Library Manager → **Seeed Arduino LSM6DS3** (T4 only) |
+| Library | Library Manager → **Seeed Arduino LSM6DS3** (T4, T7, and the shipping firmware) |
 | Monitor | 115200 baud |
 
 Boards Manager URL, if not already in Preferences:
@@ -152,9 +152,47 @@ would also over-drive a 3 V coin motor.
 | **T3** | [t3_button_motor](t3_button_motor/) | motor + button | Buzz at 3 s, double-buzz at 5 s, timings match a stopwatch |
 | **T4** | [t4_imu](t4_imu/) | none | `IMU OK`, az ≈ 1.00 g flat, `mag` spikes when shaken |
 | **T6** | [t6_ble](t6_ble/) | none | `Nigehban-01` in nRF Connect, heartbeat notifies, writes echo back |
+| **T7** | [t7_fall_tuning](t7_fall_tuning/) | none | Not a pass/fail test — a **measuring instrument**. See below |
 
 **T1 before you wire anything.** It proves the core, board selection, port and
 upload path while there is nothing else to blame.
+
+**T7 is different from the other six.** They answer "is this hardware
+working"; T7 answers "is this *threshold* right", which has no pass line —
+only numbers and a judgement. Run it after T4 passes, whenever a fall
+threshold is in question, and before believing any of them.
+
+It runs the **shipping** state machines with the **shipping** constants, and
+narrates every stage. That matters because
+[`nigehban_band_nrf52.ino`](../nigehban_band_nrf52/nigehban_band_nrf52.ino)
+is silent about a near miss: "I dropped it and nothing happened" reads
+identically to "the IMU is dead". T7 tells you which of the three stages
+rejected the attempt and by how much, so you know which number to move and
+in which direction.
+
+```
+  SHOCK  [##########      ]  peak 11.40 g   spin 512 deg/s   lasted 180 ms
+         impact threshold 8.00 g -> the band WOULD send `impact` to the phone.
+
+  REJECTED at stage 3: hit hard enough (6.80 g) but never stayed still.
+             Longest quiet run was 420 ms, needs 1600 ms.
+```
+
+Throw it at a wall, wear it and jump off a chair, roll off the bed with it
+on — every one of those prints a verdict. Type `h` for the thresholds, `c`
+for raw CSV to plot, `s` for a session summary.
+
+> **The usual surprise is stage 3.** A fall needs 1.6 s of stillness after
+> the landing, so if you catch the band, pick it up, or turn it over to look
+> at the LED, you have told the detector the wearer got straight back up.
+> Drop it and count to three before touching it.
+
+> **Changing a threshold means changing it in three places** — this sketch,
+> the shipping `.ino`, and `FALL` / `IMPACT` in
+> `nigehban-app/src/virtualBand.js`. The last two are what ship; T7 only
+> tells you the truth about them. The method — drop heights, surfaces, and
+> the false-positive set that must stay silent — is in
+> [docs/FALL_AND_ACCIDENT.md](../docs/FALL_AND_ACCIDENT.md).
 
 **T2/T3:** hold the coin motor between two fingers — on a desk it just skitters.
 **Tape it down**, or it will vibrate jumper wires out of the breadboard and you

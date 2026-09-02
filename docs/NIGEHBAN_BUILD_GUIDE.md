@@ -84,7 +84,7 @@ it.
 | 1 | ESP32 dev board (WROOM-32 / C3 SuperMini) | Any board with BLE |
 | 2 | 2 × tactile push buttons | No resistors needed — internal pull-ups |
 | 3 | Breadboard + jumpers | |
-| 4 | *(optional)* MPU6050 | For fall detection — set `HAS_IMU 1` |
+| 4 | ~~MPU6050~~ | **Not needed and not supported.** The XIAO Sense carries an LSM6DS3TR-C on board at `0x6A`, which is what `HAS_IMU 1` reads. The external-IMU path was deleted in F2.2 |
 | 5 | *(optional)* coin vibration motor + 2N2222 + 1N4148 + 1kΩ | For haptic feedback |
 
 ### 2.2 Wiring

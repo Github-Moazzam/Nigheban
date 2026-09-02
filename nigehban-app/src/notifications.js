@@ -352,6 +352,7 @@ export async function showOwnSosNotification(alert, responders = []) {
     const at = raisedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const what = alert?.kind === 'snatch' ? 'Band torn off'
       : alert?.kind === 'fall' ? 'Fall detected'
+      : alert?.kind === 'accident' ? 'Road accident'
       : 'SOS';
 
     // Who is coming, once anyone is. The server pushes its own notification the

@@ -25,6 +25,10 @@ import { bandEventToAction, useSafetyMachine } from './src/state';
 import { C, S, T, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
 import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/watch';
+import {
+  INCIDENT_WINDOW_S, classifyImpact, describeImpact, noteImpact, speedContext,
+  travellingSteadily, useSpeedWatch,
+} from './src/motion';
 import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
 import { wantsBand } from './src/band';
 import {
@@ -54,8 +58,12 @@ const TABS = [
   ['setup',  'Setup',  'settings'],
 ];
 
+/** The kinds that put an emergency on screen and into the offline queue. */
+const EMERGENCY_KINDS = ['sos', 'snatch', 'fall', 'accident'];
+
 const TAKEOVER_TITLE = {
   sos: 'SOS', snatch: 'BAND TORN OFF', fall: 'FALL DETECTED',
+  accident: 'ROAD ACCIDENT',
   // Not "watch stopped reporting". That reads as a gadget fault, and a family
   // triages it like one; the fact worth acting on is that the phone went quiet
   // *while armed*, which is the state where silence is the signal.
@@ -402,7 +410,13 @@ function Main() {
     const body = {
       lat: at?.lat, lon: at?.lon, accuracy: at?.acc, client_id: clientId, ...payload,
     };
-    const isEmergency = ['sos', 'snatch', 'fall'].includes(payload.kind);
+    // `accident` belongs here with the rest. Everything this flag gates --
+    // the local-first dispatch, the sticky own-SOS notification, the
+    // offline queue, the delivery outcome sent back to the wrist -- is
+    // exactly what a crash alert needs, and leaving it out would make the
+    // most serious event the detector can raise the only one that silently
+    // fails to queue when there is no signal.
+    const isEmergency = EMERGENCY_KINDS.includes(payload.kind);
 
     // LOCAL-FIRST: fire the state machine and vibrate immediately, before
     // the network call. The user must know their button press registered,
@@ -578,6 +592,110 @@ function Main() {
     }
   }, [session, dispatch, bump]);
 
+  /**
+   * When the last incident question was opened, for the re-entrancy guard
+   * inside openIncidentCheckin. A ref rather than state on purpose: it has to
+   * be readable and writable in the same synchronous turn, which is exactly
+   * what state cannot do.
+   */
+  const incidentAt = useRef(0);
+
+  /**
+   * A detector fired. Ask the wearer, and tell nobody.
+   *
+   * This is the whole of "a fall does not page your family". The question goes
+   * to the SERVER, not to a timer in this process, because the situations this
+   * exists for are the ones where this process is about to stop existing: the
+   * phone lands screen-down in a gutter, the battery gives out, an OEM battery
+   * manager kills the app the moment the screen goes off, the rider goes one
+   * way and the phone the other. A local countdown in any of those is a
+   * question asked, unanswered, and then silently dropped -- the exact failure
+   * the product exists to prevent, arrived at quietly.
+   *
+   * Once `/checkin/self` has returned, the deadline is a row in the database
+   * and the sweeper owns it. This phone can be destroyed in the next second and
+   * the family is still told.
+   *
+   * The local countdown below is the OFFLINE path, and only that. With no
+   * network there is no server to hold the deadline, so the phone holds it
+   * itself and raises the alert into the offline queue if it runs out -- which
+   * is worse (it dies with the app) and is still much better than nothing.
+   */
+  const openIncidentCheckin = useCallback(async (reason, ev) => {
+    if (!session) return;
+    if (stateRef.current === 'sos_live') return;   // already the worst case
+    if (stateRef.current === 'fall_pending') return;  // one question per episode
+
+    // The state guard above is not enough on its own, and the case it misses is
+    // the normal one for a serious crash. Somebody thrown off a bike produces a
+    // real free-fall AND a 20 g spike, so the band sends `fall` and `impact`
+    // milliseconds apart -- and `stateRef` is only refreshed on render, so the
+    // second one arrives before React has been anywhere near the first. Both
+    // pass, and one accident becomes two questions, two rows and two
+    // escalations to the same family.
+    //
+    // A timestamp read and written synchronously is what actually closes it.
+    // The window matches the band's own IMPACT_REFRACTORY_MS: inside ten
+    // seconds, everything the IMU reports is the same episode.
+    const nowMs = Date.now();
+    if (nowMs - incidentAt.current < 10000) return;
+    incidentAt.current = nowMs;
+
+    const at = fix || await lastKnownFix();
+    const ctxNow = speedContext();
+    const note = (describeImpact(ev, ctxNow)
+                  + (ev?.ff_ms ? ` Free-fall lasted ${ev.ff_ms}ms.` : '')).trim();
+    const clientId = pressId();
+
+    // On screen immediately, before the network call, for the same reason
+    // `raise` dispatches before its POST: the wearer must see the countdown
+    // and get their chance to cancel even with no signal at all. The deadline
+    // shown here is provisional and is replaced by the server's below.
+    const localWindow = INCIDENT_WINDOW_S[reason] ?? 45;
+    dispatch('FALL_DETECTED', {
+      severity: reason === 'accident' ? 5 : 4,
+      reason,
+      note,
+      window: localWindow,
+      endsAt: Date.now() + localWindow * 1000,
+    });
+    noteImpact();
+    Vibration.vibrate([0, 400, 200, 400, 200, 400]);
+
+    // The band asks the question on the wrist, which is the only channel that
+    // reaches somebody face down on a pavement with the phone across the road.
+    // It nags on its own from here -- see CHECKIN_NAG_MS in the .ino.
+    try { bandRef.current?.send?.({ c: 'checkin_req', window: localWindow }); } catch { /* no band */ }
+
+    try {
+      const r = await call(session, '/checkin/self', {
+        method: 'POST',
+        body: { reason, lat: at?.lat, lon: at?.lon, note, client_id: clientId },
+        timeout: ALERT_TIMEOUT,
+      });
+      // The wearer already answered this one -- from the wrist, while the
+      // first attempt was timing out in a dead zone. Take the countdown off
+      // the screen rather than starting one for a question that is closed.
+      if (r.already_answered) { dispatch('FALL_CANCELLED'); return; }
+
+      // The server's deadline replaces the local guess. It is authoritative --
+      // the sweeper is going to act on THAT number, so a countdown showing a
+      // different one is lying to the person deciding whether to press.
+      dispatch('FALL_DETECTED', {
+        severity: reason === 'accident' ? 5 : 4,
+        reason, note, checkinId: r.checkin_id,
+        window: r.window ?? localWindow, endsAt: r.due_at * 1000,
+      });
+    } catch {
+      // No network. The countdown above stands, and running out will raise the
+      // alert into the offline queue rather than into the sweeper. Said plainly
+      // on screen, because the two are not equally reliable and the wearer is
+      // the one who may need to make a phone call instead.
+      setToast('No signal — if you do not answer, the alert will send as soon as '
+               + 'connection returns');
+    }
+  }, [session, fix, dispatch]);
+
   // ---- the band drives the same actions ----------------------------------
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
@@ -585,15 +703,31 @@ function Main() {
   stateRef.current = state;
 
   const onBandEvent = useCallback((ev) => {
+    // ---- a spike the band could not interpret -------------------------------
+    //
+    // Handled before bandEventToAction, and deliberately not by it: `impact` is
+    // not a transition. It is a measurement, and whether it means anything at
+    // all depends on the phone's speed history, which the reducer has no
+    // business knowing about. The band sends these freely -- a hand put down
+    // hard on a table clears 8 g -- and the speed gate is the entire reason
+    // that is acceptable rather than a stream of false alarms.
+    if (ev.e === 'impact') {
+      if (classifyImpact(ev) !== 'accident') return;
+      openIncidentCheckin('accident', ev);
+      return;
+    }
+
     const action = bandEventToAction(ev);
     if (!action) return;
 
     if (action.type === 'FALL_DETECTED') {
       if (stateRef.current === 'sos_live') return;      // already the worst case
-      dispatch('FALL_DETECTED', {
-        severity: 4, note: action.note,
-        endsAt: Date.now() + FALL_WINDOW_S[4] * 1000,
-      });
+      // A fall while travelling at road speed is an accident, whatever the
+      // band called it. The free-fall the band saw is a rider leaving a bike,
+      // and the family needs to be sent to a carriageway rather than told
+      // somebody tripped.
+      const reason = speedContext().wasTravelling ? 'accident' : 'fall';
+      openIncidentCheckin(reason, ev);
       return;
     }
 
@@ -616,8 +750,14 @@ function Main() {
       // Key 1 is "I'm fine": it stands down a live alert, otherwise it answers
       // the open question. Start and stop from the band, with no firmware change.
       const live = ctxRef.current.activeSos;
-      if (live) resolve(live.id);
-      else ackCheckin(ctxRef.current.checkin);
+      if (live) { resolve(live.id); return; }
+      // A fall or an accident is a question too, and it is the one this key
+      // matters most for: the wearer is on the ground with the phone somewhere
+      // else, and the wrist is the only thing in reach. Routed to cancelFall
+      // rather than to ackCheckin so the "nobody was told" note is written and
+      // the countdown actually comes off the screen.
+      if (stateRef.current === 'fall_pending') { cancelFallRef.current?.(); return; }
+      ackCheckin(ctxRef.current.checkin);
       return;
     }
 
@@ -636,7 +776,8 @@ function Main() {
       // so that it outlives this app being killed.
       toggleHighAlert(action.on);
     }
-  }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert, reportOutcome]);
+  }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert, reportOutcome,
+      openIncidentCheckin]);
 
   const band = useBandLink(onBandEvent);
   bandRef.current = band;
@@ -887,6 +1028,17 @@ function Main() {
   // the only way the server can know who is close to somebody else's emergency.
   usePresence(session, fix);
 
+  // The speed history that turns an 11 g spike into either "a door slammed" or
+  // "a road accident". It has to already be running when the impact happens --
+  // there is no asking afterwards how fast somebody was going -- which is why
+  // this is a standing watch and not something the detector starts.
+  //
+  // It costs battery, so it is tied to the phone actually acting as a safety
+  // device rather than merely being signed in. A family member watching from
+  // across town has no impacts to classify, and their emergencies arrive by
+  // push whether or not this is running.
+  useSpeedWatch(!!session && (band.status === 'connected' || band.mode !== MODES.BLE));
+
   // ---- live socket --------------------------------------------------------
   const serverOnline = useLive(session, {
     alert: (m) => {
@@ -927,6 +1079,22 @@ function Main() {
         : `${m.by.name} has seen your alert and is responding`);
     },
     checkin_req: (m) => {
+      // A detector's question, not a person's. Two things make it different
+      // and both matter: there is no `from` to name, and it belongs on the
+      // full-screen countdown rather than in a bottom sheet somebody can
+      // scroll past. `/checkin/self` sends this back to the phone that raised
+      // it -- harmlessly, since FALL_DETECTED is a no-op once fall_pending --
+      // and it is also how a SECOND device on the same account finds out.
+      if (m.system && INCIDENT_WINDOW_S[m.reason] != null) {
+        dispatch('FALL_DETECTED', {
+          severity: m.reason === 'accident' ? 5 : 4,
+          reason: m.reason, note: m.note || '', checkinId: m.checkin_id,
+          window: m.window, endsAt: (m.due_at || 0) * 1000,
+        });
+        Vibration.vibrate([0, 400, 200, 400, 200, 400]);
+        band.send({ c: 'checkin_req', window: m.window ?? 45 });
+        return;
+      }
       const checkin = {
         ...m.from, checkin_id: m.checkin_id, window: m.window || 90,
         due_at: m.due_at, _startAt: Date.now() / 1000,
@@ -1051,7 +1219,7 @@ function Main() {
     try {
       const mine = await call(session, '/alerts?scope=mine&limit=5');
       const live = (mine || []).find(
-        (a) => !a.resolved_at && ['sos', 'snatch', 'fall'].includes(a.kind));
+        (a) => !a.resolved_at && EMERGENCY_KINDS.includes(a.kind));
       if (!live) return;
 
       const known = ctxRef.current.activeSos;
@@ -1144,17 +1312,117 @@ function Main() {
     setDeliveryStatus(null);
   };
 
-  // The two ways out of the fall window. Both shells offer them; only the
-  // asking differs, so the consequences are defined once here.
-  const cancelFall = useCallback(() => {
-    dispatch('FALL_CANCELLED');
-    raise({ kind: 'near_miss', source: 'band', note: ctx.fall?.note || '' });
-    setToast('Cancelled — noted for you only, nobody was told');
-  }, [dispatch, raise, ctx.fall]);
+  // ---- the three ways out of the incident window ---------------------------
+  //
+  // Every one of them has to close the SERVER's question as well as this
+  // screen, whenever there is one. A modal dismissed while a `checkins` row is
+  // still open and unacked is a wearer who has said "I'm fine", watched the
+  // countdown disappear, and whose family gets paged thirty seconds later
+  // anyway -- which is the worst outcome in the whole feature, because it
+  // teaches them the cancel button does not work.
 
-  const escalateFall = useCallback(() => {
-    raise({ kind: 'fall', source: 'band', note: ctx.fall?.note || '' });
-  }, [raise, ctx.fall]);
+  /** "I'm fine." Nobody is told, and a private note is kept for tuning. */
+  const cancelFall = useCallback(async () => {
+    const f = ctxRef.current.fall;
+    dispatch('FALL_CANCELLED');
+    // Let the detector fire again immediately. The guard exists to collapse the
+    // `fall` and `impact` that one crash produces milliseconds apart, and a
+    // human reaching this point has taken far longer than that -- so holding it
+    // any longer would only mean that somebody who cancels a false alarm and
+    // then genuinely comes off their bike five seconds later gets no question
+    // at all.
+    incidentAt.current = 0;
+    setToast('Cancelled — noted for you only, nobody was told');
+    // The near-miss is the record that the detector nearly fired. It is a
+    // PRIVATE_KIND on the server: written down, sent to nobody, and the only
+    // honest source of false-positive rates once this is on real wrists.
+    raise({ kind: 'near_miss', source: 'band',
+            note: `${f?.reason || 'fall'} cancelled by the wearer. ${f?.note || ''}`.trim() });
+    if (!f?.checkinId) return;
+    try {
+      await call(session, `/checkin/${f.checkinId}/ack`, { method: 'POST' });
+      reportOutcome('delivered');
+    } catch {
+      // The cancel did not reach the server, so the sweeper is still going to
+      // escalate. Saying nothing here would let the wearer walk away believing
+      // they had stopped it.
+      reportOutcome('failed');
+      setToast('Could not reach the server — your family may still be told. '
+               + 'Try again, or call them.');
+    }
+  }, [dispatch, raise, session, reportOutcome]);
+  const cancelFallRef = useRef(cancelFall);
+  cancelFallRef.current = cancelFall;
+
+  /** "I need help now" — the wearer skipping the rest of the countdown. */
+  const escalateFall = useCallback(async () => {
+    const f = ctxRef.current.fall;
+    raise({ kind: f?.reason === 'accident' ? 'accident' : 'fall',
+            source: 'band', note: f?.note || '' });
+    // Close the question behind it. The alert has already told everyone the
+    // check-in would have told; leaving the row open means the sweeper pages
+    // the same family a second time for the same event a minute later.
+    if (f?.checkinId) {
+      try { await call(session, `/checkin/${f.checkinId}/ack`, { method: 'POST' }); }
+      catch { /* the alert is out, which is the part that matters */ }
+    }
+  }, [raise, session]);
+
+  /**
+   * The window ran out with no answer.
+   *
+   * Whether this phone does anything depends entirely on whether the server
+   * ever heard about the incident. If it did, the deadline belongs to the
+   * sweeper and this must stay out of the way -- raising the alert from here
+   * too would page the family twice for one fall, with two rows and two
+   * timestamps that disagree.
+   *
+   * If it did not -- the detector fired with no signal -- then this process is
+   * the only thing that knows, and it has to raise the alert into the offline
+   * queue itself.
+   */
+  const expireFall = useCallback(() => {
+    const f = ctxRef.current.fall;
+    dispatch('FALL_ESCALATED');
+    if (f?.checkinId) {
+      setToast('No answer — your family is being told. '
+               + 'Answering now still tells them you are fine.');
+      return;
+    }
+    raise({ kind: f?.reason === 'accident' ? 'accident' : 'fall',
+            source: 'band', note: f?.note || '' });
+  }, [dispatch, raise]);
+
+  /**
+   * THE ONE AUTOMATIC WAY OUT: they are still riding.
+   *
+   * A rider who hits a pothole at 50 km/h takes a real 12 g through the wrist
+   * and is completely fine. Asking them to answer a check-in is asking somebody
+   * to tap a wristband one-handed at speed, which is more dangerous than the
+   * false alarm it prevents -- so sustained travel stands the question down on
+   * their behalf.
+   *
+   * `travellingSteadily` is where the care is. It is not "the speed is not
+   * zero": a wrecked car spins, coasts, gets pushed down the road and is often
+   * moving for a long time afterwards, and reading that as "fine" is exactly
+   * the failure this whole design is arranged to avoid. It requires twenty
+   * unbroken seconds ABOVE road speed, every sample, with no second impact --
+   * because nothing but a conscious person keeps a vehicle there.
+   *
+   * Falls do not get this. There is no vehicle to be coherently driving, and
+   * "started moving again" after a fall is a person crawling as easily as a
+   * person walking off.
+   */
+  useEffect(() => {
+    if (state !== 'fall_pending' || ctx.fall?.reason !== 'accident') return undefined;
+    const id = setInterval(() => {
+      if (!travellingSteadily()) return;
+      clearInterval(id);
+      cancelFallRef.current?.();
+      setToast('You are moving normally again — the accident check was stood down');
+    }, 2000);
+    return () => clearInterval(id);
+  }, [state, ctx.fall?.reason]);
 
   const respondAsSamaritan = useCallback(async (alertId) => {
     const r = await call(session, `/samaritan/${alertId}/respond`, { method: 'POST' });
@@ -1275,12 +1543,14 @@ function Main() {
           fall={is('fall_pending') ? ctx.fall : null}
           onCancel={cancelFall}
           onEscalate={escalateFall}
+          onExpire={expireFall}
         />
       ) : (
         <DisarmPad
           fall={is('fall_pending') ? ctx.fall : null}
           onCancel={cancelFall}
           onEscalate={escalateFall}
+          onExpire={expireFall}
         />
       )}
 
