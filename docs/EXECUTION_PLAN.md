@@ -238,9 +238,36 @@ anti-snatch instead of calling for help. v2 needs a different affordance.
 {"t":"cmd","c":"buzz","n":2}
 {"t":"cmd","c":"alarm"}
 {"t":"cmd","c":"ack"}
+{"t":"cmd","c":"queued"}
+{"t":"cmd","c":"failed"}
 ```
 
-The existing `handleCommand()` already implements all four — keep it verbatim.
+The existing `handleCommand()` already implements the first four — keep it
+verbatim.
+
+**Extended 1 Sep 2026, additively**, on `feat/press-feedback-and-link-led`. The
+full reasoning is in [BAND_FEEDBACK_SPEC.md](BAND_FEEDBACK_SPEC.md); what
+changed here:
+
+| Command | Meaning | Note |
+|---|---|---|
+| `ack` | the **server** has the event; the family has been paged | Was already in the protocol carrying exactly this meaning, and nothing had ever sent it. Now sent, and its buzz changed from `1 × 60/60`. |
+| `queued` | **new.** The phone has it, the network does not | The case the old confirmation hid completely — the alert is safe on the phone and nobody has been told. |
+| `failed` | **new.** The phone knows it did not go | |
+
+Additive only: no existing command changed shape, so an older band talking to a
+newer app ignores the two new ones and simply does not buzz. The band ignores
+all three unless it is actually waiting for an answer.
+
+**Why the kind is not on the wire.** An SOS being delivered and a check-in being
+answered feel different on the wrist, but `ack` does not say which — the band
+sent the event, so it already knows what it is waiting to hear about. Putting
+the kind in the message would be a second source of truth able to disagree with
+the first.
+
+`virtualBand.js` implements all of these too. The two implementations of this
+protocol must stay identical; that is the whole reason the phone can stand in
+for the band.
 
 ---
 

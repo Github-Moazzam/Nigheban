@@ -59,6 +59,15 @@ The band↔phone protocol is newline-delimited JSON over the Nordic UART Service
 and is **frozen** — the firmware and the virtual band on the phone emit byte-identical
 events, which is what lets firmware and app work be done in parallel.
 
+**What the wrist tells you.** Every press gets a tick as the button goes down,
+so two taps are felt as two — you can tell "that did not register, press again"
+from "that registered and failed, go find your phone". The confirmation comes
+separately, once the *phone* knows the answer, because the band cannot: a
+successful write only means the phone heard the press, not that anybody was
+paged. One firm buzz means the family knows; three medium pulses mean it is
+saved but not yet sent; two long heavy buzzes mean it did not go. Full
+reasoning in [docs/BAND_FEEDBACK_SPEC.md](docs/BAND_FEEDBACK_SPEC.md).
+
 ---
 
 ## No band yet? Nothing is blocked
