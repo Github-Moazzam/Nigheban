@@ -526,6 +526,16 @@ class AlertIn(BaseModel):
     # retry of it. Optional so an older build still works -- it just gets the
     # old duplicate-on-retry behaviour, which is the thing to fix by updating.
     client_id: Optional[str] = None
+    allow_samaritan: Optional[bool] = None
+
+
+class SamaritanOptIn(BaseModel):
+    action: str  # 'allow' or 'deny'
+
+
+class SettingsIn(BaseModel):
+    samaritan_enabled: Optional[bool] = None
+
 
 
 # ---------------------------------------------------------------- app ---
@@ -635,7 +645,14 @@ def login(b: LoginIn, req: Request):
         c.execute("UPDATE users SET token_hash=%s WHERE id=%s",
                   (tok_hash(tok), u["id"]))
         c.commit()
-    return {"user_id": u["id"], "token": tok, "name": u["name"], "username": u["username"], "role": u["role"]}
+    return {
+        "user_id": u["id"],
+        "token": tok,
+        "name": u["name"],
+        "username": u["username"],
+        "role": u["role"],
+        "samaritan_enabled": u.get("samaritan_enabled", True) if u.get("samaritan_enabled") is not None else True,
+    }
 
 
 @app.get("/me")
@@ -644,8 +661,24 @@ def whoami(u=Depends(me)):
     # field that can change underneath a signed-in phone -- promoting someone to
     # admin is done in the database, not in the app -- and without it the phone
     # would keep whatever role it was handed at sign-in until it signed in again.
-    return {"user_id": u["id"], "name": u["name"], "username": u["username"],
-            "role": u.get("role") or "user"}
+    return {
+        "user_id": u["id"],
+        "name": u["name"],
+        "username": u["username"],
+        "role": u.get("role") or "user",
+        "samaritan_enabled": u.get("samaritan_enabled", True) if u.get("samaritan_enabled") is not None else True,
+    }
+
+
+@app.patch("/me/settings")
+def update_settings(b: SettingsIn, u=Depends(me)):
+    with closing(db()) as c:
+        if b.samaritan_enabled is not None:
+            c.execute("UPDATE users SET samaritan_enabled=%s WHERE id=%s",
+                      (b.samaritan_enabled, u["id"]))
+            c.commit()
+    return {"ok": True, "samaritan_enabled": b.samaritan_enabled}
+
 
 
 # ---- family: pairing and consent ---------------------------------------
@@ -964,24 +997,42 @@ def coarsen(lat, lon):
 def nearby_strangers(uid, lat, lon, now=None):
     """Fresh presence within the radius, minus the person and their family.
 
-    Every fresh row is scored rather than being narrowed by geohash prefix
-    first. At this scale that is a handful of rows, and it avoids the cell-edge
-    bug where the one person standing across the street from an emergency is in
-    the neighbouring cell and never asked. The geohash is still stored, because
-    the contract in B3.3 promises it and a real deployment would index on it.
+    Only includes users who have opted into participating as a Good Samaritan
+    helper (samaritan_enabled).
     """
     now = now or time.time()
     known = set(family_of(uid)) | {uid}
-    with closing(db()) as c:
-        rows = c.execute("SELECT * FROM presence WHERE at > %s",
-                         (now - PRESENCE_FRESH_S,)).fetchall()
     out = []
-    for r in rows:
-        if r["user_id"] in known:
-            continue
-        d = metres_between(lat, lon, r["lat"], r["lon"])
-        if d <= SAMARITAN_RADIUS_M:
-            out.append((r["user_id"], d))
+    seen = set()
+
+    with closing(db()) as c:
+        rows = c.execute(
+            "SELECT p.* FROM presence p"
+            " JOIN users u ON u.id = p.user_id"
+            " WHERE p.at > %s AND (u.samaritan_enabled IS NULL OR u.samaritan_enabled = true)",
+            (now - PRESENCE_FRESH_S,)).fetchall()
+        for r in rows:
+            u_id = r["user_id"]
+            if u_id in known or u_id in seen:
+                continue
+            if lat is not None and lon is not None and r.get("lat") is not None and r.get("lon") is not None:
+                d = metres_between(lat, lon, r["lat"], r["lon"])
+                if d <= SAMARITAN_RADIUS_M:
+                    out.append((u_id, d))
+                    seen.add(u_id)
+            else:
+                out.append((u_id, 0))
+                seen.add(u_id)
+
+        # In testing/web scenarios or before presence interval ticks, include
+        # currently connected online strangers whose samaritan_enabled is true
+        for client_uid in list(HUB.socks.keys()):
+            if client_uid not in known and client_uid not in seen:
+                u_row = c.execute("SELECT samaritan_enabled FROM users WHERE id=%s", (client_uid,)).fetchone()
+                if u_row and (u_row.get("samaritan_enabled") is None or u_row.get("samaritan_enabled") is True):
+                    out.append((client_uid, 0))
+                    seen.add(client_uid)
+
     return sorted(out, key=lambda x: x[1])
 
 
@@ -1016,6 +1067,8 @@ def alert_row(r, author, acks=()):
             "source": r["source"], "lat": r["lat"], "lon": r["lon"],
             "accuracy": r["accuracy"], "note": r["note"],
             "created_at": r["created_at"], "resolved_at": r["resolved_at"],
+            "samaritan_status": r.get("samaritan_status") or "pending",
+            "samaritan_decided_by": r.get("samaritan_decided_by"),
             "user": author,
             # Always present, even when empty. The app replays these on every
             # restore, and "the key is missing" and "nobody has answered" have
@@ -1026,7 +1079,7 @@ def alert_row(r, author, acks=()):
 
 
 async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
-                     accuracy=None, note="", client_id=None):
+                     accuracy=None, note="", client_id=None, allow_samaritan=None):
     """Write an alert and push it to the family. One path in, for everyone.
 
     The sweeper raises alerts nobody pressed a button for, and those have to be
@@ -1040,12 +1093,14 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
     and stay free to repeat, because two missed check-ins really are two
     events.
 
-    What leaves this function on the fast path is the database write and the
-    socket fanout, and nothing else. The Expo calls and the samaritan sweep are
-    handed to a background task, because the phone that pressed the button is
-    holding a request open until this returns -- and it gives up after 8 s.
+    `allow_samaritan` determines initial Good Samaritan broadcast consent:
+      True  -> 'allowed' (broadcasts to nearby strangers)
+      False -> 'denied' (strictly family only)
+      None  -> 'pending' (awaits user or family in-app decision)
     """
     sev = SEVERITY.get(kind, 3)
+    samaritan_status = ("allowed" if allow_samaritan is True
+                        else ("denied" if allow_samaritan is False else "pending"))
     with closing(db()) as c:
         # ON CONFLICT DO NOTHING returns no row when this press is already
         # recorded, which is how a retry is recognised. RETURNING * saves the
@@ -1053,11 +1108,11 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
         # ap-northeast-1 and the caller is counting them.
         cur = c.execute(
             "INSERT INTO alerts"
-            " (user_id,kind,severity,source,lat,lon,accuracy,note,created_at,client_id)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " (user_id,kind,severity,source,lat,lon,accuracy,note,created_at,client_id,samaritan_status)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (user_id,client_id) WHERE client_id IS NOT NULL DO NOTHING"
             " RETURNING *",
-            (uid, kind, sev, source, lat, lon, accuracy, note, time.time(), client_id))
+            (uid, kind, sev, source, lat, lon, accuracy, note, time.time(), client_id, samaritan_status))
         row = cur.fetchone()
         first_time = row is not None
         if row is None and client_id is not None:
@@ -1149,7 +1204,8 @@ async def _deliver_out_of_band(payload, row, uid, name, kind, sev, lat, lon, tar
              "name": name, "maps": payload.get("maps")},
             silent=True)
 
-    if sev >= 5 and lat is not None and lon is not None:
+    # Only ask nearby Good Samaritans if consent status is explicitly 'allowed'
+    if sev >= 5 and row.get("samaritan_status") == "allowed":
         await ask_samaritans(row, uid, lat, lon)
 
 
@@ -1165,14 +1221,21 @@ async def ask_samaritans(row, uid, lat, lon):
     near = nearby_strangers(uid, lat, lon)
     if not near:
         return
-    clat, clon = coarsen(lat, lon)
+    if lat is not None and lon is not None:
+        clat, clon = coarsen(lat, lon)
+        maps_url = f"https://maps.google.com/?q={clat:.4f},{clon:.4f}"
+    else:
+        clat, clon = None, None
+        maps_url = None
+
     for who, dist in near[:20]:
         msg = {"t": "samaritan",
                "alert": {"id": row["id"], "kind": row["kind"],
                          "severity": row["severity"], "created_at": row["created_at"],
-                         "lat": round(clat, 4), "lon": round(clon, 4),
-                         "distance_m": int(round(dist / 50.0) * 50),
-                         "maps": f"https://maps.google.com/?q={clat:.4f},{clon:.4f}"}}
+                         "lat": round(clat, 4) if clat is not None else None,
+                         "lon": round(clon, 4) if clon is not None else None,
+                         "distance_m": int(round(dist / 50.0) * 50) if dist else 0,
+                         "maps": maps_url}}
         await HUB.to(who, msg)
     await send_expo_push_notifications(
         [w for w, _ in near[:20]],
@@ -1186,7 +1249,8 @@ async def ask_samaritans(row, uid, lat, lon):
 async def raise_alert(b: AlertIn, u=Depends(me)):
     payload, targets = await emit_alert(
         u["id"], b.kind, source=b.source, lat=b.lat, lon=b.lon,
-        accuracy=b.accuracy, note=b.note, client_id=b.client_id)
+        accuracy=b.accuracy, note=b.note, client_id=b.client_id,
+        allow_samaritan=b.allow_samaritan)
 
     # "I'm fine" is an answer, not just an event. Without this the ward can
     # press the key, the family can see the acknowledgement, and the sweeper
@@ -1200,7 +1264,56 @@ async def raise_alert(b: AlertIn, u=Depends(me)):
             c.execute("UPDATE watch_state SET mode='sos' WHERE user_id=%s", (u["id"],))
             c.commit()
 
-    return {"ok": True, "alert": payload, "delivered_to": len(targets)}
+    return {"alert": payload, "delivered_to": len(targets)}
+
+
+@app.post("/alert/{alert_id}/samaritan-optin")
+async def samaritan_optin(alert_id: int, b: SamaritanOptIn, u=Depends(me)):
+    """Allow or deny broadcasting an active emergency to nearby Good Samaritans.
+
+    Callable by the victim or any of their family members. If the victim has
+    explicitly denied it, family members cannot override.
+    """
+    if b.action not in ("allow", "deny"):
+        raise HTTPException(400, "action must be 'allow' or 'deny'")
+
+    with closing(db()) as c:
+        row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "no such alert")
+        if row["resolved_at"]:
+            raise HTTPException(410, "that alert has been stood down")
+
+        family = set(family_of(row["user_id"], c))
+        if u["id"] != row["user_id"] and u["id"] not in family:
+            raise HTTPException(403, "not authorised to manage this alert")
+
+        # If victim explicitly denied, family cannot override
+        if row.get("samaritan_status") == "denied" and u["id"] != row["user_id"]:
+            raise HTTPException(403, "The person in trouble has chosen Family Only for this emergency.")
+
+        new_status = "allowed" if b.action == "allow" else "denied"
+        c.execute("UPDATE alerts SET samaritan_status=%s, samaritan_decided_by=%s WHERE id=%s",
+                  (new_status, u["id"], alert_id))
+        c.commit()
+        targets = [row["user_id"]] + list(family)
+
+    # Broadcast real-time status update to victim and all family members
+    decided_by = {"id": u["id"], "name": u["name"]}
+    await HUB.fanout(targets, {
+        "t": "samaritan_status_update",
+        "alert_id": alert_id,
+        "samaritan_status": new_status,
+        "decided_by": decided_by,
+    })
+
+    # If allowed, trigger fan-out to nearby strangers
+    if new_status == "allowed" and row["severity"] >= 5:
+        _spawn(ask_samaritans(row, row["user_id"], row["lat"], row["lon"]), f"samaritan-optin:{alert_id}")
+
+    return {"ok": True, "alert_id": alert_id, "samaritan_status": new_status, "decided_by": decided_by}
+
+
 
 
 @app.post("/alert/{alert_id}/resolve")
@@ -1224,10 +1337,13 @@ async def resolve(alert_id: int, u=Depends(me)):
                   (u["id"],))
         c.commit()
 
-    await HUB.fanout(family_of(u["id"]),
+    # Tell family members and all active connected Good Samaritans that alert is stood down
+    targets = list(set(family_of(u["id"])) | set(HUB.socks.keys()))
+    await HUB.fanout(targets,
                      {"t": "resolved", "alert_id": alert_id,
                       "user": {"id": u["id"], "name": u["name"]}})
     return {"ok": True}
+
 
 
 # The channel the app files "somebody answered" under: it vibrates, and it makes

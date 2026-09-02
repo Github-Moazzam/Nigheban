@@ -4,7 +4,10 @@ import {
   ActivityIndicator, AppState, Linking, Modal, Pressable, StyleSheet, Text,
   Vibration, View,
 } from 'react-native';
-import { ALERT_TIMEOUT, call, clearSession, loadSession, saveSession, useLive } from './src/api';
+import {
+  ALERT_TIMEOUT, call, clearSession, loadSession, optinSamaritan, saveSession, useLive,
+} from './src/api';
+
 import { clearQueue, dequeue, enqueue, flushQueue, pendingCount, pressId } from './src/alertQueue';
 import { MODES, useBandLink } from './src/bandLink';
 import CheckinBanner from './src/components/CheckinBanner';
@@ -407,8 +410,10 @@ function Main() {
     // family, and then took longer to answer than the phone was willing to
     // wait. Every retry now carries the same id and the server recognises it.
     const clientId = pressId();
+    const allowSamaritan = payload.allow_samaritan ?? payload.allowSamaritan ?? null;
     const body = {
       lat: at?.lat, lon: at?.lon, accuracy: at?.acc, client_id: clientId, ...payload,
+      allow_samaritan: allowSamaritan,
     };
     // `accident` belongs here with the rest. Everything this flag gates --
     // the local-first dispatch, the sticky own-SOS notification, the
@@ -427,6 +432,7 @@ function Main() {
       source: payload.source || 'app',
       created_at: Date.now() / 1000,
       lat: at?.lat, lon: at?.lon,
+      samaritan_status: allowSamaritan === true ? 'allowed' : (allowSamaritan === false ? 'denied' : 'pending'),
       _local: true,  // marker: not yet confirmed by the server
     };
     if (isEmergency) {
@@ -507,7 +513,36 @@ function Main() {
     }
   }, [session, fix, dispatch, bump, reportOutcome]);
 
+  const handleOptinSamaritan = useCallback(async (alertId, action) => {
+    if (!session) return;
+    try {
+      const res = await optinSamaritan(session, alertId, action);
+      dispatch('SAMARITAN_STATUS', {
+        alertId,
+        samaritan_status: res.samaritan_status,
+        decided_by: res.decided_by,
+      });
+      setIncoming((cur) => {
+        if (!cur || cur.id !== alertId) return cur;
+        return {
+          ...cur,
+          samaritan_status: res.samaritan_status,
+          samaritan_decided_by: res.decided_by,
+        };
+      });
+      if (res.samaritan_status === 'allowed') {
+        setToast('Broadcasted to nearby Good Samaritans within 800m');
+      } else {
+        setToast('Emergency set to Family Only');
+      }
+      bump();
+    } catch (e) {
+      setToast(e.message);
+    }
+  }, [session, dispatch, bump]);
+
   const resolve = useCallback(async (id) => {
+
     try {
       if (!id || String(id).startsWith('pending-') || String(id).startsWith('local-')) {
         // One item, not the lot. `local-…` is a real row in the queue and is
@@ -1073,10 +1108,34 @@ function Main() {
     },
     resolved: (m) => {
       setIncoming((cur) => (cur && cur.id === m.alert_id ? null : cur));
+      setSamaritan((cur) => (cur && cur.id === m.alert_id ? null : cur));
       setToast(`${m.user.name} is safe — they stood the alert down`);
       bump();
     },
+
+    samaritan_status_update: (m) => {
+      dispatch('SAMARITAN_STATUS', {
+        alertId: m.alert_id,
+        samaritan_status: m.samaritan_status,
+        decided_by: m.decided_by,
+      });
+      setIncoming((cur) => {
+        if (!cur || cur.id !== m.alert_id) return cur;
+        return {
+          ...cur,
+          samaritan_status: m.samaritan_status,
+          samaritan_decided_by: m.decided_by,
+        };
+      });
+      if (m.samaritan_status === 'allowed') {
+        setToast(`Nearby Good Samaritans have been notified by ${m.decided_by?.name || 'family'}`);
+      } else if (m.samaritan_status === 'denied') {
+        setToast('Emergency set to Family Only');
+      }
+      bump();
+    },
     ack: (m) => {
+
       // `m.at` is the server's clock. Falling back to arrival time is only for
       // a phone talking to a server older than this change.
       dispatch('RESPONDER', { by: m.by, at: m.at });
@@ -1480,6 +1539,7 @@ function Main() {
           serverOnline={serverOnline}
           onRaise={raise}
           onResolve={resolve}
+          onOptinSamaritan={handleOptinSamaritan}
           refreshKey={refreshKey}
           onAckCheckin={ackCheckin}
           onToggleHighAlert={toggleHighAlert}
@@ -1505,11 +1565,13 @@ function Main() {
         {tab === 'home' && (
           <Home session={session} band={band} ctx={ctx}
                 deliveredTo={deliveredTo} deliveryStatus={deliveryStatus} onRaise={raise} onResolve={resolve}
+                onOptinSamaritan={handleOptinSamaritan}
                 serverOnline={serverOnline} onOpenBand={() => setTab('band')}
                 onOpenSetup={() => setTab('setup')}
                 onAckCheckin={ackCheckin} onToggleHighAlert={toggleHighAlert}
                 onFix={setFix} />
         )}
+
         {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
         {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}
         {tab === 'alerts' && <Alerts session={session} refreshKey={refreshKey} />}

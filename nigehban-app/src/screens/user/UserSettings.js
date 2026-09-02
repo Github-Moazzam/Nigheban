@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
+import { updateUserSettings } from '../../api';
 import { MODES } from '../../bandLink';
+
 import PinSheet from '../../components/PinSheet';
 import {
   OEM, askPermission, ladderRows, openActivity, openBatterySettings,
@@ -53,6 +55,23 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   const [pinBusy, setPinBusy] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [samaritanEnabled, setSamaritanEnabled] = useState(
+    session?.samaritan_enabled !== false
+  );
+  const [samaritanBusy, setSamaritanBusy] = useState(false);
+
+  const toggleSamaritan = async () => {
+    if (samaritanBusy) return;
+    setSamaritanBusy(true);
+    const next = !samaritanEnabled;
+    try {
+      await updateUserSettings(session, { samaritan_enabled: next });
+      setSamaritanEnabled(next);
+      if (session) session.samaritan_enabled = next;
+    } catch { /* non-fatal */ }
+    finally { setSamaritanBusy(false); }
+  };
+
   // Which control is mid-flight. One at a time is the truth here: every one of
   // these hands off to Android or to the band, and both take long enough that
   // a button with no answer on it reads as a button that did nothing.
@@ -403,6 +422,19 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             </>
           ) : null}
         </View>
+
+        <Section title="COMMUNITY & HELPERS" tone={U.mint} />
+        <View style={s.group}>
+          <Row
+            icon="users" title="Good Samaritan Helper"
+            sub="Receive emergency requests if someone within 800m needs help"
+            value={samaritanEnabled ? 'Participating' : 'Disabled'}
+            tone={samaritanEnabled ? U.mint : U.dim}
+            busy={samaritanBusy}
+            onPress={toggleSamaritan}
+          />
+        </View>
+
 
         <Pressable
           onPress={async () => {

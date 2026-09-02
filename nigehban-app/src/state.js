@@ -201,6 +201,17 @@ const CONTEXT_ONLY = {
                           : { ...c,
                               responders: [...c.responders,
                                            { ...a.by, at: a.at ?? a.by.at ?? Date.now() / 1000 }] }),
+  SAMARITAN_STATUS: (c, a) => {
+    if (!c.activeSos || (a.alertId && String(c.activeSos.id) !== String(a.alertId))) return c;
+    return {
+      ...c,
+      activeSos: {
+        ...c.activeSos,
+        samaritan_status: a.samaritan_status,
+        samaritan_decided_by: a.decided_by,
+      },
+    };
+  },
   SYNC:       (c, a) => ({ ...c, ...a.patch }),
 };
 
