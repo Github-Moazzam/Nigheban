@@ -42,6 +42,12 @@ evidence of anything. **[BUG_LIST.md](BUG_LIST.md) is the live defect record**
   notification for it (BUG-006), and the band buzzes to confirm the press
   (BUG-007). Before this the SOS went out correctly and the wearer had no way
   to know.
+
+  *Since revised on `feat/press-feedback-and-link-led`: the band's buzz used to
+  fire at local dispatch, so it confirmed "sent" for an alert that might still
+  be sitting in the offline queue. The press now gets a tick from the band and
+  the confirmation waits until the server answers.
+  [BAND_FEEDBACK_SPEC.md](BAND_FEEDBACK_SPEC.md).*
 - **One notification per emergency** instead of two or three (BUG-009).
 - **Sign-out no longer leaves the previous account's band paired** (BUG-001).
 
