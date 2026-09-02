@@ -527,7 +527,12 @@ export function useVirtualBand(onLine, active = true) {
   // one incident from whichever lands first and refuses to open a second.
   const impact      = useRef({ stage: 'idle', since: 0, peak: 0, stillMs: 0, lastAt: 0 });
 
+  // -------------------------------------------------------------- fall ---
+  // Mobile phone accelerometer fall detection is temporarily disabled as requested.
+  // Physical wristband (nRF52840 hardware) fall detection remains 100% active over BLE.
+  // The sensor code below is commented out so dropping/moving the phone does not trigger fall alerts.
   useEffect(() => {
+    /*
     if (!Accelerometer || !active) return undefined;
     let sub;
     try {
@@ -669,7 +674,11 @@ export function useVirtualBand(onLine, active = true) {
       setImu('unavailable');
     }
     return () => sub?.remove?.();
+    */
+    setImu('disabled');
+    return undefined;
   }, [active, emit, feedback]);
+
 
   // Manual triggers, for the events a thumb cannot produce on a desk: a fall
   // you would rather not actually take, and an anti-snatch tear-off.
