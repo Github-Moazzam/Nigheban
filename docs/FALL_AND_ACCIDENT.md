@@ -161,26 +161,76 @@ better than nothing, and the app says so on screen when it happens.
 
 ## Two detectors, and only one of them decides anything
 
-### `fall` — the band is allowed to call this
+### `fall` — the band is allowed to call this, by either of two routes
 
-A fall has a shape an accelerometer can recognise alone: **light, then hit, then
-still.**
+#### People do not free-fall
+
+This is the most important thing in this document.
+
+The textbook fall detector is *light, then hit, then still* — and taken alone it
+**misses the falls this product is for.** A person does not drop. They
+**topple**: rotating about the feet or hips over 0.7–1.2 s, with the wrist
+attached to a body the whole way, so it frequently never reads below 0.45 g for
+70 ms at all.
+
+The falls that *do* produce clean free-fall are faints. Trips, slips, a leg
+giving way, and the slow slump an elderly person actually has produce little or
+none — **and those are the majority.** Making free-fall a mandatory gate fails
+silently on the common case, which is the wrong direction to be wrong in.
+
+So free-fall is **evidence, not a requirement**, and there are two routes in.
+
+#### Route A — "it dropped"
 
 | Stage | Threshold | Constant |
 |---|---|---|
 | free-fall | \|a\| < 0.45 g | `FALL_FREEFALL_G` |
 | ...sustained | ≥ 70 ms | `FALL_FREEFALL_MIN_MS` |
-| impact | \|a\| > 2.40 g | `FALL_IMPACT_G` |
+| impact | \|a\| > **2.40 g** | `FALL_IMPACT_G` |
 | ...within | 1400 ms of the free-fall ending | `FALL_IMPACT_WINDOW_MS` |
-| stillness | \|a − 1\| < 0.28 g | `FALL_STILL_BAND_G` |
-| ...held | ≥ 1600 ms | `FALL_STILL_MS` |
+| stillness | \|a − 1\| < 0.28 g, held ≥ 1600 ms | `FALL_STILL_MS` |
 
-Every single one of those has a fatal counter-example on its own — "high
-acceleration" is a dropped bag, "sudden stop" is sitting down hard, "went light"
-is a flick of the wrist. **Only the sequence is specific to a fall**, and the
-stillness stage is what keeps a bag falling off a chair from paging a mother at
-2 a.m.: somebody who trips, catches themselves and walks on is moving again
-inside a second.
+The impact bar is low **because the free-fall already corroborated it**. Catches
+faints and falls from a height.
+
+#### Route B — "it was hit" (the topple)
+
+| Stage | Threshold | Constant |
+|---|---|---|
+| impact | \|a\| > **4.00 g**, no free-fall needed | `FALL_HARD_G` |
+| posture changed | resting angle moved ≥ **35°** | `FALL_TILT_DEG` |
+| stillness | held ≥ **2500 ms** | `FALL_STILL_SLOW_MS` |
+
+Harder impact and longer stillness, because there is no free-fall carrying any
+of the argument.
+
+**The angle is what makes this route safe.** "A spike then stillness" on its own
+is also a hand put down hard on a desk — but a clap, a slammed door and a palm
+on a table all leave the wearer in the posture they started in, and going to the
+floor does not.
+
+Posture comes from **gravity extracted by low-pass filter**: over half a second,
+deliberate movement is zero-mean and averages away while gravity is a constant
+1 g in one direction, so what survives the filter *is* which way the wrist
+points. Two filters run, not one:
+
+- **fast (~0.5 s)** — where the wrist is *now*, read after everything settles.
+- **slow (~3.3 s)** — where it was *before any of this began*, snapshotted at the
+  impact.
+
+The slow one has to be slow. A topple lasts 0.7–1.2 s, so a half-second filter
+sampled at the moment of impact has spent its entire memory watching the fall
+and holds a posture already halfway to the ground — the measured tilt comes out
+about half what it should be, and route B quietly stops firing on exactly the
+falls it exists for.
+
+A stillness-gated posture sample was tried first and is worse: an arm swinging
+through a walk is rarely quiet for 400 ms together, so the last "resting"
+posture could be minutes old by the time somebody trips.
+
+The `fall` event carries `route` (`drop` / `topple`) and `tilt`, so a false
+positive in the field can be told apart from one on the bench without a
+re-flash.
 
 ### `impact` — the band explicitly refuses to call this
 

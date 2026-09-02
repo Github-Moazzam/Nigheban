@@ -42,16 +42,42 @@ export const CHECKIN_NAG_URGENT_MS = 5000;
 export const CHECKIN_URGENT_AT_MS  = 20000;
 
 // ---- fall detection, exec plan section 8 --------------------------------
-// A four-stage state machine, because every single threshold has a fatal
-// counter-example: "high acceleration" is a dropped bag, "sudden stop" is
-// sitting down hard. Only the *sequence* is specific to a fall.
+//
+// PEOPLE DO NOT FREE-FALL. A person does not drop, they TOPPLE -- rotating
+// about the feet or hips over 0.7-1.2 s with the wrist attached to a body the
+// whole way, so it often never reads below 0.45 g for 70 ms at all. The falls
+// that DO free-fall are faints; trips, slips and the slow slump an elderly
+// person actually has produce little or none, and those are the majority.
+//
+// So free-fall is evidence, not a requirement, and there are two routes in:
+//
+//   A "it dropped"  free-fall -> impact (low bar, 2.4 g) -> still.
+//   B "it was hit"  a harder impact (4 g) -> the wearer ended up at a
+//                   different angle -> still, for longer. No free-fall.
+//
+// Route B needs the angle because "a spike then stillness" is also a hand put
+// down hard on a desk -- and a clap, a slammed door and a palm on a table all
+// leave the wearer in the posture they started in. Going to the floor does not.
+//
+// Identical to the same block in nigehban_band_nrf52.ino. Two implementations
+// of one decision, exactly like the gesture map, and they drift the same way:
+// in silence, until a demo behaves differently on the phone and on the wrist.
 export const FALL = {
   FREEFALL_G:       0.45,  // magnitude below this = something is falling
   FREEFALL_MIN_MS:    70,  // ...for at least this long (rejects a jolt)
-  IMPACT_G:          2.4,  // then a spike above this
+  IMPACT_G:          2.4,  // ROUTE A: then a spike above this
   IMPACT_WINDOW_MS: 1400,  // ...within this long of the free-fall ending
   STILL_BAND_G:     0.28,  // then |g - 1| under this
   STILL_MS:         1600,  // ...sustained: the person did not get straight up
+
+  HARD_G:            4.0,  // ROUTE B: a spike above this, with no free-fall
+  TILT_DEG:           35,  // ...and the resting angle moved at least this far
+  STILL_SLOW_MS:    2500,  // ...and held still longer, having less evidence
+  // Two gravity filters at two speeds. The slow one is "where was I before any
+  // of this started" and has to outlast a topple, or it holds a posture halfway
+  // to the floor and the measured tilt comes out at half what it should be.
+  REST_ALPHA:       0.02,  // ~0.5 s at 104 Hz
+  REST_SLOW_ALPHA: 0.003,  // ~3.3 s
 };
 
 // ---- an impact, which is a measurement and not a conclusion ---------------
@@ -132,6 +158,16 @@ function matchGesture(table, btn, gesture, n) {
 }
 
 const now = () => Date.now();
+
+/** Angle in degrees between two gravity vectors. 0 = the same posture. */
+function tiltBetween(a, b) {
+  if (!a || !b) return 0;
+  const na = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  const nb = Math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+  if (na < 0.1 || nb < 0.1) return 0;        // nothing meaningful to compare
+  const c = Math.min(1, Math.max(-1, (a.x * b.x + a.y * b.y + a.z * b.z) / (na * nb)));
+  return (Math.acos(c) * 180) / Math.PI;
+}
 
 // expo-sensors and expo-battery are loaded defensively for the same reason
 // expo-network is in api.js: an older build must degrade to "that feature is
@@ -471,7 +507,19 @@ export function useVirtualBand(onLine, active = true) {
   // -------------------------------------------------------------- fall ---
   // The nRF52840 will run this against its on-board LSM6DS3TR-C. The phone's
   // accelerometer reports the same units (g), so the constants transfer.
-  const fall        = useRef({ stage: 'idle', since: 0, freefallEnd: 0, peak: 0, stillFrom: 0 });
+  const fall        = useRef({ stage: 'idle', since: 0, freefallEnd: 0, peak: 0,
+                               stillFrom: 0, route: 'drop', tilt: 0, pre: null });
+  // Gravity, pulled out of the accelerometer by low-pass filtering: over half a
+  // second deliberate movement is zero-mean and averages away, while gravity is
+  // a constant 1 g in one direction -- so what survives IS the posture.
+  //
+  // `rest` is "where is the wrist now". `slow` is "where was it before any of
+  // this started", and it has to be slow: a topple takes 0.7-1.2 s, so a
+  // half-second filter sampled at the impact has spent its whole memory
+  // watching the fall and holds a posture halfway to the ground.
+  const rest        = useRef({ x: 0, y: 0, z: 1 });
+  const slow        = useRef({ x: 0, y: 0, z: 1 });
+  const restValid   = useRef(false);
   const fallStageRef = useRef('idle');
   // The impact reporter, run off the same samples. Separate state because the
   // two are not exclusive: somebody thrown off a bike produces a real free-fall
@@ -492,15 +540,48 @@ export function useVirtualBand(onLine, active = true) {
         const t = now();
         const f = fall.current;
 
+        // Runs on every sample, not only while still: it has to keep up with
+        // somebody walking, or route B would compare where they are now against
+        // where they were standing several minutes ago.
+        if (!restValid.current) {
+          rest.current = { x, y, z };
+          slow.current = { x, y, z };
+          restValid.current = true;
+        } else {
+          const a = FALL.REST_ALPHA;
+          const b = FALL.REST_SLOW_ALPHA;
+          rest.current = {
+            x: rest.current.x + (x - rest.current.x) * a,
+            y: rest.current.y + (y - rest.current.y) * a,
+            z: rest.current.z + (z - rest.current.z) * a,
+          };
+          slow.current = {
+            x: slow.current.x + (x - slow.current.x) * b,
+            y: slow.current.y + (y - slow.current.y) * b,
+            z: slow.current.z + (z - slow.current.z) * b,
+          };
+        }
+
         switch (f.stage) {
           case 'idle':
-            if (g < FALL.FREEFALL_G) { f.stage = 'freefall'; f.since = t; f.peak = g; }
+            if (g < FALL.FREEFALL_G) {
+              f.stage = 'freefall'; f.since = t; f.peak = g; f.route = 'drop';
+            } else if (g >= FALL.HARD_G) {
+              // ROUTE B -- the topple. No free-fall, and there was never going
+              // to be one. Snapshot the posture from BEFORE this started, off
+              // the slow filter, while it still describes where the wearer was
+              // rather than where they are about to end up.
+              f.stage = 'settling'; f.since = t; f.peak = g; f.stillFrom = 0;
+              f.route = 'topple'; f.tilt = 0;
+              f.pre = { ...slow.current };
+            }
             break;
 
           case 'freefall':
             if (g < FALL.FREEFALL_G) break;                    // still falling
             if (t - f.since >= FALL.FREEFALL_MIN_MS) {
               f.stage = 'impact_wait'; f.freefallEnd = t; f.peak = g;
+              f.pre = { ...slow.current };
             } else {
               f.stage = 'idle';                                // a jolt, not a fall
             }
@@ -513,14 +594,24 @@ export function useVirtualBand(onLine, active = true) {
             break;
 
           case 'settling': {
+            f.peak = Math.max(f.peak, g);
+            const topple = f.route === 'topple';
+            const needStill = topple ? FALL.STILL_SLOW_MS : FALL.STILL_MS;
             const still = Math.abs(g - 1) < FALL.STILL_BAND_G;
             if (!still) {
               f.stillFrom = 0;
-              if (t - f.since > 4000) f.stage = 'idle';        // got straight up
+              if (t - f.since > needStill + 2400) f.stage = 'idle';  // got straight up
               break;
             }
             if (!f.stillFrom) f.stillFrom = t;
-            if (t - f.stillFrom >= FALL.STILL_MS) {
+            if (t - f.stillFrom >= needStill) {
+              // Route B's second piece of evidence: did the wearer end up at a
+              // different angle? A clap, a slammed door and a palm on a desk all
+              // leave the arm where it started; going to the floor does not.
+              if (topple) {
+                f.tilt = tiltBetween(f.pre, rest.current);
+                if (f.tilt < FALL.TILT_DEG) { f.stage = 'idle'; break; }
+              }
               f.stage = 'idle';
               emit('fall', {
                 // `peak_g`, spelled the way the .ino spells it. The whole point
@@ -529,6 +620,8 @@ export function useVirtualBand(onLine, active = true) {
                 // kind of drift that makes one path work and the other not.
                 peak_g: Math.round(f.peak * 100) / 100,
                 still_ms: t - f.stillFrom,
+                route: f.route === 'topple' ? 'topple' : 'drop',
+                tilt: Math.round(f.tilt || 0),
                 src: 'imu',
               });
               feedback(3, 200, 150);

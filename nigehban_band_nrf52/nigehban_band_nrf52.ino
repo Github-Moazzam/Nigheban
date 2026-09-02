@@ -250,16 +250,59 @@
 // changes what they mean.
 #define IMU_PERIOD_MS         10
 
-// ---- a fall: light, then hit, then still -----------------------------------
-// Identical to FALL in nigehban-app/src/virtualBand.js. Two implementations of
-// one decision, exactly like the gesture map, and they drift the same way: in
-// silence, until a demo behaves differently on the phone and on the wrist.
+// ---- a fall, by either of two routes ---------------------------------------
+//
+// PEOPLE DO NOT FREE-FALL. THIS IS THE MOST IMPORTANT COMMENT IN THIS FILE.
+//
+// The three-stage machine below -- light, then hit, then still -- is the
+// textbook fall detector, and taken alone it misses the falls this product
+// exists for. A person does not drop; they TOPPLE. Rotating about the feet or
+// the hips takes 0.7-1.2 s, and the wrist stays attached to a body the whole
+// way, so it frequently never reads below 0.45 g for 70 ms at all.
+//
+// The falls that do produce clean free-fall are faints. Trips, slips, a leg
+// giving way, and the slow slump an elderly person actually has produce little
+// or none -- and those are the majority. Making free-fall a mandatory gate
+// therefore fails silently on the common case, which is the wrong direction to
+// be wrong in for a safety device.
+//
+// So free-fall is EVIDENCE, not a requirement. It is one of two routes in:
+//
+//   ROUTE A -- "it dropped".  free-fall -> impact -> still.
+//              The impact bar is low (2.40 g) because the free-fall already
+//              corroborated that something fell. This is the classic path and
+//              it catches faints and falls from a height.
+//
+//   ROUTE B -- "it was hit".  a HARDER impact -> the wearer ended up at a
+//              different angle -> still, for longer.
+//              No free-fall required. This is the topple, and it is carried by
+//              the two things a topple genuinely does produce: a solid landing,
+//              and a body that is now oriented differently from how it was.
+//
+// Route B needs its own evidence because "a spike then stillness" on its own is
+// also a hand put down hard on a desk. The orientation change is what separates
+// them: clapping, slamming a door and setting a hand down all leave the wearer
+// in the same posture they started in, and going to the floor does not.
 #define FALL_FREEFALL_G       0.45f   // below this, something is falling
 #define FALL_FREEFALL_MIN_MS  70      // ...for this long: rejects a flick
-#define FALL_IMPACT_G         2.40f   // then a spike above this
+#define FALL_IMPACT_G         2.40f   // ROUTE A: a spike above this
 #define FALL_IMPACT_WINDOW_MS 1400    // ...this soon after the free-fall ends
 #define FALL_STILL_BAND_G     0.28f   // then |g - 1| inside this
 #define FALL_STILL_MS         1600    // ...held: they did not get straight up
+
+// ---- route B: the topple ---------------------------------------------------
+//
+// 4 g, not 2.4: with no free-fall behind it the impact is carrying more of the
+// argument, and 2.4 g is cleared by walking briskly downstairs.
+#define FALL_HARD_G           4.00f
+// How far the wrist's resting angle must have moved between just before the
+// impact and after everything settled. 35 degrees is well beyond the drift of
+// an arm at rest and well inside the change from upright to on the floor.
+#define FALL_TILT_DEG         35.0f
+// Longer than route A's 1.6 s, because there is no free-fall corroborating this
+// one and a person who trips, lands on their hands and gets up must have time
+// to do so before anything is raised.
+#define FALL_STILL_SLOW_MS    2500
 
 // ---- an impact: a spike big enough to be worth telling the phone about -----
 //
@@ -843,6 +886,20 @@ float    gFallPeak  = 0;         // biggest |a| seen this episode
 uint32_t gFallStillFrom = 0;     // when the wrist last became still, 0 = not
 uint32_t gLastFallAt = 0;        // refractory
 
+// Which route this episode came in by -- see the constants block. It decides
+// how hard the impact had to be, how long the stillness must hold, and whether
+// an orientation change is required at all.
+#define ROUTE_A 0                // free-fall corroborated it
+#define ROUTE_B 1                // no free-fall: a topple, judged on its own
+uint8_t  gFallRoute = ROUTE_A;
+// The wrist's resting angle from BEFORE the impact, snapshotted as it starts.
+// Taken then and not later because gRest* keeps tracking, and by the time the
+// episode resolves it has already learned the post-fall posture -- comparing
+// that with itself would read zero degrees for every real fall.
+float    gPreX = 0, gPreY = 0, gPreZ = 0;
+bool     gPreValid = false;
+float    gFallTilt = 0;          // what the comparison actually came out at
+
 // The impact reporter, which is a separate machine on purpose: a crash has no
 // free-fall to key off and would never reach FS_IMPACT above.
 #define IS_IDLE      0
@@ -887,12 +944,83 @@ void imuBegin() {
     : F("{\"t\":\"log\",\"msg\":\"IMU FAILED - fall detection is OFF\"}"));
 }
 
+/**
+ * One sample, kept whole.
+ *
+ * The magnitude alone was enough while a fall was only ever "light, hit, still".
+ * Route B asks which WAY the wrist is pointing, and that question needs the
+ * vector -- so the three axes are read once here and shared, rather than the
+ * accelerometer being polled twice per tick for the same numbers.
+ */
+float gAx = 0, gAy = 0, gAz = 0;
+
 /** |a| in g. 1.0 at rest, toward 0 in free-fall, high on impact. */
 float imuMagnitudeG() {
-  float x = imu.readFloatAccelX();
-  float y = imu.readFloatAccelY();
-  float z = imu.readFloatAccelZ();
-  return sqrtf(x * x + y * y + z * z);
+  gAx = imu.readFloatAccelX();
+  gAy = imu.readFloatAccelY();
+  gAz = imu.readFloatAccelZ();
+  return sqrtf(gAx * gAx + gAy * gAy + gAz * gAz);
+}
+
+// ---- which way the wrist is pointing ---------------------------------------
+//
+// Gravity, pulled out of the accelerometer with a slow low-pass filter. This is
+// the textbook separation: over half a second or so, deliberate movement is
+// zero-mean and averages away, while gravity is a constant 1 g pulling in one
+// direction -- so what survives the filter IS the posture.
+//
+// The obvious alternative -- only sample the vector when the arm is holding
+// still -- was tried first and is worse in exactly the case that matters. An
+// arm swinging through a walk is rarely quiet for 400 ms together, so the last
+// "resting" posture could be minutes old by the time somebody trips, and route
+// B would compare where they are now against where they were standing in
+// another room. The filter keeps up while they walk; a stillness gate does not.
+//
+// A hard impact does pollute it -- a 20 g sample shifts the estimate -- but the
+// comparison happens seconds later, by which time it has long recovered.
+// TWO filters, at two speeds, and the second one is not redundant.
+//
+// The fast one answers "where is the wrist now", which is what the comparison
+// needs AFTER everything has settled.
+//
+// The slow one answers "where was the wrist before any of this started", and it
+// has to be slow because of how long a topple takes. A person rotating to the
+// floor takes 0.7-1.2 s, so a half-second filter sampled at the moment of
+// impact has already spent its whole memory watching them fall -- it holds a
+// posture halfway to the ground, the measured tilt comes out about half what it
+// should be, and route B quietly stops firing on the very falls it exists for.
+// Three seconds of memory still holds the posture from before the topple began.
+#define REST_ALPHA      0.02f    // ~0.5 s at 100 Hz -- "where am I now"
+#define REST_SLOW_ALPHA 0.003f   // ~3.3 s        -- "where was I before this"
+float    gRestX = 0, gRestY = 0, gRestZ = 0;
+float    gSlowX = 0, gSlowY = 0, gSlowZ = 0;
+bool     gRestValid = false;
+
+void restTick() {
+  if (!gRestValid) {
+    gRestX = gSlowX = gAx;
+    gRestY = gSlowY = gAy;
+    gRestZ = gSlowZ = gAz;
+    gRestValid = true;
+    return;
+  }
+  gRestX += (gAx - gRestX) * REST_ALPHA;
+  gRestY += (gAy - gRestY) * REST_ALPHA;
+  gRestZ += (gAz - gRestZ) * REST_ALPHA;
+  gSlowX += (gAx - gSlowX) * REST_SLOW_ALPHA;
+  gSlowY += (gAy - gSlowY) * REST_SLOW_ALPHA;
+  gSlowZ += (gAz - gSlowZ) * REST_SLOW_ALPHA;
+}
+
+/** Angle in degrees between two gravity vectors. 0 = same posture. */
+float tiltBetween(float ax, float ay, float az, float bx, float by, float bz) {
+  float na = sqrtf(ax * ax + ay * ay + az * az);
+  float nb = sqrtf(bx * bx + by * by + bz * bz);
+  if (na < 0.1f || nb < 0.1f) return 0;          // nothing meaningful to compare
+  float c = (ax * bx + ay * by + az * bz) / (na * nb);
+  if (c > 1.0f) c = 1.0f;
+  if (c < -1.0f) c = -1.0f;
+  return acosf(c) * 57.2957795f;
 }
 
 /**
@@ -930,6 +1058,11 @@ void imuTick() {
   float g = imuMagnitudeG();
   bool  still = fabsf(g - 1.0f) < FALL_STILL_BAND_G;
 
+  // Which way the wrist is pointing. Runs on every sample -- it has to keep up
+  // with somebody walking, or route B compares where they are now against where
+  // they were standing several minutes ago.
+  restTick();
+
   // ---- the calibration stream ---------------------------------------------
   // USB serial only, and deliberately not through send(): this is 100 lines a
   // second and would flood a BLE link that has an emergency to carry. It exists
@@ -945,7 +1078,25 @@ void imuTick() {
   // ------------------------------------------------------- the fall machine ---
   switch (gFallStage) {
     case FS_IDLE:
-      if (g < FALL_FREEFALL_G) { gFallStage = FS_FREEFALL; gFallSince = now; gFallPeak = g; }
+      if (g < FALL_FREEFALL_G) {
+        // Route A. Something went light; wait to see if it lands.
+        gFallStage = FS_FREEFALL; gFallSince = now; gFallPeak = g;
+      } else if (g >= FALL_HARD_G) {
+        // ROUTE B -- the topple. No free-fall, and there was never going to be
+        // one: a person rotating to the floor keeps gravity on the wrist the
+        // whole way down. All this stage knows is that something hit hard, so
+        // the posture from just before it is captured NOW, while gRest* still
+        // describes where the wearer was rather than where they ended up.
+        gFallStage = FS_IMPACT;
+        gFallRoute = ROUTE_B;
+        gFallSince = now;
+        gFallPeak  = g;
+        gFreefallMs = 0;
+        gFallStillFrom = 0;
+        gFallTilt = 0;
+        gPreX = gSlowX; gPreY = gSlowY; gPreZ = gSlowZ;
+        gPreValid = gRestValid;
+      }
       break;
 
     case FS_FREEFALL:
@@ -956,16 +1107,26 @@ void imuTick() {
       // no longer being held up".
       if (gFreefallMs >= FALL_FREEFALL_MIN_MS) {
         gFallStage = FS_IMPACT; gFallSince = now; gFallPeak = g; gFallStillFrom = 0;
+        gFallRoute = ROUTE_A;
+        gFallTilt = 0;
+        gPreX = gSlowX; gPreY = gSlowY; gPreZ = gSlowZ;
+        gPreValid = gRestValid;
       } else {
         gFallStage = FS_IDLE;
       }
       break;
 
-    case FS_IMPACT:
+    case FS_IMPACT: {
       if (g > gFallPeak) gFallPeak = g;
 
+      // How hard it had to hit depends on how it got here. Route A has a
+      // free-fall behind it and can afford a low bar; route B is carrying the
+      // argument on its own and needs more.
+      float needG    = (gFallRoute == ROUTE_B) ? FALL_HARD_G : FALL_IMPACT_G;
+      uint32_t needStill = (gFallRoute == ROUTE_B) ? FALL_STILL_SLOW_MS : FALL_STILL_MS;
+
       // Nothing hit anything. Somebody lowered their arm slowly, or waved.
-      if (gFallPeak < FALL_IMPACT_G) {
+      if (gFallPeak < needG) {
         if (now - gFallSince > FALL_IMPACT_WINDOW_MS) gFallStage = FS_IDLE;
         break;
       }
@@ -977,7 +1138,27 @@ void imuTick() {
       if (!still) { gFallStillFrom = 0; }
       else if (gFallStillFrom == 0) { gFallStillFrom = now; }
 
-      if (gFallStillFrom && now - gFallStillFrom >= FALL_STILL_MS) {
+      if (gFallStillFrom && now - gFallStillFrom >= needStill) {
+        // Route B's second piece of evidence, and the one that stops it firing
+        // on every hand put down hard: did the wearer end up at a different
+        // angle from the one they were at? A clap, a slammed door and a palm on
+        // a desk all leave the arm roughly where it started. Going to the floor
+        // does not.
+        //
+        // Measured against the posture captured when the impact began, not
+        // against a live reading -- gRest* has been learning the new posture
+        // ever since, and comparing it with itself reads zero for every fall.
+        if (gFallRoute == ROUTE_B) {
+          gFallTilt = gPreValid && gRestValid
+            ? tiltBetween(gPreX, gPreY, gPreZ, gRestX, gRestY, gRestZ) : 0;
+          if (!gPreValid || gFallTilt < FALL_TILT_DEG) {
+            // Hit hard, went quiet, same posture. That is furniture, and the
+            // wearer is told nothing -- the phone still gets the `impact` from
+            // the reporter below, which is where a crash is decided.
+            gFallStage = FS_IDLE;
+            break;
+          }
+        }
         gFallStage = FS_IDLE;
         // `== 0` is "nothing has ever fired". Without it the subtraction is
         // measured from boot, and every fall in the first FALL_REFRACTORY_MS of
@@ -991,13 +1172,18 @@ void imuTick() {
           // question, not a confirmation -- the phone is about to ask whether
           // the wearer is all right, and this is the wrist saying why.
           feedback(5, 200, 150);
+          // `route` and `tilt` go out so a false positive in the field can be
+          // told apart from a false positive on the bench without a re-flash.
           sendEvent("fall", "\"peak_g\":" + String(gFallPeak, 2)
-                          + ",\"ff_ms\":" + String(gFreefallMs));
+                          + ",\"ff_ms\":" + String(gFreefallMs)
+                          + ",\"route\":\"" + String(gFallRoute == ROUTE_B ? "topple" : "drop")
+                          + "\",\"tilt\":" + String((int) gFallTilt));
         }
-      } else if (now - gFallSince > FALL_IMPACT_WINDOW_MS + FALL_STILL_MS + 1000) {
+      } else if (now - gFallSince > FALL_IMPACT_WINDOW_MS + needStill + 1000) {
         gFallStage = FS_IDLE;                               // got up: not a fall
       }
       break;
+    }
   }
 
   // ---------------------------------------------------- the impact reporter ---
