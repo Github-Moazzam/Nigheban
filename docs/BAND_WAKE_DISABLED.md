@@ -119,12 +119,58 @@ idempotent, and a no-op on a phone that never had it.
   return immediately.
 - **The firmware is untouched.** No reflash is needed. The band still raises the
   SOS flag in its advertisement and still counts `gSosSeq`; with no filter
-  registered anywhere, nothing listens and it costs nothing. **See the warning
-  below.**
+  registered anywhere, nothing listens and it costs nothing. **See the two
+  sections below** — one on what is now redundant in the `.ino` and why it
+  should stay, one on the confirmation buzz, which is the only part worth a
+  reflash.
 - **Everything merged after `3d5efb9` is untouched** — the Mumbai migration
   fixes, the BLE scan-throttle work, the own-phone SOS notification, the
   responder notifications, and the sign-out push fix. None of them ride on this
   path.
+
+### Is the nRF52 half of `3d5efb9` now redundant?
+
+Asked directly, and worth answering in writing because the obvious move —
+"the feature is off, strip the firmware too" — is the wrong one.
+
+**Confirmed dead.** Nothing reads any of this. The app scans on the NUS service
+UUID alone ([band.js:706](../nigehban-app/src/band.js#L706)) and has never
+looked at the manufacturer field; the only thing that ever did was the scan
+filter in `BandWake.kt`, which is no longer registered. So the
+`SOS_BEACON_*` defines, `gSosBeacon` / `gSosSeq` / `gSosBeaconAt`, the flag and
+seq bytes inside `buildAdvertising()`, the ten-minute expiry in `loop()` and the
+clear in `connect_callback()` are all inert. `virtualBand.js` never implemented
+the beacon at all, so nothing diverges there either.
+
+**One piece is not dead, and it is not the piece anyone would guess.**
+`setSosBeacon()` calls `Advertising.stop()` → `buildAdvertising()` →
+`start(0)`, and setup configures `setInterval(32, 244)` with
+`setFastTimeout(30)`. Restarting the advertisement therefore **resets the
+30-second fast window**, so a disconnected double-press currently puts the band
+on 20 ms advertising instead of 152.5 ms for half a minute. That was never the
+intent and it is nowhere in the commit message, but with BUG-010 and BUG-015
+open it is doing real work: it makes the band markedly easier to find again
+immediately after the press. Anyone deleting `setSosBeacon` would silently
+lengthen reconnect time after precisely the event where it matters most.
+
+**Recommendation: leave all of it in.** Three reasons, in order of weight:
+
+1. It costs a reflash of every band in the field to remove code that does
+   nothing.
+2. It is the foundation the fix builds on. BUG-012's band id goes into these
+   same manufacturer bytes; removing them now means putting them back later.
+3. It would create a third firmware generation. BUG-012's rollout section
+   already has to manage a compatibility window between reflashed and
+   un-reflashed bands, and "no manufacturer field / 6-byte field / 8-byte
+   field" is a worse matrix to reason about than two.
+
+The `addTxPower()` that was dropped to make room is no loss — nothing read that
+before the change either, which is why it was the field chosen.
+
+**What is *not* redundant:** the `if (gConnected)` split in `onGesture()`. That
+is an independent fix and it stands on its own — before it, both cases buzzed
+the four-pulse "sent" pattern and the disconnected one silently dropped the
+alert. Keep the split. Its *pattern* is a separate matter, immediately below.
 
 ### ⚠ The one thing this leaves in a bad state: the band's confirmation buzz
 
