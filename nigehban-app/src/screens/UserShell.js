@@ -19,7 +19,7 @@ import { U } from './user/kit';
  */
 export default function UserShell({
   session, band, ctx, deliveredTo, deliveryStatus, serverOnline,
-  onRaise, onResolve, onSignOut, refreshKey, onAckCheckin,
+  onRaise, onResolve, onOptinSamaritan, onSignOut, refreshKey, onAckCheckin,
   onToggleHighAlert, onFix,
 }) {
   const [tab, setTab] = useState('dashboard');
@@ -92,11 +92,13 @@ export default function UserShell({
           deliveryStatus={deliveryStatus}
           responders={ctx.responders}
           onStandDown={onResolve}
+          onOptinSamaritan={onOptinSamaritan}
           onMinimise={() => setMinimised(true)}
         />
       </View>
     );
   }
+
 
   return (
     <View style={s.root}>
@@ -181,7 +183,10 @@ function LiveSosBar({ alert, deliveryStatus, responders = [], onPress }) {
     ? 'Waiting for signal'
     : responders.length
       ? `${responders.length} on the way`
-      : 'Family alerted';
+      : elapsed >= 20
+        ? 'No responses yet'
+        : 'Family alerted';
+
 
   return (
     <Pressable

@@ -3,7 +3,8 @@ import {
   ActivityIndicator, FlatList, Linking, Pressable, RefreshControl,
   StyleSheet, Text, View,
 } from 'react-native';
-import { call } from '../../api';
+import { call, optinSamaritan } from '../../api';
+
 import { S, T, fmtAgo } from '../../theme';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { RU, U } from './kit';
@@ -97,6 +98,19 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
       setBusy(null);
     }
   };
+
+  const handleOptin = async (a, action) => {
+    setBusy(`samaritan-${a.id}`);
+    try {
+      await optinSamaritan(session, a.id, action);
+      await load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
 
   return (
     <FlatList
@@ -207,6 +221,11 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
               {acked.has(item.id) ? (
                 <Chip icon="user-check" text="you are on it" tint={U.mint} />
               ) : null}
+              {item.samaritan_status === 'allowed' ? (
+                <Chip icon="users" text="helpers notified" tint={U.mint} />
+              ) : item.samaritan_status === 'denied' ? (
+                <Chip icon="shield" text="family only" tint={U.faint} />
+              ) : null}
             </View>
 
             {item.maps ? (
@@ -227,6 +246,15 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
               />
             ) : null}
 
+            {/* If emergency is pending Good Samaritan consent, family can alert nearby helpers */}
+            {!mine && item.severity >= 4 && !item.resolved_at && item.samaritan_status === 'pending' ? (
+              <Action
+                tint={U.mint} icon="users" label="📢 Alert Nearby Helpers"
+                busyLabel="Alerting…"
+                busy={busy === `samaritan-${item.id}`} onPress={() => handleOptin(item, 'allow')}
+              />
+            ) : null}
+
             {mine && live ? (
               <Action
                 filled tint={U.mint} icon="shield" label="I am safe — stand down"
@@ -234,6 +262,7 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
                 busy={busy === item.id} onPress={() => standDown(item)}
               />
             ) : null}
+
           </View>
         );
       }}

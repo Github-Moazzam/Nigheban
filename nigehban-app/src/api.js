@@ -316,3 +316,20 @@ export function useLive(session, handlers) {
 
   return online;
 }
+
+/** Update user account settings (e.g. samaritan_enabled). */
+export async function updateUserSettings(session, patch) {
+  return call(session, '/me/settings', {
+    method: 'PATCH',
+    body: patch,
+  });
+}
+
+/** Explicitly allow or deny Good Samaritan emergency broadcast. */
+export async function optinSamaritan(session, alertId, action) {
+  return call(session, `/alert/${alertId}/samaritan-optin`, {
+    method: 'POST',
+    body: { action },
+  });
+}
+
