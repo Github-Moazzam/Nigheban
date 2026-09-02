@@ -39,13 +39,14 @@ const LEDE_QUEUED = {
  * reason: what is being put away is the screen, not the SOS.
  */
 export default function SosLive({
-  alert, deliveredTo, deliveryStatus, responders = [], onStandDown, onMinimise,
+  alert, deliveredTo, deliveryStatus, responders = [], onStandDown, onMinimise, onOptinSamaritan,
 }) {
   const isQueued = deliveryStatus === 'queued';
   // Standing down goes to the server and does not come back for a moment. On
   // the one screen where nobody is going to wait patiently, that moment has to
   // be visible or the button gets pressed again -- and again.
   const [standingDown, setStandingDown] = useState(false);
+  const [samaritanBusy, setSamaritanBusy] = useState(false);
   const [, force] = useState(0);
   useEffect(() => {
     const id = setInterval(() => force((n) => n + 1), 1000);
@@ -59,6 +60,19 @@ export default function SosLive({
   const lede = isQueued
     ? (LEDE_QUEUED[alert?.kind] || LEDE_QUEUED.sos)
     : (LEDE[alert?.kind] || LEDE.sos);
+
+  const samaritanStatus = alert?.samaritan_status || 'pending';
+
+  const handleSamaritan = async (action) => {
+    if (samaritanBusy || !alert?.id) return;
+    setSamaritanBusy(true);
+    try {
+      await onOptinSamaritan?.(alert.id, action);
+    } finally {
+      setSamaritanBusy(false);
+    }
+  };
+
 
   return (
     <ScrollView style={s.root} contentContainerStyle={s.content}>
@@ -100,60 +114,165 @@ export default function SosLive({
         </View>
       )}
 
+      {/* ---- Good Samaritan controls / status ---- */}
+      {!isQueued && samaritanStatus === 'pending' && (
+        <View style={s.samaritanCard}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: S.sm }}>
+            <Icon name="users" size={16} color={U.mint} />
+            <Text style={[T.bodyMed, { color: U.text, flex: 1 }]}>
+              Alert nearby people (Good Samaritan)?
+            </Text>
+          </View>
+          <Text style={[T.meta, { color: U.dim }]}>
+            Active Nigehban users within 800m can be asked to come to your aid.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: S.sm, marginTop: S.xs }}>
+            <Pressable
+              onPress={() => handleSamaritan('allow')}
+              disabled={samaritanBusy}
+              style={({ pressed }) => [s.samaritanBtn, { backgroundColor: U.mint }, pressed && { opacity: 0.8 }]}
+            >
+              {samaritanBusy ? (
+                <ActivityIndicator size="small" color={U.bg} />
+              ) : (
+                <Text style={[T.label, { color: U.bg }]}>📢 ALERT NEARBY</Text>
+              )}
+            </Pressable>
+            <Pressable
+              onPress={() => handleSamaritan('deny')}
+              disabled={samaritanBusy}
+              style={({ pressed }) => [s.samaritanBtn, { backgroundColor: U.card, borderWidth: 1, borderColor: U.raised }, pressed && { opacity: 0.8 }]}
+            >
+              <Text style={[T.label, { color: U.dim }]}>FAMILY ONLY</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {!isQueued && samaritanStatus === 'allowed' && (
+        <View style={s.samaritanBanner}>
+          <Icon name="check-circle" size={16} color={U.mint} />
+          <Text style={[T.meta, { color: U.mint, flex: 1 }]}>
+            Nearby Good Samaritans have been notified
+          </Text>
+        </View>
+      )}
+
       <Text style={[T.meta, s.sub]}>
         {isQueued
           ? 'Not yet — waiting for signal'
           : deliveredTo == null
-            ? 'Sending…'
+            ? 'Sending alert to network…'
             : `Sent to ${deliveredTo} ${deliveredTo === 1 ? 'person' : 'people'}`}
       </Text>
 
       <View style={s.panel}>
-        <Text style={[T.label, { color: U.faint }]}>
-          {responders.length
-            ? 'ON THEIR WAY'
-            : isQueued
-              ? 'NOBODY HAS BEEN REACHED YET'
-              : 'WAITING FOR AN ANSWER'}
-        </Text>
-        {responders.length ? (
-          responders.map((r) => (
-            <View key={r.id} style={s.responder}>
-              <Icon name="user-check" size={16} color={U.mint} />
-              <Text style={[T.bodyMed, { color: U.text, flex: 1 }]}>{r.name}</Text>
-              <Text style={[T.meta, { color: U.faint }]}>{fmtAgo(r.at)}</Text>
-            </View>
-          ))
-        ) : (
-          <Text style={[T.meta, { color: U.dim }]}>
-            {isQueued
-              ? 'Your family will be alerted as soon as your phone finds signal. The alert is safe — it cannot be lost.'
-              : 'Their phones are ringing.'}
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={[T.label, { color: responders.length ? U.mint : (elapsed >= 20 ? U.amber : U.faint) }]}>
+            {responders.length
+              ? `ON THEIR WAY (${responders.length})`
+              : isQueued
+                ? 'SAVED LOCALLY'
+                : elapsed >= 20
+                  ? 'NO RESPONSES YET'
+                  : 'WAITING FOR AN ANSWER'}
           </Text>
+          {!responders.length && !isQueued && (
+            <Text style={[T.meta, { color: elapsed >= 20 ? U.amber : U.faint }]}>
+              {fmtCount(elapsed)}
+            </Text>
+          )}
+        </View>
+
+        {responders.length ? (
+          <View style={{ gap: S.sm }}>
+            {responders.map((r) => (
+              <View key={r.id || `${r.name}-${r.at}`} style={s.responder}>
+                <View style={s.responderIcon}>
+                  <Icon name="user-check" size={16} color={U.mint} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[T.bodyMed, { color: U.text }]}>{r.name}</Text>
+                  <Text style={[T.meta, { color: U.mint }]}>Confirmed coming to your aid</Text>
+                </View>
+                <Text style={[T.meta, { color: U.faint }]}>{fmtAgo(r.at)}</Text>
+              </View>
+            ))}
+          </View>
+        ) : isQueued ? (
+          <View style={s.noResponseCard}>
+            <Icon name="wifi-off" size={18} color={U.amber} />
+            <Text style={[T.meta, { color: U.dim, flex: 1 }]}>
+              Your family will be alerted as soon as your phone finds signal. The alert is safe and saved on your device.
+            </Text>
+          </View>
+        ) : elapsed >= 20 ? (
+          <View style={[s.noResponseCard, { borderColor: 'rgba(245, 158, 11, 0.3)', backgroundColor: 'rgba(245, 158, 11, 0.08)' }]}>
+            <Icon name="alert-triangle" size={18} color={U.amber} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[T.bodyMed, { color: U.amber }]}>
+                No one has confirmed yet
+              </Text>
+              <Text style={[T.meta, { color: U.dim }]}>
+                Your family's phones are ringing with emergency sirens. If you are in immediate danger, please contact local emergency services (15 / 1122).
+              </Text>
+            </View>
+          </View>
+        ) : (
+          <View style={s.noResponseCard}>
+            <ActivityIndicator size="small" color={U.mint} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[T.bodyMed, { color: U.text }]}>
+                Alerting emergency network…
+              </Text>
+              <Text style={[T.meta, { color: U.dim }]}>
+                High-priority siren alarms are ringing on your family's devices.
+              </Text>
+            </View>
+          </View>
         )}
       </View>
 
-      <Pressable
-        onPress={async () => {
-          if (standingDown) return;
-          setStandingDown(true);
-          try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
-        }}
-        disabled={standingDown}
-        accessibilityRole="button"
-        accessibilityState={{ busy: standingDown, disabled: standingDown }}
-        accessibilityLabel="I am safe, stand the alert down"
-        style={({ pressed }) => [s.standDown, pressed && { opacity: 0.75 }]}
-      >
-        {standingDown ? (
-          <ActivityIndicator size="small" color={U.bg} />
-        ) : (
-          <Icon name="shield" size={17} color={U.bg} />
-        )}
-        <Text style={[T.button, { color: U.bg }]}>
-          {standingDown ? 'Standing down…' : 'I am safe — stand down'}
-        </Text>
-      </Pressable>
+      {/* Stand Down button: disabled while sending, enabled when live */}
+      {(() => {
+        const isSending = !alert?.id || deliveryStatus === 'sending';
+        const canStandDown = !isSending && !standingDown;
+        return (
+          <Pressable
+            onPress={async () => {
+              if (!canStandDown) return;
+              setStandingDown(true);
+              try { await onStandDown?.(alert.id); } finally { setStandingDown(false); }
+            }}
+            disabled={!canStandDown}
+            accessibilityRole="button"
+            accessibilityState={{ busy: standingDown || isSending, disabled: !canStandDown }}
+            accessibilityLabel={isSending ? 'Sending alert' : 'I am safe, stand the alert down'}
+            style={({ pressed }) => [
+              s.standDown,
+              isSending && { backgroundColor: U.card, borderWidth: 1, borderColor: U.raised },
+              pressed && canStandDown && { opacity: 0.75 },
+            ]}
+          >
+            {isSending ? (
+              <>
+                <ActivityIndicator size="small" color={U.dim} />
+                <Text style={[T.button, { color: U.dim }]}>Sending alert to network…</Text>
+              </>
+            ) : standingDown ? (
+              <>
+                <ActivityIndicator size="small" color={U.bg} />
+                <Text style={[T.button, { color: U.bg }]}>Standing down…</Text>
+              </>
+            ) : (
+              <>
+                <Icon name="shield" size={17} color={U.bg} />
+                <Text style={[T.button, { color: U.bg }]}>I am safe — stand down</Text>
+              </>
+            )}
+          </Pressable>
+        );
+      })()}
 
       {onMinimise ? (
         <Text style={[T.meta, s.foot]}>
@@ -197,7 +316,23 @@ const s = StyleSheet.create({
     gap: S.md, backgroundColor: U.card,
     borderRadius: RU.card, padding: S.lg, marginTop: S.md,
   },
-  responder: { flexDirection: 'row', alignItems: 'center', gap: S.sm },
+  responder: {
+    flexDirection: 'row', alignItems: 'center', gap: S.sm,
+    backgroundColor: 'rgba(52, 211, 153, 0.08)',
+    padding: S.md, borderRadius: RU.inner,
+    borderWidth: 1, borderColor: 'rgba(52, 211, 153, 0.25)',
+  },
+  responderIcon: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: 'rgba(52, 211, 153, 0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  noResponseCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: S.sm,
+    padding: S.md, borderRadius: RU.inner,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderWidth: 1, borderColor: U.raised,
+  },
 
   standDown: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: S.sm,
@@ -211,4 +346,31 @@ const s = StyleSheet.create({
     borderRadius: RU.inner,
     padding: S.md,
   },
+  samaritanCard: {
+    backgroundColor: U.card,
+    borderRadius: RU.card,
+    padding: S.lg,
+    gap: S.sm,
+    borderWidth: 1,
+    borderColor: U.raised,
+  },
+  samaritanBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: S.sm,
+    backgroundColor: U.mintSoft || 'rgba(52, 211, 153, 0.1)',
+    borderRadius: RU.inner,
+    padding: S.md,
+  },
+  samaritanBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    borderRadius: RU.inner,
+    paddingHorizontal: S.md,
+  },
 });
+
+

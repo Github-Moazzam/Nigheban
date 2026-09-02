@@ -51,9 +51,11 @@ export default function Dashboard({
   // seconds long. Without this the button looks dead for exactly as long as
   // the person pressing it is least able to tolerate a dead button.
   const [sending, setSending] = useState(false);
+  const [sosChoiceOpen, setSosChoiceOpen] = useState(false);
   const [acking, setAcking] = useState(false);
   const [fix, setFix] = useState(null);
   const [locState, setLocState] = useState('asking');   // asking|ok|denied|error
+
   // true | false | null, where null is "the question does not apply here"
   // (Android 13 and below, Expo Go, web) and must show nothing at all.
   const [fsiAllowed, setFsiAllowed] = useState(null);
@@ -347,11 +349,8 @@ export default function Dashboard({
           down to it. */}
       <View style={s.sosRing}>
         <Pressable
-          onPress={async () => {
-            if (sending) return;
-            setSending(true);
-            try { await onRaise({ kind: 'sos', source: 'app' }); }
-            finally { setSending(false); }
+          onPress={() => {
+            if (!sending) setSosChoiceOpen(true);
           }}
           disabled={sending}
           accessibilityRole="button"
@@ -370,6 +369,7 @@ export default function Dashboard({
           <Text style={s.sosHint}>{sending ? 'Sending…' : 'Tap to send'}</Text>
         </Pressable>
       </View>
+
 
       <View style={s.sectionRow}>
         <Text style={[T.label, { color: U.faint, flex: 1 }]}>MONITORED MEMBERS</Text>
@@ -514,9 +514,54 @@ export default function Dashboard({
         onCancel={endDrop}
         onDone={doDrop}
       />
+
+      <Dialog
+        visible={sosChoiceOpen}
+        icon="alert-octagon"
+        tone={U.red}
+        title="Send Emergency SOS"
+        body="Choose who you want to broadcast this emergency alert to:"
+        points={[
+          'Alert Family & Nearby: Alarms your family and asks active Good Samaritans within 800m to assist.',
+          'Family Only: Alerts only your registered family members.',
+        ]}
+        actions={[
+          {
+            label: '📢 Family & Nearby Helpers',
+            busyLabel: 'Broadcasting…',
+            filled: true,
+            tone: U.red,
+            onPress: async () => {
+              setSosChoiceOpen(false);
+              setSending(true);
+              try { await onRaise({ kind: 'sos', source: 'app', allow_samaritan: true }); }
+              finally { setSending(false); }
+            },
+          },
+          {
+            label: '🛡️ Family Only',
+            busyLabel: 'Sending…',
+            filled: false,
+            tone: U.dim,
+            onPress: async () => {
+              setSosChoiceOpen(false);
+              setSending(true);
+              try { await onRaise({ kind: 'sos', source: 'app', allow_samaritan: false }); }
+              finally { setSending(false); }
+            },
+          },
+          {
+            label: 'Cancel',
+            tone: U.faint,
+            onPress: () => setSosChoiceOpen(false),
+          },
+        ]}
+        onClose={() => setSosChoiceOpen(false)}
+      />
     </>
   );
 }
+
 
 /**
  * HIGH ALERT -- arm freely, disarm deliberately.
