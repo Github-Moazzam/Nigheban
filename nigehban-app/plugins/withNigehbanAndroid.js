@@ -1,4 +1,9 @@
-const { AndroidConfig, withAndroidManifest, withPlugins } = require('@expo/config-plugins');
+const {
+  AndroidConfig,
+  withAndroidManifest,
+  withAppBuildGradle,
+  withPlugins,
+} = require('@expo/config-plugins');
 
 /**
  * Expo Config Plugin: withNigehbanAndroid
@@ -69,6 +74,67 @@ function withLockScreenTakeover(config) {
   });
 }
 
+/**
+ * Make `release` the only build variant that exists.
+ *
+ * Android Studio keeps the Build Variants selection in android/.idea/workspace.xml.
+ * That file is out of reach from here twice over: .idea/.gitignore ignores
+ * workspace.xml, and nigehban-app/.gitignore ignores the whole generated /android
+ * folder. So the choice is per-machine scratch state, and a Gradle sync that fails
+ * partway -- or any `expo prebuild --clean` -- throws it away and drops the panel
+ * back to `debug`. That is the flapping, not a mis-click.
+ *
+ * Gradle has no "default variant for the IDE" setting to reach for instead. The
+ * only way to make the selection stop moving is to leave the IDE nothing else to
+ * pick, which is what disabling the debug variant does. It is re-applied on every
+ * sync, from the build files, with no per-machine state involved.
+ *
+ * THE COST, so it is not a surprise three weeks from now: this deletes the debug
+ * build. Everything that assumes a debug APK stops working --
+ *   - `npm run android` (expo run:android). Use `expo run:android --variant release`.
+ *   - the `development` profile in eas.json, which is a dev-client debug build.
+ *   - Metro fast refresh and the expo-dev-launcher menu, which only ship in debug.
+ * When you want that workflow back, delete this mod from the withPlugins list
+ * below and re-run prebuild.
+ *
+ * Release is signed with the debug keystore in the app/build.gradle template, so a
+ * release build still installs on a handset with no keystore setup of your own.
+ */
+const RELEASE_ONLY_MARKER = '// nigehban:release-only';
+
+const RELEASE_ONLY_GROOVY = `
+${RELEASE_ONLY_MARKER}
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
+}
+`;
+
+function withReleaseOnlyVariant(config) {
+  return withAppBuildGradle(config, (config) => {
+    if (config.modResults.language !== 'groovy') {
+      throw new Error(
+        'withNigehbanAndroid: expected a Groovy android/app/build.gradle, got ' +
+          `"${config.modResults.language}". The release-only block below is Groovy ` +
+          'syntax and would not compile as Kotlin DSL.'
+      );
+    }
+
+    // `expo prebuild` without --clean re-runs mods over the android/ folder that is
+    // already on disk, so an unguarded append stacks a second copy every time.
+    if (!config.modResults.contents.includes(RELEASE_ONLY_MARKER)) {
+      config.modResults.contents += RELEASE_ONLY_GROOVY;
+    }
+
+    return config;
+  });
+}
+
 module.exports = function withNigehbanAndroid(config) {
-  return withPlugins(config, [withNigehbanPermissions, withLockScreenTakeover]);
+  return withPlugins(config, [
+    withNigehbanPermissions,
+    withLockScreenTakeover,
+    withReleaseOnlyVariant,
+  ]);
 };
