@@ -85,6 +85,33 @@ const BATT_REARM = 3;
 // F2.3 (longer acquisition time, or median-of-N with a gap between samples).
 const BAND_LOW_STREAK = 3;
 
+// What the phone vibrates when a press finally has an answer. Mirrors the band
+// patterns in nigehban_band_nrf52.ino, deliberately: one fact, two outputs.
+//
+// Short and soft, and NOT the old [0, 300, 120, 300]. Two 300 ms buzzes against
+// a hard surface -- a table, a bag with a laptop in it -- carry across a quiet
+// room, and the wearer may be hiding from whoever they pressed the button
+// about. That is the same reasoning that already keeps the wearer's own SOS
+// notification silent; see notifications.js. Felt in a pocket, not heard across
+// a room.
+//
+// `delivered` has two shapes, chosen by what was confirmed. An SOS reaching the
+// family is the confirmation a frightened person is actually waiting for, so it
+// is a single firm buzz, longer than anything the check-in path produces and
+// recognisable without counting. A check-in answered is routine good news.
+//
+// `failed` is two long heavy buzzes rather than one. A single buzz means
+// "sent", so failure must not also be a single buzz — telling 400 ms from
+// 900 ms apart under stress is the most dangerous distinction in this
+// vocabulary. Repetition carries it instead: one buzz is a full stop, two heavy
+// ones are insistent.
+const OUTCOME_BUZZ = {
+  delivered_sos: [0, 400],
+  delivered:     [0, 90, 70, 90],
+  queued:        [0, 250, 150, 250, 150, 250],
+  failed:        [0, 700, 300, 700],
+};
+
 // Local notifications are best-effort: Expo Go on Android has limits, and a
 // demo cannot hinge on the notification shade. The in-app takeover below is
 // the real signal; a notification is a bonus when the app is backgrounded.
@@ -324,6 +351,40 @@ function Main() {
   // churn for a call that never reads anything back.
   const bandRef = useRef(null);
 
+  // ---- telling the wearer what actually happened to their press ------------
+  //
+  // The band cannot answer this and must not pretend to. A successful write
+  // over the GATT link means the *phone* received the press; whether the server
+  // has it, and whether the family was paged, is known only here. With the
+  // offline queue in between, an alert can be accepted by this phone and sit
+  // unsent for minutes -- so a confirmation fired at dispatch time is a
+  // confirmation of nothing.
+  //
+  // One helper, three outcomes, two channels. Both channels are driven from the
+  // same event on purpose: two confirmations that can disagree are worse than
+  // one, because a wearer with a buzzing wrist and a silent phone has no way to
+  // reconcile them. Fired together they degrade gracefully instead -- phone in
+  // a bag, you still feel the band; band flat or out of range, you still feel
+  // the phone.
+  //
+  // See docs/BAND_FEEDBACK_SPEC.md. The band's side is `handleCommand` in
+  // nigehban_band_nrf52.ino; the patterns are OUTCOME_BUZZ at the top of this
+  // file.
+  // `status` is 'delivered' | 'queued' | 'failed'; `kind` is 'sos' for an
+  // emergency and anything else for the routine paths. The band is NOT told the
+  // kind -- it sent the event, so it already knows what it is waiting to hear
+  // about, and a protocol that carried it would be a second source of truth
+  // able to disagree with the first. Only the phone's own buzz needs the hint.
+  const reportOutcome = useCallback((status, kind) => {
+    // `ack` is the firmware's own name for "cloud received our event". It has
+    // existed in the protocol since the beginning and nothing had ever sent it.
+    const cmd = status === 'delivered' ? 'ack' : status;
+    try { bandRef.current?.send?.({ c: cmd }); } catch { /* no band, or link gone */ }
+
+    const key = status === 'delivered' && kind === 'sos' ? 'delivered_sos' : status;
+    try { Vibration.vibrate(OUTCOME_BUZZ[key] || OUTCOME_BUZZ.failed); } catch { /* no motor */ }
+  }, []);
+
   const raise = useCallback(async (payload) => {
     if (!session) return null;
 
@@ -358,7 +419,21 @@ function Main() {
       dispatch('SOS_RAISED', { alert: localAlert });
       setDeliveredTo(null);
       setDeliveryStatus('queued');
-      Vibration.vibrate([0, 300, 120, 300]);
+
+      // ACKNOWLEDGEMENT, not confirmation. One short buzz meaning "this phone
+      // heard you" -- nothing more, because nothing more is known yet.
+      //
+      // This used to be [0,300,120,300] plus a three-pulse band buzz, both
+      // fired here, one line after deliveryStatus was set to 'queued' and
+      // before the network call below had been attempted. The wearer was told
+      // "SOS sent" twice, on two devices, at a moment when nothing had left the
+      // phone -- and two channels agreeing reads as corroboration, which made
+      // it worse than a single wrong signal rather than better.
+      //
+      // The real answer now goes out from the try/catch below, where it is
+      // actually known. The band says nothing at all here: it already ticked
+      // once per press, and it is waiting to be told.
+      Vibration.vibrate([0, 90]);
 
       // The confirmations that do not need this screen to exist.
       //
@@ -368,7 +443,6 @@ function Main() {
       // because the reducer it targets died with the activity. So the wrist and
       // the notification shade are where the wearer is actually told -- and
       // they are the two places that were saying nothing at all.
-      bandRef.current?.send?.({ c: 'buzz', n: 3 });
       showOwnSosNotification(localAlert);
     }
 
@@ -382,6 +456,9 @@ function Main() {
         dispatch('SOS_RAISED', { alert: r.alert });
         setDeliveredTo(r.delivered_to);
         setDeliveryStatus('delivered');
+        // The server has it. This is the first moment anything could honestly
+        // say so, and it is the only place that says it.
+        reportOutcome('delivered', 'sos');
       }
       if (payload.kind !== 'near_miss') {
         setToast(r.delivered_to
@@ -403,13 +480,18 @@ function Main() {
         const queuedId = await enqueue(body);
         dispatch('SOS_RAISED', { alert: { ...localAlert, id: queuedId } });
         setDeliveryStatus('queued');
+        // Held, not delivered, and the wrist is told which. This is the case
+        // the old confirmation hid completely: the alert is safe on the phone
+        // and nobody has been paged, and the wearer used to feel exactly what
+        // they felt when the family had already been called.
+        reportOutcome('queued');
         setToast('No signal — your alert is saved and will send automatically when connection returns');
       } else {
         setToast(e.message);
       }
       return null;
     }
-  }, [session, fix, dispatch, bump]);
+  }, [session, fix, dispatch, bump, reportOutcome]);
 
   const resolve = useCallback(async (id) => {
     try {
@@ -423,6 +505,10 @@ function Main() {
         setDeliveredTo(null);
         setDeliveryStatus(null);
         clearOwnSosNotification();
+        // Nothing had gone out, so nothing needs standing down at the server.
+        // From the wrist's point of view the cancel still landed, which is what
+        // the press was asking about.
+        reportOutcome('delivered');
         setToast('Cancelled — alert was not sent yet');
         bump();
         return;
@@ -435,12 +521,17 @@ function Main() {
       // down. An "SOS is active" sitting on the lock screen after the wearer
       // stood it down is the same lie as the screen showing nothing during one.
       clearOwnSosNotification();
+      reportOutcome('delivered');
       setToast('Stood down — your family has been told');
       bump();
     } catch (e) {
+      // The family still believes this is live. That is worth a distinct
+      // signal on the wrist, not just a toast: the wearer thinks they have
+      // called off an emergency and they have not.
+      reportOutcome('failed');
       setToast(e.message);
     }
-  }, [session, dispatch, bump]);
+  }, [session, dispatch, bump, reportOutcome]);
 
   const ackCheckin = useCallback(async (checkin) => {
     if (!session) return;
@@ -455,12 +546,20 @@ function Main() {
         await call(session, '/alert', { method: 'POST', body: { kind: 'checkin_ack', source: 'app' } });
       }
       dispatch('CHECKIN_CLOSED');
+      // "I'm fine" reached the server. The band has been waiting to hear this
+      // since the press -- it stopped buzzing its own guess, because a
+      // stand-down that never arrived used to feel identical to one that did.
+      reportOutcome('delivered');
       setToast('Answered — your family can see you are fine');
       bump();
     } catch (e) {
+      // A failed stand-down is the dangerous direction: the family is still
+      // being told this person has not answered. Say so on the wrist rather
+      // than only in a toast the wearer may never look at.
+      reportOutcome('failed');
       setToast(e.message);
     }
-  }, [session, dispatch, bump]);
+  }, [session, dispatch, bump, reportOutcome]);
 
   const toggleHighAlert = useCallback(async (on) => {
     if (!session) return;
@@ -501,6 +600,14 @@ function Main() {
     if (action.type === 'SOS_RAISED') {
       if (!ctxRef.current.activeSos) {
         raise({ kind: ev.e === 'snatch' ? 'snatch' : 'sos', source: 'band', note: ev.src || '' });
+      } else {
+        // Pressed again during an emergency that is already live. Nothing new
+        // is raised -- one press, one alert -- but the band is sitting there
+        // waiting to be told what happened to this press, and silence is not an
+        // answer. Without this it would run out its 4 s and buzz FAILED at
+        // somebody whose SOS is in fact live and being answered, which is the
+        // worst possible time to tell them help is not coming.
+        reportOutcome('delivered', 'sos');
       }
       return;
     }
@@ -529,7 +636,7 @@ function Main() {
       // so that it outlives this app being killed.
       toggleHighAlert(action.on);
     }
-  }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert]);
+  }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert, reportOutcome]);
 
   const band = useBandLink(onBandEvent);
   bandRef.current = band;

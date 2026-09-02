@@ -64,6 +64,19 @@
 
 #define PIN_BTN         D2
 #define PIN_MOTOR       D1
+
+// The link LED: a SECOND, externally visible LED, not the onboard one.
+//
+// LED_BUILTIN sits on the module, inside the enclosure, where nobody can see
+// it -- and it is driven by feedbackTick() as a visual echo of the motor, so it
+// cannot show standing state anyway. This one answers a question no buzz can:
+// "is my band linked RIGHT NOW", askable at any moment, without an event having
+// to happen. See docs/BAND_FEEDBACK_SPEC.md phase 2.
+//
+// HARDWARE: needs an LED and a series resistor fitted to this pin. Until one is,
+// everything below is a harmless toggle of an unconnected pin.
+#define PIN_LINK_LED    D3
+#define LINK_LED_ACTIVE_HIGH  1     // 0 if the LED is wired to sink through the pin
 // LED_BUILTIN is 11 and ACTIVE LOW on this board -- always go through
 // ledWrite(), never digitalWrite(), or every indicator reads inverted.
 
@@ -80,6 +93,86 @@
 #define HOLD_2_MS       5000    // "hold 5s"  -> unbound; v2 anti-snatch
 
 #define HEARTBEAT_MS    10000
+
+// ------------------------------------------------- PRESS & OUTCOME FEEDBACK ---
+//
+// Two facts, told separately, by whichever side actually knows them. The whole
+// reasoning is in docs/BAND_FEEDBACK_SPEC.md; the short version:
+//
+//   "I heard you"   -- the band knows this instantly. One TICK per press, so
+//                      two taps are felt as two ticks and the wearer can tell
+//                      "not registered" (press again) from "registered and
+//                      failed" (stop pressing, find your phone). Those need
+//                      opposite responses and used to feel identical.
+//
+//   "It went / it didn't" -- the band CANNOT know this. A successful UART write
+//                      means the phone received the press, not that the family
+//                      was paged; with the app's offline queue an SOS can sit
+//                      unsent for minutes. So the band asks and waits, and the
+//                      phone answers with {c:'ack'}, {c:'queued'} or
+//                      {c:'failed'}.
+//
+// The one case the band CAN answer alone is having no link at all: nothing can
+// have received it, so FAILED goes out immediately with no waiting.
+//
+// 90 ms is the floor everywhere here. It is the shortest width confirmed felt on
+// this hardware, and it is what the check-in ack already used.
+// ---- the check-in nag ------------------------------------------------------
+//
+// A check-in used to buzz ONCE at the top of its window and then say nothing
+// until the window expired -- at which point it buzzed again, but that second
+// buzz was not a reminder, it was the news that the family had already been
+// told the wearer did not answer.
+//
+// One buzz is trivially missed: asleep, in the shower, band under a sleeve, in
+// a noisy street. And the cost of missing it is not a missed notification, it
+// is a false alarm sent to everybody who cares about this person. So the
+// question is now asked repeatedly until it is answered or the window closes.
+//
+// The nag is the check-in pattern with one pulse taken off, not a new pattern.
+// It is the SAME question being asked again, and 400 ms pulses are used by
+// nothing else, so it cannot be mistaken for anything -- and the vocabulary
+// does not grow.
+//
+// It tightens near the deadline. That is the only way a wrist can say "you are
+// running out of time" to somebody who is not looking at a screen.
+//
+// Costs roughly 0.02 mAh per nag. In High Alert -- the one mode that asks
+// unprompted, every 5-10 minutes -- budget a few percent of the cell per day.
+// That is the price of the mode, and it is cheaper than a false escalation.
+#define CHECKIN_NAG_MS        12000   // ordinary reminder interval
+#define CHECKIN_NAG_URGENT_MS  5000   // once the deadline is close
+#define CHECKIN_URGENT_AT_MS  20000   // "close" = this much of the window left
+
+#define FB_TICK_MS        90      // "I counted that press"
+#define OUTCOME_WAIT_MS   4000    // no answer by now: assume it did not go
+#define OUTCOME_DEFER_MS  260     // let a tick finish before an outcome plays
+
+// ---- what an outcome feels like, by what was being confirmed ---------------
+//
+// An SOS getting through and an "I'm fine" getting through are not the same
+// news and must not feel the same. The SOS one is a single firm buzz, longer
+// than anything the check-in path produces, because it is the one confirmation
+// a frightened person is waiting for and it has to be unmistakable without
+// counting anything.
+//
+// FAILED is two long heavy buzzes rather than one. A single buzz now means
+// "sent", so failure cannot also be a single buzz -- distinguishing 400 ms from
+// 900 ms on a wrist under stress is not a distinction anybody should have to
+// make, and it is the most dangerous pair in the whole vocabulary to confuse.
+// Repetition is the safer signal: one buzz is a full stop, two heavy ones are
+// insistent, and insistent is what "this did not go" should feel like.
+#define FB_SOS_OK_MS      400     // SOS delivered: one firm buzz
+#define FB_FAIL_MS        700     // failed: two of these
+#define FB_FAIL_GAP_MS    300
+
+// The LED's two standing states. Flashes, never steady: a 2 mA LED held on
+// against a 250-400 mAh cell is 5-8 days on its own, against a 1-2 week budget.
+// 20 ms every 3-5 s is a ~0.5% duty cycle and costs essentially nothing.
+#define LINK_LED_FLASH_MS       20
+#define LINK_LED_PERIOD_UP_MS   5000    // linked: one brief flash, unobtrusive
+#define LINK_LED_PERIOD_DOWN_MS 2000    // not linked: a double flash, more often
+#define LINK_LED_GAP_MS         180     // spacing of the double flash
 
 // ------------------------------------------------------- THE SOS BEACON ---
 //
@@ -138,6 +231,7 @@ bool     gArmed        = false;   // anti-snatch, v2 -- no gesture sets it yet
 bool     gHighAlert    = false;   // High Alert (exec plan section 5, hold 3 s)
 bool     gAwaitingAck  = false;   // a check-in request is outstanding
 uint32_t gAckDeadline  = 0;
+uint32_t gNextNagAt    = 0;       // 0 = not nagging; see CHECKIN_NAG_MS
 uint32_t gLastHeartbeat= 0;
 uint32_t gSeq          = 0;
 String   gRxLine;                 // accumulates until '\n'
@@ -167,6 +261,45 @@ void feedback(uint8_t pulses, uint16_t onMs, uint16_t offMs) {
   gPat.nextChange = 0;   // fire immediately
 }
 
+// ---- one deferred pattern, so a tick is never cut off mid-buzz -------------
+//
+// feedback() overwrites gPat outright, so two patterns raised close together
+// destroy each other. That matters in exactly one place and it is the worst
+// place: a disconnected SOS fires the FAILED buzz on the same tap that raises
+// tap 2's tick, so without this the wearer would feel the tick truncated and
+// might feel nothing legible at all.
+//
+// One slot, not a queue. Two outcomes cannot be pending at once -- the second
+// press cancels the first's wait -- and a queue that can hold three buzzes is a
+// wrist that is still buzzing about the last emergency during the next one.
+struct Deferred {
+  uint8_t  pulses = 0;      // 0 = nothing waiting
+  uint16_t onMs = 0, offMs = 0;
+  uint32_t at = 0;
+} gDeferred;
+
+void feedbackAfter(uint32_t delayMs, uint8_t pulses, uint16_t onMs, uint16_t offMs) {
+  gDeferred.pulses = pulses;
+  gDeferred.onMs = onMs;
+  gDeferred.offMs = offMs;
+  gDeferred.at = millis() + delayMs;
+}
+
+void deferredTick() {
+  if (gDeferred.pulses == 0) return;
+  if (millis() < gDeferred.at) return;
+  // Wait for the motor to be idle as well as for the clock, or the deferral
+  // solves nothing: a long tick still running would be cut off exactly as
+  // before.
+  if (gPat.pulsesLeft != 0) return;
+
+  feedback(gDeferred.pulses, gDeferred.onMs, gDeferred.offMs);
+  gDeferred.pulses = 0;
+}
+
+/** One press, counted. Deliberately the shortest thing the wrist ever feels. */
+void tick() { feedback(1, FB_TICK_MS, 0); }
+
 void feedbackTick() {
   if (gPat.pulsesLeft == 0) return;
   uint32_t now = millis();
@@ -181,6 +314,118 @@ void feedbackTick() {
   } else {
     gPat.nextChange = now + gPat.offMs;
     gPat.pulsesLeft--;
+  }
+}
+
+// ------------------------------------------------------- OUTCOME FEEDBACK ---
+//
+// Waiting to be told whether the press actually went anywhere.
+//
+// Armed when an event that matters is handed to a live link, disarmed by the
+// phone's answer or by running out of patience. The wait exists because the
+// band genuinely does not know: it saw the write succeed, which says the phone
+// heard it and nothing at all about whether the server did.
+uint32_t gOutcomeDueAt = 0;      // 0 = not waiting for anything
+
+// WHAT is being waited on, because the answer has to feel different depending
+// on the question. The band knows this without being told -- it sent the event
+// -- so the protocol stays as it is and the app cannot get it wrong.
+#define OUTCOME_NONE  0
+#define OUTCOME_ACK   1          // "I'm fine", answering a check-in
+#define OUTCOME_SOS   2          // a call for help
+uint8_t gOutcomeKind = OUTCOME_NONE;
+
+/**
+ * It got through.
+ *
+ * Two shapes, not one. An SOS reaching the family is the confirmation somebody
+ * frightened is actually waiting for, so it gets a single firm buzz that is
+ * longer than anything on the check-in path and needs no counting. A check-in
+ * answered is routine good news and stays light.
+ */
+void outcomeDelivered() {
+  if (gOutcomeKind == OUTCOME_SOS) feedbackAfter(OUTCOME_DEFER_MS, 1, FB_SOS_OK_MS, 0);
+  else                             feedbackAfter(OUTCOME_DEFER_MS, 2, 90, 70);
+  gOutcomeDueAt = 0;
+  gOutcomeKind  = OUTCOME_NONE;
+}
+
+/**
+ * The phone has it, the server does not, and nobody has been paged yet.
+ *
+ * Three medium pulses: more than the light "done" of an answered check-in, and
+ * plainly not the single firm buzz that means the family knows. In practice
+ * only an SOS reaches this -- the check-in path has no offline queue behind it.
+ */
+void outcomeQueued() {
+  feedbackAfter(OUTCOME_DEFER_MS, 3, 250, 150);
+  gOutcomeDueAt = 0;
+  gOutcomeKind  = OUTCOME_NONE;
+}
+
+/**
+ * It did not go.
+ *
+ * Two long heavy buzzes. Deliberately NOT a single long one: a single buzz now
+ * means "sent", and asking a frightened person to tell 400 ms from 900 ms is
+ * asking them to make the most dangerous distinction in this vocabulary under
+ * the worst possible conditions. Repetition carries it instead -- one buzz is a
+ * full stop, two heavy ones are insistent, and insistent is what this means.
+ */
+void outcomeFailed() {
+  feedbackAfter(OUTCOME_DEFER_MS, 2, FB_FAIL_MS, FB_FAIL_GAP_MS);
+  gOutcomeDueAt = 0;
+  gOutcomeKind  = OUTCOME_NONE;
+}
+
+/** Start waiting. The phone has OUTCOME_WAIT_MS to answer. */
+void expectOutcome(uint8_t kind) {
+  gOutcomeKind  = kind;
+  gOutcomeDueAt = millis() + OUTCOME_WAIT_MS;
+}
+
+void outcomeTick() {
+  if (gOutcomeDueAt == 0) return;
+  if (millis() < gOutcomeDueAt) return;
+  // Nobody answered. Fail toward "not sent": on a safety device it is better to
+  // tell someone help may not be coming than to let them believe it is.
+  outcomeFailed();
+}
+
+// ------------------------------------------------------------- LINK LED ---
+//
+// Standing state, on its own pin and deliberately NOT through feedbackTick().
+// The onboard LED is welded to the motor in there, which is fine for echoing a
+// buzz and useless for showing state -- it would flash on every vibration and
+// mean nothing.
+void linkLedWrite(bool on) {
+#if LINK_LED_ACTIVE_HIGH
+  digitalWrite(PIN_LINK_LED, on ? HIGH : LOW);
+#else
+  digitalWrite(PIN_LINK_LED, on ? LOW : HIGH);
+#endif
+}
+
+void linkLedTick() {
+  static uint32_t phaseAt = 0;
+  static uint8_t  step = 0;
+  uint32_t now = millis();
+  if (now < phaseAt) return;
+
+  // Linked: one brief flash every 5 s. Not linked: two flashes every 2 s.
+  // Dark means neither -- a flat battery or a dead band, which a steady "on
+  // means fine" indicator could never have distinguished from working.
+  if (gConnected) {
+    if (step == 0) { linkLedWrite(true);  phaseAt = now + LINK_LED_FLASH_MS;      step = 1; }
+    else           { linkLedWrite(false); phaseAt = now + LINK_LED_PERIOD_UP_MS;  step = 0; }
+    return;
+  }
+
+  switch (step) {
+    case 0:  linkLedWrite(true);  phaseAt = now + LINK_LED_FLASH_MS;       step = 1; break;
+    case 1:  linkLedWrite(false); phaseAt = now + LINK_LED_GAP_MS;         step = 2; break;
+    case 2:  linkLedWrite(true);  phaseAt = now + LINK_LED_FLASH_MS;       step = 3; break;
+    default: linkLedWrite(false); phaseAt = now + LINK_LED_PERIOD_DOWN_MS; step = 0; break;
   }
 }
 
@@ -337,11 +582,29 @@ void buttonTick(Button &b) {
     if (b.stable == LOW) {                    // ---- press edge
       b.pressStart = now;
       b.holdFired1 = b.holdFired2 = false;
+
+      // "I felt that." On the way DOWN, under the finger, not on release.
+      //
+      // This started on the release edge and it was wrong: the wearer had to
+      // press, hold, and let go before anything happened, which reads as lag
+      // even though nothing is actually slow. A click confirmation that arrives
+      // after the click is over is not a click confirmation.
+      //
+      // Only the 35 ms debounce sits in front of it now, which is below what
+      // anyone can perceive. Counting is unaffected -- one press, one tick, so
+      // two taps are still felt as two.
+      tick();
     } else {                                  // ---- release edge
       uint32_t held = now - b.pressStart;
       if (!b.holdFired1 && !b.holdFired2 && held < HOLD_1_MS) {
         b.clicks++;
         b.lastRelease = now;
+
+        // The tick for this press already fired on the way down, which is the
+        // whole answer to the doubt described below: a press that was not
+        // registered feels different from one that was, so tapping again out of
+        // uncertainty stops being the only safe move.
+
         // SOS the instant the second tap lands -- do not wait for the burst to
         // close. Taps 3, 4, 5 are still SOS but must not re-send it, so the
         // flag latches for the rest of the burst.
@@ -436,8 +699,13 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
   if (btn == 1 && strcmp(gesture, "click") == 0) {
     if (n == 1) {                       // "I'm fine" / silence a check-in
       gAwaitingAck = false;
-      feedback(1, 90, 90);
+      gNextNagAt   = 0;                 // answered: stop asking
+      // No buzz here any more. The tick already said "I counted that", and this
+      // used to fire a 1 x 90 confirmation *before* send() -- which returns
+      // early with no link, so the wearer was told their "I'm fine" had gone
+      // when nothing had left the wrist. The phone answers now; see below.
       sendEvent("checkin_ack", meta);
+      if (gConnected) expectOutcome(OUTCOME_ACK); else outcomeFailed();
       return;
     }
     // Two taps is SOS -- and so are three, four, five. A frightened person
@@ -447,21 +715,34 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
     // it in would let an over-tapped SOS arm anti-snatch instead of calling
     // for help.
     if (gConnected) {
-      feedback(4, 120, 80);
+      // Deliberately NO confirmation buzz here.
+      //
+      // This used to fire a four-pulse "sent" the instant the tap landed. The
+      // band cannot know that. A successful write means the phone received the
+      // press; with the app's offline queue the alert can then sit unsent for
+      // minutes, and the wearer would have been told help was coming either
+      // way. So the band asks and waits, and the phone -- the only thing that
+      // knows whether the server has it -- answers with ack / queued / failed.
       sendEvent("sos", meta + ",\"src\":\"double_tap\"");
+      expectOutcome(OUTCOME_SOS);
       return;
     }
 
-    // No link. send() would drop this on the floor -- and until now it did so
-    // *after* buzzing the four-pulse "sent" pattern, so a frightened person was
-    // told help was coming when nothing had left their wrist. That was the
-    // worst thing this firmware did.
+    // No link. This is the one outcome the band CAN settle alone: send() drops
+    // this on the floor and nothing anywhere has received it, so there is
+    // nothing to wait for and the failure goes out immediately.
     //
-    // The beacon is the real answer to it. The different pattern is the honest
-    // one: slower and longer, so the wrist can tell "gone the fast way" from
-    // "gone the slow way" without looking at anything.
+    // Until now this buzzed 6 x 250 ms -- longer and heavier than the success
+    // pattern, so it felt like a BIGGER confirmation of something that had not
+    // happened. It was written when the SOS beacon carried the press out over
+    // the advertisement; that path is switched off (docs/BAND_WAKE_DISABLED.md)
+    // and the buzz outlived the thing it was confirming.
+    //
+    // setSosBeacon() is left in place: it is inert while nothing scans for the
+    // flag, and it is the foundation the band id will be built on when the
+    // beacon returns. See BUG-012.
     setSosBeacon(true);
-    feedback(6, 250, 150);
+    outcomeFailed();
     sendEvent("sos", meta + ",\"src\":\"double_tap\",\"via\":\"beacon\"");
     return;
   }
@@ -500,14 +781,32 @@ void handleCommand(const String &line) {
   if (c == "checkin_req") {                  // phone asks "are you OK?"
     gAwaitingAck = true;
     gAckDeadline = millis() + (uint32_t)jsonInt(line, "window", 60) * 1000UL;
+    gNextNagAt   = millis() + CHECKIN_NAG_MS; // and keep asking until answered
     feedback(3, 400, 250);                   // long, unmissable buzz
     sendEvent("checkin_prompted");
   } else if (c == "buzz") {
     feedback(jsonInt(line, "n", 2), 150, 120);
   } else if (c == "alarm") {
     feedback(20, 300, 200);
+  // ---- the answer to a press this band is still waiting on -----------------
+  //
+  // All three are ignored unless something is actually pending. An outcome is
+  // the answer to a question the wrist asked; delivered with no question in
+  // flight it is a buzz for a press the wearer never made. That happens
+  // routinely -- an SOS raised from the app's own button, or a stand-down
+  // tapped on screen -- and in both of those the wearer is looking at the
+  // phone and needs nothing from their wrist.
   } else if (c == "ack") {                   // cloud received our event
-    feedback(1, 60, 60);
+    // The command already existed and carried exactly this meaning; nothing had
+    // ever sent it. It is repointed at the delivered pattern rather than a new
+    // command being invented, so the vocabulary does not grow and the app
+    // cannot drift into its own idea of what "sent" feels like. Its old
+    // 1 x 60 ms goes with it -- nothing in this design is under 90 ms.
+    if (gOutcomeDueAt) outcomeDelivered();
+  } else if (c == "queued") {                // phone has it, no network yet
+    if (gOutcomeDueAt) outcomeQueued();
+  } else if (c == "failed") {                // the phone knows it did not go
+    if (gOutcomeDueAt) outcomeFailed();
   } else if (c == "bat") {                   // demo helper: force battery level
     gBattery = (uint8_t)jsonInt(line, "v", 100);
     gBatteryForced = true;
@@ -662,6 +961,8 @@ void setup() {
   pinMode(PIN_BTN, INPUT_PULLUP);
   pinMode(PIN_MOTOR, OUTPUT);
   digitalWrite(PIN_MOTOR, LOW);
+  pinMode(PIN_LINK_LED, OUTPUT);
+  linkLedWrite(false);
 
   Serial.begin(115200);
   uint32_t t0 = millis();
@@ -716,6 +1017,9 @@ void loop() {
 
   buttonTick(gBtn);
   feedbackTick();
+  deferredTick();     // releases an outcome buzz once the tick has finished
+  outcomeTick();      // the phone never answered: say so rather than nothing
+  linkLedTick();      // standing "am I linked", independent of the motor
 #if HAS_IMU
   imuTick();
 #endif
@@ -754,6 +1058,20 @@ void loop() {
     if (gConnected) {
       feedback(1, 200, 100);
       sendEvent("link_up");
+    } else if (gOutcomeDueAt != 0) {
+      // The link died while we were waiting to hear whether the press got out.
+      // It did not, and there is no longer anything that could tell us
+      // otherwise, so say so now rather than sitting out the 4 s timeout.
+      //
+      // This also closes the one dangerous collision in the vocabulary: the
+      // ordinary link-down buzz is 2 x 80/80 and "delivered" is 2 x 90/70,
+      // which no wrist can tell apart. Those two can only be confused in this
+      // exact window -- pressed, waiting, link drops -- and here the long
+      // FAILED buzz replaces the link-down buzz entirely. Outside this window
+      // "delivered" has no press to refer to, so there is nothing to mistake
+      // it for.
+      outcomeFailed();
+      Serial.println("{\"t\":\"log\",\"msg\":\"link down while awaiting outcome\"}");
     } else {
       feedback(2, 80, 80);
       Serial.println("{\"t\":\"log\",\"msg\":\"link down, advertising again\"}");
@@ -770,11 +1088,29 @@ void loop() {
     Serial.println("{\"t\":\"log\",\"msg\":\"sos beacon expired\"}");
   }
 
-  // missed check-in: band nags once more, phone owns the real escalation
+  // missed check-in: phone owns the real escalation
+  //
+  // Checked BEFORE the nag below, so the deadline always wins. A nag fired in
+  // the same millisecond the window closed would buzz "answer me" at somebody
+  // whose family is already being called.
   if (gAwaitingAck && now > gAckDeadline) {
     gAwaitingAck = false;
+    gNextNagAt   = 0;
     feedback(5, 350, 200);
     sendEvent("checkin_missed");
+  }
+
+  // Still waiting: ask again.
+  //
+  // The reminder the wearer actually needs. One buzz at the top of the window
+  // is easy to sleep through, and the price of sleeping through it is a false
+  // alarm sent to the whole family -- so the question repeats, and tightens as
+  // the deadline approaches, until a single press answers it.
+  if (gAwaitingAck && gNextNagAt != 0 && now >= gNextNagAt) {
+    feedback(2, 400, 250);              // the check-in pattern, one pulse shorter
+    uint32_t left = (gAckDeadline > now) ? (gAckDeadline - now) : 0;
+    gNextNagAt = now + (left <= CHECKIN_URGENT_AT_MS ? CHECKIN_NAG_URGENT_MS
+                                                    : CHECKIN_NAG_MS);
   }
 
   // heartbeat

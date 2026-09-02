@@ -33,6 +33,14 @@ export const HOLD_1_MS    = 3000;   // hold 3s
 export const HOLD_2_MS    = 5000;   // hold 5s
 export const HEARTBEAT_MS = 10000;
 
+// The check-in nag, mirroring the .ino. One buzz at the top of the window is
+// easy to sleep through, and the price of sleeping through it is a false alarm
+// sent to the whole family — so the question repeats until it is answered, and
+// tightens as the deadline approaches.
+export const CHECKIN_NAG_MS        = 12000;
+export const CHECKIN_NAG_URGENT_MS = 5000;
+export const CHECKIN_URGENT_AT_MS  = 20000;
+
 // ---- fall detection, exec plan section 8 --------------------------------
 // A four-stage state machine, because every single threshold has a fatal
 // counter-example: "high acceleration" is a dropped bag, "sudden stop" is
@@ -60,8 +68,17 @@ export const FALL = {
  * `n` is an inclusive [min, max] tap count. `toggle` means the event depends
  * on current state, so the name is chosen at fire time.
  */
+// NOTE ON `buzz`: the confirmation buzzes are gone from the two event rows, and
+// their absence is the point. They fired the moment the gesture resolved, which
+// is before anything knows whether the event reached the server — so the wrist
+// said "sent" for a press that might be sitting in the offline queue, or that
+// never left a disconnected band at all.
+//
+// What replaces them: a TICK on every press (see `tap()` below), which only
+// claims the press was counted, and then `ack` / `queued` / `failed` from the
+// app once the outcome is actually known. Same split as the firmware.
 export const DEFAULT_GESTURES = [
-  { btn: 1, g: 'click', n: [1, 1],  e: 'checkin_ack', buzz: [1, 90, 90] },
+  { btn: 1, g: 'click', n: [1, 1],  e: 'checkin_ack' },
 
   // Two taps is SOS. Three, four, five are ALSO SOS, deliberately: a
   // frightened person does not tap a precise number of times, and the failure
@@ -69,7 +86,7 @@ export const DEFAULT_GESTURES = [
   // product is supposed to work. That is also why `armed` cannot come back as
   // a 4-tap gesture — it would let an over-tapped SOS arm anti-snatch instead
   // of calling for help.
-  { btn: 1, g: 'click', n: [2, 99], e: 'sos', src: 'double_tap', buzz: [4, 120, 80] },
+  { btn: 1, g: 'click', n: [2, 99], e: 'sos', src: 'double_tap' },
 
   { btn: 1, g: 'hold3', toggle: 'high_alert' },
 
@@ -80,7 +97,7 @@ export const DEFAULT_GESTURES = [
   // { btn: 1, g: 'hold5', toggle: 'armed' },
 
   // Button B is a prototyping convenience; the shipped band has one key.
-  { btn: 2, g: 'click', n: [1, 99], e: 'sos', src: 'button_b', buzz: [4, 120, 80] },
+  { btn: 2, g: 'click', n: [1, 99], e: 'sos', src: 'button_b' },
 ];
 
 /** Is anything at all bound to this hold? Nothing buzzes if nothing is. */
@@ -127,8 +144,10 @@ export function useVirtualBand(onLine, active = true) {
   const [fallStage, setFallStage] = useState('idle');
   const [log, setLog]             = useState([]);     // newest first, capped
 
-  const seq      = useRef(0);
-  const bootMs   = useRef(now());
+  const seq         = useRef(0);
+  const bootMs      = useRef(now());
+  const ackDeadline = useRef(0);      // when the open check-in runs out
+  const outcomeKind = useRef(null);   // 'sos' | 'ack' — what an outcome answers
   const armedRef = useRef(false);
   const highAlertRef = useRef(false);
   const gestures  = useRef(DEFAULT_GESTURES);   // swap this from settings later
@@ -197,10 +216,43 @@ export function useVirtualBand(onLine, active = true) {
       return;
     }
 
-    if (rule.e === 'checkin_ack') setAwait(false);
+    if (rule.e === 'checkin_ack') { setAwait(false); ackDeadline.current = 0; }
+
+    // Remember what this press is waiting to hear about, so the answer can feel
+    // like an answer to *this* question. `gOutcomeKind` in the .ino.
+    if (rule.e === 'sos') outcomeKind.current = 'sos';
+    else if (rule.e === 'checkin_ack') outcomeKind.current = 'ack';
+
     if (rule.buzz) feedback(...rule.buzz);
     emit(rule.e, rule.src ? { ...meta, src: rule.src } : meta);
   }, [emit, feedback]);
+
+  // ---- keep asking until it is answered ----------------------------------
+  //
+  // The loop() nag from the .ino. It buzzes the check-in pattern one pulse
+  // shorter — the same question again, not a new meaning — and shortens the
+  // gap once the deadline is close, which is the only way a wrist can convey
+  // "you are running out of time" to somebody not looking at a screen.
+  //
+  // Self-rescheduling timeout rather than an interval, because the gap changes.
+  useEffect(() => {
+    if (!awaitingAck) return undefined;
+    let t = null;
+    const arm = () => {
+      const left = Math.max(0, ackDeadline.current - now());
+      const gap = left > 0 && left <= CHECKIN_URGENT_AT_MS
+        ? CHECKIN_NAG_URGENT_MS : CHECKIN_NAG_MS;
+      t = setTimeout(() => {
+        // The deadline wins: never buzz "answer me" at somebody whose family
+        // is already being called.
+        if (ackDeadline.current && now() > ackDeadline.current) return;
+        feedback(2, 400, 250);
+        arm();
+      }, gap);
+    };
+    arm();
+    return () => { if (t) clearTimeout(t); };
+  }, [awaitingAck, feedback]);
 
   // ------------------------------------------------- the button engine ---
   // buttonTick() minus the debounce, which a touch handler already does for
@@ -226,6 +278,11 @@ export function useVirtualBand(onLine, active = true) {
     p.held2 = false;
     setHolding(true);
     setHoldMs(0);
+
+    // "I felt that", on the way DOWN. Mirrors `tick()` at the press edge in the
+    // .ino — it used to fire on release, which meant press, hold and let go
+    // before anything happened, and that reads as lag however fast it is.
+    feedback(1, 90, 0);
 
     tickTimer.current = setInterval(() => setHoldMs(now() - p.start), 60);
 
@@ -253,6 +310,8 @@ export function useVirtualBand(onLine, active = true) {
 
     if (!p.held1 && !p.held2 && held < HOLD_1_MS) {
       p.clicks += 1;
+
+      // The tick for this press already fired on the way down, in onPressIn.
 
       // ------------------------------------------------------------------
       // THE SLOW-TAP FAILURE — mirrors nigehban_band_nrf52.ino, which carries
@@ -283,7 +342,7 @@ export function useVirtualBand(onLine, active = true) {
         if (n > 0 && !alreadySos) onGesture(btn, 'click', n);
       }, TAP_WINDOW_MS);
     }
-  }, [clearHoldTimers, onGesture]);
+  }, [clearHoldTimers, feedback, onGesture]);
 
   // ------------------------------------------------- commands from app ---
   // handleCommand() from the .ino. The app writes these to NUS RX on a real
@@ -293,12 +352,44 @@ export function useVirtualBand(onLine, active = true) {
     switch (cmd.c) {
       case 'checkin_req':
         setAwait(true);
+        // The window, so the nag below can tighten as the deadline nears.
+        // Mirrors gAckDeadline in the .ino.
+        ackDeadline.current = now() + (cmd.window ?? 60) * 1000;
         feedback(3, 400, 250);              // long, unmissable buzz
         emit('checkin_prompted');
         break;
       case 'buzz':  feedback(cmd.n ?? 2, 150, 120); break;
       case 'alarm': feedback(20, 300, 200); break;
-      case 'ack':   feedback(1, 60, 60); break;
+
+      // The outcome of a press, from the only thing that can know it. Mirrors
+      // handleCommand() in the .ino — `ack` was repointed from its old
+      // 1 x 60 ms, and the two siblings are new. Nothing goes below 90 ms.
+      //
+      // `ack` has two shapes, chosen by what was being confirmed: an SOS
+      // reaching the family is the confirmation somebody frightened is actually
+      // waiting for, so it is a single firm buzz longer than anything on the
+      // check-in path. A check-in answered is routine and stays light.
+      //
+      // The firmware ignores all three unless it is waiting for an answer. That
+      // gate is not reproduced here: the virtual band is driven by on-screen
+      // buttons, so the wearer is looking at the phone and a stray buzz
+      // misleads nobody.
+      case 'ack':
+        if (outcomeKind.current === 'sos') feedback(1, 400, 0);
+        else                               feedback(2, 90, 70);
+        outcomeKind.current = null;
+        break;
+      case 'queued':
+        feedback(3, 250, 150);
+        outcomeKind.current = null;
+        break;
+      // Two long heavy buzzes, not one. A single buzz now means "sent", so
+      // failure must not also be a single buzz — telling 400 ms from 900 ms
+      // apart on a wrist under stress is the most dangerous distinction here.
+      case 'failed':
+        feedback(2, 700, 300);
+        outcomeKind.current = null;
+        break;
       case 'bat':
         batRef.current = cmd.v ?? 100;
         setBattery(batRef.current);
