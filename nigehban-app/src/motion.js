@@ -248,6 +248,78 @@ export function noteImpact(at = Date.now()) {
   lastImpactAt = at;
 }
 
+// ---- the second source of speed, and why there has to be one ---------------
+//
+// `coords.speed` is the GNSS chip's own Doppler measurement and it is the good
+// one: direct, instantaneous, and accurate to a fraction of a km/h. It is also
+// frequently ABSENT.
+//
+// Android satisfies a Balanced-accuracy request from fused/network location,
+// and those fixes routinely carry no speed at all. That is a deadlock, not a
+// degradation: the watch idles on Balanced to save battery and only opens up to
+// real GNSS once it sees road speed -- so with `speed` null it never sees road
+// speed, never opens up, and accident detection is silently off for the entire
+// journey. It needs speed in order to start measuring speed.
+//
+// So when the chip declines to say, the distance between two consecutive fixes
+// over the time between them answers instead. Still GPS -- two positions, not
+// dead reckoning -- and good enough for a 25 km/h threshold even though it is
+// far too coarse to quote at somebody.
+//
+// It is NOT integrated from the accelerometer, and never will be. Velocity from
+// a wrist IMU means double-integrating a noisy signal, and the error compounds
+// so quickly that it is confidently wrong within seconds. A detector that
+// believes a made-up speed is worse than one that admits it does not know.
+let lastFix = null;      // { lat, lon, at, acc }
+
+const EARTH_M = 6371000;
+/** Metres between two fixes. Equirectangular -- exact enough at these ranges. */
+function metresBetween(a, b) {
+  const toRad = Math.PI / 180;
+  const x = (b.lon - a.lon) * toRad * Math.cos(((a.lat + b.lat) / 2) * toRad);
+  const y = (b.lat - a.lat) * toRad;
+  return Math.sqrt(x * x + y * y) * EARTH_M;
+}
+
+/**
+ * Take a position fix, however it arrived, and get a speed out of it.
+ *
+ * Prefers the chip's own reading and falls back to the distance between fixes.
+ * Everything that watches position should come through here rather than calling
+ * `noteSpeed` directly, so the fallback exists on every path.
+ */
+export function noteFix(coords, at = Date.now()) {
+  if (!coords) return;
+
+  if (coords.speed != null && coords.speed >= 0) {
+    noteSpeed(coords.speed, at);
+    lastFix = { lat: coords.latitude, lon: coords.longitude, at, acc: coords.accuracy ?? null };
+    return;
+  }
+
+  const prev = lastFix;
+  lastFix = { lat: coords.latitude, lon: coords.longitude, at, acc: coords.accuracy ?? null };
+  if (!prev || coords.latitude == null) return;
+
+  const dt = (at - prev.at) / 1000;
+  // Under a second is noise; over a minute is two different journeys.
+  if (!(dt >= 1 && dt <= 60)) return;
+
+  const d = metresBetween(prev, lastFix);
+
+  // A 100 m-accurate fix wanders by ~100 m while sitting on a table, which over
+  // 15 s reads as 24 km/h out of nothing at all. Requiring the movement to
+  // exceed the uncertainty is what stops a parked phone arming crash detection.
+  const slop = Math.max(prev.acc || 0, lastFix.acc || 0);
+  if (d <= slop) return;
+
+  const mps = d / dt;
+  // 300 km/h is not a car, it is a bad fix or a jump between providers.
+  if (mps * MPS_TO_KMH > 300) return;
+
+  noteSpeed(mps, at);
+}
+
 /**
  * What the phone knows about this person's movement right now.
  *
@@ -424,9 +496,15 @@ export function useSpeedWatch(enabled) {
           },
           (pos) => {
             if (!alive) return;
-            const mps = pos?.coords?.speed;
-            noteSpeed(mps, pos?.timestamp || Date.now());
-            const kmh = mps != null && mps >= 0 ? mps * MPS_TO_KMH : null;
+            // Through noteFix, not noteSpeed: a Balanced-accuracy fix often
+            // carries no `speed` field at all, and without the distance
+            // fallback this watch could never see the road speed it needs in
+            // order to open up to real GNSS. See noteFix.
+            noteFix(pos?.coords, pos?.timestamp || Date.now());
+            // Read back what actually landed, so the throttle below reacts to
+            // the derived speed as well as the chip's own.
+            const ctx = speedContext();
+            const kmh = ctx.known ? ctx.nowKmh : null;
 
             // Open the throttle when they start moving, close it when they
             // have been slow for a while. The exit is deliberately lazy: a bus
@@ -489,4 +567,5 @@ export function __resetMotion() {
   watchError = null;
   journeyFrom = 0;
   stoppedSince = 0;
+  lastFix = null;
 }

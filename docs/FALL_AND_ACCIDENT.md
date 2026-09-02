@@ -302,6 +302,34 @@ is the number to check against a real capture** — see the bench protocol — a
 it is the reason `IMPACT_G` is written down as a starting value rather than a
 finding.
 
+### Where the speed actually comes from
+
+**GPS, and only GPS.** Two sources, in order of preference, both from position
+fixes:
+
+1. **`coords.speed`** — the GNSS chip's own Doppler measurement. Direct,
+   instantaneous, accurate to a fraction of a km/h. This is the good one.
+2. **Distance between consecutive fixes ÷ time**, when the chip declines to
+   report speed at all.
+
+The second is not a nicety. Android satisfies a `Balanced`-accuracy request
+from fused/network location, and those fixes routinely carry **no speed field**.
+That is a deadlock rather than a degradation: the watch idles on Balanced to
+save battery and only opens up to real GNSS once it sees road speed — so with
+`speed` null it never sees road speed, never opens up, and **accident detection
+is silently off for the whole journey.** It needs speed in order to start
+measuring speed. `noteFix()` breaks that loop.
+
+The derived figure is guarded: the movement must exceed the fixes' own accuracy
+(a 100 m-accurate fix wanders ~100 m on a table, which over 15 s reads as
+24 km/h out of nothing), the interval must be 1–60 s, and anything over
+300 km/h is a provider jump rather than a car.
+
+**It is never integrated from the accelerometer, and never will be.** Velocity
+from a wrist IMU means double-integrating a noisy signal; the error compounds so
+fast it is confidently wrong within seconds. A detector that believes a
+made-up speed is worse than one that admits it does not know.
+
 ### The silent failure to watch for
 
 With no position fixes, `wasTravelling` is false, **every impact is classified
