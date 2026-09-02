@@ -7,6 +7,7 @@ import CheckinBanner from '../components/CheckinBanner';
 import HighAlertPanel from '../components/HighAlertPanel';
 import SosLiveView from '../components/SosLiveView';
 import { pendingPermissions } from './Setup';
+import { noteFix } from '../motion';
 import { C, S, T, fmtAgo } from '../theme';
 import { Banner, Button, Card, Chip, Divider, Icon, Stat, Txt } from '../ui';
 
@@ -67,6 +68,11 @@ export default function Home({
         sub = await Location.watchPositionAsync(
           { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 5 },
           (p) => {
+            // Into the speed history as well. This watch is already running at
+            // 5 s whenever Home is on screen, and every fix it took used to be
+            // used for the SOS pin and then discarded -- while motion.js, one
+            // import away, was starved of exactly this.
+            noteFix(p?.coords, p?.timestamp || Date.now());
             const next = { lat: p.coords.latitude, lon: p.coords.longitude,
                            acc: p.coords.accuracy, at: Date.now() };
             setFix(next);

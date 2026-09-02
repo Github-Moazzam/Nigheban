@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { flushPending } from './alertQueue';
+import { noteFix } from './motion';
 
 const TASK_NAME = 'NIGEHBAN_BACKGROUND_WATCH';
 
@@ -24,16 +25,39 @@ try {
 // has to already be registered when that happens.
 if (TaskManager && Location) {
   try {
-    TaskManager.defineTask(TASK_NAME, async ({ error }) => {
+    TaskManager.defineTask(TASK_NAME, async ({ data, error }) => {
       if (error) {
         console.warn('[bgService] task error', error.message);
       }
-      // The location payload is still not the point -- the foreground service
-      // and the wake it creates are. But this tick is the only heartbeat the
-      // app has while it is off screen or swiped out of Recents, so it is also
-      // the only chance a queued SOS gets to leave the phone before somebody
-      // opens the app again. An emergency raised in a dead zone must not wait
-      // on the user's attention returning.
+
+      // ---- the speed history, off screen --------------------------------
+      //
+      // This service has been receiving positions all along and throwing every
+      // one of them away, while motion.js -- the thing those positions exist to
+      // feed -- went blind the moment the app left the screen. Android stops
+      // delivering foreground location to a backgrounded app, so a phone in a
+      // pocket, which is where a phone is during a crash, had no speed history
+      // at all and every impact was classified as furniture.
+      //
+      // The same `noteFix` the foreground watch calls, so a fix that arrives
+      // this way is indistinguishable downstream from one that arrives on
+      // screen. Guarded like everything else in this task: an exception thrown
+      // out of a headless task takes the service with it.
+      try {
+        const locations = data?.locations;
+        if (Array.isArray(locations)) {
+          for (const loc of locations) noteFix(loc?.coords, loc?.timestamp || Date.now());
+        }
+      } catch (e) {
+        console.warn('[bgService] speed history update failed', e?.message || e);
+      }
+      // ---- the queued SOS ------------------------------------------------
+      //
+      // The other reason this task exists. It is the only heartbeat the app has
+      // while it is off screen or swiped out of Recents, so it is also the only
+      // chance a queued SOS gets to leave the phone before somebody opens the
+      // app again. An emergency raised in a dead zone must not wait on the
+      // user's attention returning.
       //
       // Guarded and silent: an exception thrown out of a headless task takes
       // the service with it, and the service is what keeps the process alive.
@@ -91,8 +115,12 @@ export async function startBackgroundWatch() {
     const isRunning = await Location.hasStartedLocationUpdatesAsync(TASK_NAME);
     if (!isRunning) {
       await Location.startLocationUpdatesAsync(TASK_NAME, {
-        accuracy: Location.Accuracy.Balanced,
-        timeInterval: 60000, // 60 seconds interval
+        // >>> TEST SETTING, matched to motion.js's WATCH_OPTS. This used to be
+        // >>> Balanced at 60 s, which is a heartbeat, not a speed trace: too
+        // >>> coarse to carry a chip speed and too slow to measure one from the
+        // >>> positions. Turn both back down together.
+        accuracy: Location.Accuracy.BestForNavigation,
+        timeInterval: 1000,
         // Zero, not 50 m. Android treats distanceInterval as a *floor* on
         // movement: with 50 m set, a phone sitting on a table never produces a
         // single tick, however long the interval. That was harmless while the
@@ -100,7 +128,11 @@ export async function startBackgroundWatch() {
         // it -- somebody hiding still in a dead zone is precisely the person
         // whose alert must go out the moment signal returns.
         distanceInterval: 0,
-        deferredUpdatesInterval: 60000,
+        // Zero, not 60 s. `deferredUpdatesInterval` lets Android BATCH updates
+        // and hand them over a minute late, which is fine for a heartbeat and
+        // useless for a speed history: the samples arrive after the impact they
+        // were meant to explain.
+        deferredUpdatesInterval: 0,
         foregroundService: {
           notificationTitle: 'Nigehban is watching',
           notificationBody: 'Band link and safety monitoring are active',
