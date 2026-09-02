@@ -394,6 +394,12 @@ your location. Tap to open.`
 app swiped away. `raise()` reaches `Vibration.vibrate([0, 300, 120, 300])` at
 App.js:346 and fires it.
 
+*(That vibration has since moved. On `feat/press-feedback-and-link-led` the
+press gets a short acknowledgement and the confirmation waits until the server
+answers — see the "Superseded" note in BUG-007. The diagnostic below is
+unaffected: what mattered was that `raise()` runs at all with the activity
+destroyed, and it still does.)*
+
 That is the useful diagnostic for this whole group of bugs: the JS runtime,
 the band callback and `raise()` all run normally with the activity destroyed.
 Only `dispatch()` is inert, because the reducer it targets died with the tree.
@@ -405,7 +411,10 @@ native work needed.
 
 ## BUG-007 — The band gets no confirmation buzz for an SOS
 
-**Status:** FIXED on `fix/ble-scan-throttle`
+**Status:** FIXED on `fix/ble-scan-throttle` — **the fix below was then replaced
+on `feat/press-feedback-and-link-led`, 1 Sep 2026.** The bug stays closed; the
+mechanism that closes it is no longer the one described here. See "Superseded"
+at the end.
 **Severity:** Medium
 **Area:** [nigehban-app/App.js](../nigehban-app/App.js)
 
@@ -420,6 +429,28 @@ available without taking the phone out.
 `bandRef` (the link is created further down the component than `raise` is
 defined, and a buzz is fire-and-forget, so a ref beats a dependency that would
 rebuild `raise` on every battery tick).
+
+### Superseded — and why the original fix was not enough
+
+`{c:'buzz', n:3}` has been removed from `raise()`. Looking for it in the code
+and not finding it does not mean this regressed.
+
+The problem was *where* it fired: at local dispatch, one line after
+`setDeliveryStatus('queued')` and before the network call had been attempted.
+So it buzzed "sent" for an alert that might be sitting in the offline queue —
+and alongside the phone's own `[0,300,120,300]`, the wearer was told twice, on
+two devices, at a moment when nothing had left the phone. Two channels agreeing
+reads as corroboration, which made it worse than a single wrong signal.
+
+What replaces it is the same guarantee told honestly, in two parts:
+
+- **A tick per press**, on the press edge, from the band itself. That is the
+  "haptic acknowledgement on the wrist" this entry asked for, and it now also
+  says *how many* presses registered.
+- **An outcome buzz** once the server confirms — `{c:'ack'}`, one firm 400 ms
+  buzz for an SOS — with distinct patterns for queued and not-sent.
+
+Full reasoning in [BAND_FEEDBACK_SPEC.md](BAND_FEEDBACK_SPEC.md).
 
 ---
 

@@ -200,6 +200,19 @@ under the floor:
 | **SOS fired** | `feedback(4, 120, 80)` | 0.7 s → **1.8 s** |
 | High Alert on | `feedback(2, 180, 120)` | 0.6 s → **1.2 s** |
 
+> **Three of those four values have since changed** on
+> `feat/press-feedback-and-link-led` (1 Sep 2026). `ack` now means "the server
+> has it" and buzzes `1 × 400` for an SOS or `2 × 90/70` for a check-in; the old
+> `1 × 60/60` is gone, and nothing in the design goes below 90 ms any more. The
+> SOS press itself no longer buzzes a confirmation at all — it gets a `1 × 90`
+> tick per press and waits to be told the outcome. High Alert is unchanged.
+> [docs/BAND_FEEDBACK_SPEC.md](../docs/BAND_FEEDBACK_SPEC.md) carries the
+> current table.
+>
+> The argument below is unaffected — it is about what a 300 ms floor would do to
+> *any* set of short patterns, and the new set is shorter still. **The
+> measurement above and the diagnosis below are left exactly as written.**
+
 Two things break. The patterns stop being *distinguishable* — at 300 ms per
 pulse with adaptation blunting anything longer, a 1-pulse ack and a 4-pulse SOS
 both read as "a long buzz happened." And the SOS confirmation arrives ~1.8 s
