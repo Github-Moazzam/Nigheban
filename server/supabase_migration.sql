@@ -130,7 +130,14 @@ create index if not exists idx_checkins_due
 -- ============================================================
 create table if not exists public.watch_state (
     user_id       text primary key references public.users(id) on delete cascade,
+    -- The HIGHEST live alert: idle | high_alert | sos. An SOS raises it above
+    -- High Alert without ending High Alert -- which is what `high_alert` below
+    -- is for. Reading "is High Alert armed" off this column is what silently
+    -- ended the check-ins for good the first time somebody pressed SOS. See
+    -- migrations/008_high_alert_own_column.sql.
     mode          text not null default 'idle',
+    -- Is High Alert armed? The sweeper's check-ins run on this.
+    high_alert    boolean not null default false,
     next_buzz_at  timestamptz,
     last_beat     timestamptz,
     band_link     boolean not null default false,
@@ -143,7 +150,29 @@ create table if not exists public.watch_state (
     band_batt     smallint,
     last_lat      double precision,
     last_lon      double precision,
-    lost_notified boolean not null default false
+    lost_notified boolean not null default false,
+    -- WITNESSED state: what the phone said about itself at the last heartbeat,
+    -- as opposed to what the row happens to say at sweep time. `watch_lost` is
+    -- a transition -- "had a band link AND was armed, and then the link went"
+    -- -- and these two are the only fields that still describe the moment
+    -- before a loss once the phone has stopped talking. See
+    -- migrations/006_watch_lost_transition.sql and server/watch_lost.py.
+    --
+    -- beat_band_link is `band_link AND NOT band_virtual`: a PHYSICAL wristband
+    -- and nothing else. In virtual mode the phone runs the band's firmware and
+    -- reports band_link=true, correctly -- but there is no wristband, and
+    -- watch_lost is the alert about one going away.
+    beat_band_link boolean not null default false,
+    beat_armed     boolean not null default false,
+    -- A watch_lost page holds the alert down until this time, so a band
+    -- flapping at the edge of range pages the family once, not a dozen times.
+    lost_rearm_at  double precision,
+    -- When the band link went away while armed, or null if the band is here.
+    -- A drop starts a two-minute grace window rather than an alert: Bluetooth
+    -- drops for reasons that are not emergencies, and a band that comes back
+    -- inside the window clears this and is never mentioned to anyone. See
+    -- migrations/007_watch_lost_grace.sql.
+    link_lost_at   double precision
 );
 
 -- ============================================================
