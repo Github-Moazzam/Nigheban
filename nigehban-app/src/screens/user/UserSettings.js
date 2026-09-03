@@ -206,6 +206,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                   + 'Android asked for. You only do this once on this phone.'}
             </Text>
             <BandPinAsk wrong={band?.status === 'bad-pin'}
+                        onForgot={() => setRecover('ask')}
                         onSubmit={(pin) => band?.submitPin?.(pin)} />
           </View>
         ) : !linked ? (
@@ -293,18 +294,33 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           {/* The PIN row is gated on `canSetPin` as well, because when this
               phone IS the band there is nobody to keep out and a lock that
               locks nothing is worse than no lock on the screen. */}
-          {linked && band?.canSetPin ? (
+          {/* Shown whenever a real band is the chosen radio, connected or not.
+              Gating this on `linked` put the only route to "I have forgotten
+              it" behind being connected -- which is precisely what a forgotten
+              PIN prevents. Changing a PIN still needs the band present, because
+              it is a command written to it; looking one up does not, because it
+              comes from the account. So the row is always here and the panel
+              offers whichever of the two is actually possible. */}
+          {!virtual && band?.canSetPin !== false ? (
             <>
               <Row
                 icon="key" title="Band PIN"
-                sub={band?.defaultPin
-                  ? 'Still the factory PIN — anyone who knows it can pair'
-                  : 'Asked for once on each phone you link'}
-                value={band?.defaultPin ? 'Change it' : '••••••'}
-                tone={band?.defaultPin ? U.amber : U.dim}
-                onPress={() => setEditing(editing === 'pin' ? null : 'pin')}
+                sub={!linked
+                  ? 'Connect the band to change it — or tap to look it up'
+                  : band?.defaultPin
+                    ? 'Still the factory PIN — anyone who knows it can pair'
+                    : 'Asked for once on each phone you link'}
+                value={!linked ? 'Forgot it?'
+                       : band?.defaultPin ? 'Change it' : '••••••'}
+                tone={band?.defaultPin && linked ? U.amber : U.dim}
+                onPress={() => {
+                  // With no band on the other end there is nothing to change,
+                  // so the tap goes straight to the only useful action.
+                  if (!linked) { setRecover('ask'); return; }
+                  setEditing(editing === 'pin' ? null : 'pin');
+                }}
               />
-              {editing === 'pin' ? (
+              {editing === 'pin' && linked ? (
                 <PinEditor
                   onCancel={() => setEditing(null)}
                   onForgot={() => setRecover('ask')}
@@ -831,7 +847,7 @@ function PinEditor({ onCancel, onSave, onForgot }) {
 }
 
 /** Six digits, in this shell's own kit rather than the console's. */
-function BandPinAsk({ wrong, onSubmit }) {
+function BandPinAsk({ wrong, onSubmit, onForgot }) {
   const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const ok = /^\d{6}$/.test(pin);
@@ -858,6 +874,16 @@ function BandPinAsk({ wrong, onSubmit }) {
           try { await onSubmit?.(pin); } finally { setBusy(false); }
         }}
       />
+      {/* THE screen a person with a forgotten PIN is looking at.
+          The way out used to live only inside the change-PIN panel, which only
+          renders while the band is connected -- so it was reachable exactly
+          when it was not needed, and gone the moment it was. Somebody who has
+          forgotten the PIN cannot connect; this is where they end up, so this
+          is where the way out belongs. */}
+      <Pressable onPress={onForgot} hitSlop={8} accessibilityRole="button"
+                 accessibilityLabel="I have forgotten the band PIN">
+        <Text style={[T.meta, { color: U.mint }]}>I have forgotten it</Text>
+      </Pressable>
     </View>
   );
 }

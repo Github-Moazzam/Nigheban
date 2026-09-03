@@ -322,8 +322,21 @@ Two routes, in the order to try them.
 
 ### 1. Ask your account
 
-**Setup → DEVICE → Band PIN → Change it → "I have forgotten it"**, behind the
-four-digit **disarm PIN**. It needs a network.
+Two ways in, behind the four-digit **disarm PIN**, both needing a network:
+
+- **Setup → DEVICE → Band PIN**. Shown whenever a real band is the chosen radio,
+  connected or not. With no band present it reads **"Forgot it?"** and goes
+  straight to recovery, because there is nothing to change.
+- **"I have forgotten it"**, on the *"The band wants its PIN"* notice itself.
+
+Both, and not just the second, because a forgotten PIN has two shapes: the band
+is in front of you asking, or it is switched off in a drawer and you want the
+number before you go and get it.
+
+> The first version of this put the link **only** inside the change-PIN panel,
+> which renders only while the band is connected — so the way out was reachable
+> exactly when it was not needed and gone the moment it was. A recovery path
+> gated behind the thing it recovers is not a recovery path.
 
 It reads the **account**, not the phone's keystore, and that is the whole point.
 The obvious design — show what this phone has stored — is useless in the
