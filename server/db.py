@@ -19,6 +19,10 @@ from urllib.parse import urlsplit
 import psycopg
 from psycopg.rows import dict_row
 
+from server.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 
 def db_label():
     """host/dbname of DATABASE_URL, for the banner. Never the password."""
@@ -45,6 +49,24 @@ def db_label():
 DB_POOL_MAX       = int(os.environ.get("DB_POOL_MAX", "8"))
 DB_POOL_TIMEOUT_S = float(os.environ.get("DB_POOL_TIMEOUT_S", "15"))
 
+# A ceiling on how long ONE statement may run, enforced by Postgres itself.
+#
+# Without it a query that hangs -- a lock it will never get, a pooler that
+# accepted the bytes and went away -- holds its pool slot for ever. There are
+# eight slots. Eight hung queries is not a slow server, it is a total outage:
+# every endpoint that touches the database blocks for DB_POOL_TIMEOUT_S and
+# then 500s, `/me` included, so the app cannot even sign in to retry.
+#
+# Ten seconds is far above anything here. The slowest real query in this server
+# is the presence scan behind a samaritan sweep, and that is milliseconds
+# against a table this size; the round trip to ap-northeast-1 is ~150 ms. So
+# anything still running at ten seconds is stuck, not slow, and failing it
+# frees the slot for the next SOS.
+DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "10000"))
+
+# Passed to libpq on every connection, pooled or not.
+_CONNECT_OPTIONS = f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}"
+
 try:
     from psycopg_pool import ConnectionPool
 except ImportError:                                   # pragma: no cover
@@ -67,7 +89,22 @@ def _pool():
                     url, name="nigehban",
                     min_size=1, max_size=DB_POOL_MAX,
                     timeout=DB_POOL_TIMEOUT_S, max_idle=120.0,
-                    kwargs={"row_factory": dict_row, "autocommit": True},
+                    # Prove the connection is alive before handing it out.
+                    #
+                    # The default is no check at all, and the failure it lets
+                    # through is the classic one: Supabase's pooler drops a
+                    # session it considers idle, or a NAT between here and Tokyo
+                    # forgets the mapping, and neither tells this end. The socket
+                    # looks open because nothing has been written to it. The pool
+                    # hands out the corpse, the query dies with "server closed
+                    # the connection unexpectedly", and the caller gets a 500 --
+                    # classically the FIRST request after a quiet spell, which
+                    # for this server means the first request after a quiet
+                    # night. check_connection costs one round trip on checkout
+                    # and turns that into a transparent reconnect.
+                    check=ConnectionPool.check_connection,
+                    kwargs={"row_factory": dict_row, "autocommit": True,
+                            "options": _CONNECT_OPTIONS},
                     open=True,
                 )
     return _POOL
@@ -105,7 +142,7 @@ def db():
         url = os.environ.get("DATABASE_URL")
         if not url:
             raise Exception("DATABASE_URL not set in .env")
-        c = psycopg.connect(url, row_factory=dict_row)
+        c = psycopg.connect(url, row_factory=dict_row, options=_CONNECT_OPTIONS)
         c.autocommit = True
         return c
     p = _pool()
@@ -146,8 +183,17 @@ def init_db():
             have = {r["column_name"] for r in c.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='watch_state'").fetchall()}
+            # Migration 010, checked here for the same reason: nothing fails
+            # when it is missing. POST /register goes on working, and the only
+            # symptom is one person, some time later, who cannot sign in with
+            # the right password because a second account holds their username
+            # and /login answers with whichever row Postgres reached first.
+            uniq = c.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname='public'"
+                " AND tablename='users' AND indexname='users_username_uniq'"
+            ).fetchone()
     except Exception as e:
-        print(f"  [schema] could not be checked ({type(e).__name__}: {e})")
+        log.warning("schema could not be checked (%s: %s)", type(e).__name__, e)
         return
     missing = sorted(want - have)
     if missing:
@@ -155,6 +201,12 @@ def init_db():
         print("  Migrations 006-008 have not been applied. Every heartbeat will")
         print("  fail with UndefinedColumn until they are, and an armed phone")
         print("  that cannot report in gets reported lost. Fix it with:\n")
+        print("      python server/migrate_pg.py\n")
+    if not uniq:
+        print("\n  *** users.username is not unique ***")
+        print("  Migration 010 has not been applied. Two people can register the")
+        print("  same username, and one of them then cannot sign in at all -- with")
+        print("  the correct password, and no error that says why. Fix it with:\n")
         print("      python server/migrate_pg.py\n")
 
 

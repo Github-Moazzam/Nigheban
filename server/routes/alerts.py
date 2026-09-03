@@ -133,26 +133,31 @@ async def resolve(alert_id: int, u=Depends(me)):
             raise HTTPException(404, "no such alert")
         if row["user_id"] != u["id"]:
             raise HTTPException(403, "only the person who raised it can stand it down")
-        c.execute("UPDATE alerts SET resolved_at=%s WHERE id=%s", (time.time(), alert_id))
-        # Standing down an SOS clears the watch's sos mode too, or the
-        # heartbeat watchdog keeps treating a finished emergency as a live one.
-        # `beat_armed` goes with it for the same reason as in /watch/high_alert:
-        # the phone stops beating when it goes idle, and a witnessed "armed"
-        # left behind would have the silence watchdog page the family three
-        # minutes after the emergency was stood down.
-        #
-        # It falls back to High Alert rather than to idle when High Alert is
-        # still armed. The emergency is over; the standing watch the wearer
-        # switched on before it is not, and it was never the SOS's to end.
-        # This is the other half of migration 008 -- with one column those two
-        # states could not both be represented, so resolving an SOS silently
-        # disarmed a High Alert that nobody had touched.
-        c.execute("UPDATE watch_state SET "
-                  "mode=CASE WHEN high_alert THEN 'high_alert' ELSE 'idle' END, "
-                  "beat_armed=high_alert, "
-                  "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
-                  "WHERE user_id=%s AND mode='sos'", (u["id"],))
-        c.commit()
+        # Both writes or neither. Standing down is two facts -- the alert is
+        # over, and the watch is no longer in `sos` -- and half of it is a
+        # state the product has no name for: an alert marked resolved with the
+        # watch still in sos, so the heartbeat watchdog goes on treating a
+        # finished emergency as a live one and pages the family about it.
+        with c.transaction():
+            c.execute("UPDATE alerts SET resolved_at=%s WHERE id=%s", (time.time(), alert_id))
+            # Standing down an SOS clears the watch's sos mode too, or the
+            # heartbeat watchdog keeps treating a finished emergency as a live one.
+            # `beat_armed` goes with it for the same reason as in /watch/high_alert:
+            # the phone stops beating when it goes idle, and a witnessed "armed"
+            # left behind would have the silence watchdog page the family three
+            # minutes after the emergency was stood down.
+            #
+            # It falls back to High Alert rather than to idle when High Alert is
+            # still armed. The emergency is over; the standing watch the wearer
+            # switched on before it is not, and it was never the SOS's to end.
+            # This is the other half of migration 008 -- with one column those two
+            # states could not both be represented, so resolving an SOS silently
+            # disarmed a High Alert that nobody had touched.
+            c.execute("UPDATE watch_state SET "
+                      "mode=CASE WHEN high_alert THEN 'high_alert' ELSE 'idle' END, "
+                      "beat_armed=high_alert, "
+                      "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
+                      "WHERE user_id=%s AND mode='sos'", (u["id"],))
 
     # Tell family members and all active connected Good Samaritans that alert is stood down
     targets = list(set(family_of(u["id"])) | set(HUB.socks.keys()))
@@ -200,6 +205,14 @@ async def ack(alert_id: int, u=Depends(me)):
 
 @router.get("/alerts")
 def list_alerts(scope: str = "incoming", limit: int = 50, u=Depends(me)):
+    # Clamped rather than trusted. `?limit=100000000` was a free table scan
+    # against a pool of eight connections, and with a statement timeout now in
+    # front of it that is a wasted slot rather than a wedged one -- but a
+    # wasted slot during an emergency is still one an SOS cannot have.
+    #
+    # Clamped rather than rejected because there is no caller for whom a 422
+    # here is more useful than the newest 200 alerts. The app asks for 50.
+    limit = max(1, min(limit, 200))
     with closing(db()) as c:
         if scope == "mine":
             rows = c.execute(

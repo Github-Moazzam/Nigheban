@@ -15,11 +15,14 @@ from server.config import CHECKIN_WINDOW_S, INCIDENT_ESCALATION, INCIDENT_WINDOW
 from server.db import db
 from server.deps import me
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.push import send_expo_push_notifications
 from server.ratelimit import LIMIT
 from server.schemas import CheckinIn, SelfCheckinIn
 from server.services.checkins import ack_open_checkins
 
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -147,7 +150,7 @@ async def open_incident_checkin(b: SelfCheckinIn, u=Depends(me)):
         "Tap to say you are fine. Your family is told if you do not answer.",
         {"checkin_id": checkin_id, "severity": 4, "reason": reason})
 
-    print(f"  {reason} check-in for {u['name']} - {left}s to answer")
+    log.info("%s check-in for %s - %ss to answer", reason, u["name"], left)
     return {"ok": True, "checkin_id": checkin_id, "due_at": due_at,
             "reason": reason, "window": left}
 

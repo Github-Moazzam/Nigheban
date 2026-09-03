@@ -7,11 +7,15 @@ on Android is most of the time and always the case that matters.
 
 import asyncio
 import json
+import logging
 import urllib.error
 import urllib.request
 from contextlib import closing
 
 from server.db import db
+from server.logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def push_tokens_for(uids):
@@ -36,7 +40,7 @@ def forget_push_tokens(tokens):
         c.execute("UPDATE devices SET push_token=NULL WHERE push_token = ANY(%s)",
                   (list(tokens),))
         c.commit()
-    print(f"  [expo push] forgot {len(tokens)} unregistered token(s)")
+    log.info("forgot %d unregistered push token(s)", len(tokens))
 
 
 async def send_expo_push_notifications(uids, title, body, data=None, silent=False,
@@ -65,7 +69,21 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
     it is sent anyway: a phone whose channel was somehow created by an older
     build would otherwise fall back to "default" and make a noise next to
     somebody hiding.
+
+    Returns a summary of what actually happened:
+
+        {"targets": n, "tokens": n, "accepted": n, "dropped": n, "error": str|None}
+
+    It used to return None in every case -- success, total failure, and "nobody
+    has a token" were indistinguishable to every caller. For the delivery path
+    that survives a killed app, in a product whose entire job is delivery, that
+    was the wrong thing not to know. Nothing is obliged to read the result, but
+    `accepted == 0` is logged at ERROR for anything urgent, so a night where an
+    SOS reached no phone leaves a mark that can be found afterwards.
     """
+    sev = (data or {}).get("severity", 0)
+    urgent = sev >= 4
+
     tokens = push_tokens_for(uids)
     if not tokens:
         # Saying nothing here looked exactly like a successful send: the alert
@@ -73,12 +91,12 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
         # printed. But "nobody has a push token" is the entire failure, not a
         # quiet edge case -- it is the difference between an alert that reaches
         # a closed phone and one that reaches nobody at all.
-        print(f"  [expo push] no registered device among {len(uids)} target(s)"
-              f" -- nothing sent (has the family member opened the app and"
-              f" granted notifications?)")
-        return
-
-    sev = (data or {}).get("severity", 0)
+        log.log(logging.ERROR if urgent else logging.WARNING,
+                "no registered device among %d target(s) -- nothing sent"
+                " (has the family member opened the app and granted"
+                " notifications?)", len(uids))
+        return {"targets": len(uids), "tokens": 0, "accepted": 0,
+                "dropped": 0, "error": "no registered device"}
 
     # How long this push is still worth delivering.
     #
@@ -127,11 +145,18 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
             sent_tokens.append(token)
 
     if not payloads:
-        return
+        # Every token was an unrecognised shape. Rare, but it is still a send
+        # that reached nobody, and it should read as one.
+        log.log(logging.ERROR if urgent else logging.WARNING,
+                "no usable Expo token among %d device(s) -- nothing sent",
+                len(tokens))
+        return {"targets": len(uids), "tokens": len(tokens), "accepted": 0,
+                "dropped": 0, "error": "no usable token"}
 
     dead = []
 
     def _do_post():
+        """Returns (accepted, error). Never raises -- it runs in a worker."""
         try:
             req = urllib.request.Request(
                 "https://exp.host/--/api/v2/push/send",
@@ -157,11 +182,14 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
                     continue
                 details = ticket.get("details")
                 detail = ticket.get("message") or details
-                print(f"  [expo push ticket error] {token[:24]}... -> {status}: {detail}")
+                log.warning("ticket error %s... -> %s: %s",
+                            token[:24], status, detail)
                 if isinstance(details, dict) and details.get("error") == "DeviceNotRegistered":
                     dead.append(token)
             kind = "silent" if silent else "visible"
-            print(f"  [expo push/{kind}] {ok}/{len(sent_tokens)} accepted by Expo")
+            log.info("%s push: %d/%d accepted by Expo",
+                     kind, ok, len(sent_tokens))
+            return ok, None
         except urllib.error.HTTPError as e:
             # "HTTP Error 400: Bad Request" on its own says nothing, and this is
             # the one failure mode where Expo does explain itself: a 4xx body is
@@ -170,13 +198,33 @@ async def send_expo_push_notifications(uids, title, body, data=None, silent=Fals
             # different EAS projects batched into one request -- is the usual
             # one after the project id changes, and it is invisible without this.
             try:
-                body = e.read().decode('utf-8', 'replace')
+                err_body = e.read().decode('utf-8', 'replace')
             except Exception:
-                body = '(no body)'
-            print(f"  [expo push error] HTTP {e.code} {e.reason} -- {body[:600]}")
+                err_body = '(no body)'
+            log.error("Expo refused the batch: HTTP %s %s -- %s",
+                      e.code, e.reason, err_body[:600])
+            return 0, f"HTTP {e.code} {e.reason}: {err_body[:200]}"
         except Exception as e:
-            print(f"  [expo push error] {e}")
+            # Almost always the 5 s timeout, or no route to exp.host. Neither
+            # is this server's fault and neither is recoverable from here --
+            # but it is the whole delivery path for a closed app, so it is an
+            # error, not a note.
+            log.error("Expo send failed (%s: %s)", type(e).__name__, e)
+            return 0, f"{type(e).__name__}: {e}"
 
-    await asyncio.to_thread(_do_post)
+    accepted, error = await asyncio.to_thread(_do_post)
     if dead:
         await asyncio.to_thread(forget_push_tokens, dead)
+
+    # The line that answers "did last night's SOS actually leave the building".
+    # Zero accepted with tokens on file is a delivery failure, not a quiet one:
+    # every phone in that family was closed, and this was the path that was
+    # supposed to reach them anyway.
+    if accepted == 0:
+        log.log(logging.ERROR if urgent else logging.WARNING,
+                "push reached NOBODY: %d target(s), %d token(s), severity %s%s",
+                len(uids), len(sent_tokens), sev,
+                f" -- {error}" if error else "")
+
+    return {"targets": len(uids), "tokens": len(sent_tokens),
+            "accepted": accepted, "dropped": len(dead), "error": error}

@@ -15,11 +15,14 @@ from server.config import PAIR_TTL_S
 from server.db import db
 from server.deps import me
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.ratelimit import LIMIT, client_ip
 from server.schemas import InviteIn, PairIn
 from server.security import ALPHABET, tok_hash
 from server.services.family import link_both, pub
 
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -46,14 +49,19 @@ def make_pairing_code(b: PairIn, u=Depends(me)):
     half = lambda: "".join(secrets.choice(ALPHABET) for _ in range(4))
     tok = f"PAIR-{half()}-{half()}"
     with closing(db()) as c:
-        # Only one live code at a time. If you generate a new one you have
-        # decided the old one is loose; it should stop working that instant.
-        c.execute("DELETE FROM pairings WHERE issuer_id=%s AND used_at IS NULL",
-                  (u["id"],))
-        c.execute("INSERT INTO pairings (token_hash,issuer_id,relation,created_at,expires_at)"
-                  " VALUES (%s,%s,%s,%s,%s)",
-                  (tok_hash(tok), u["id"], b.relation.strip(), now, now + PAIR_TTL_S))
-        c.commit()
+        # One transaction, because the pool runs in autocommit: without this the
+        # DELETE stands on its own, and a failure before the INSERT lands leaves
+        # the account with no live pairing code at all -- the old one revoked,
+        # the new one never written, and a person reading a code off a screen
+        # that was handed back before it existed.
+        with c.transaction():
+            # Only one live code at a time. If you generate a new one you have
+            # decided the old one is loose; it should stop working that instant.
+            c.execute("DELETE FROM pairings WHERE issuer_id=%s AND used_at IS NULL",
+                      (u["id"],))
+            c.execute("INSERT INTO pairings (token_hash,issuer_id,relation,created_at,expires_at)"
+                      " VALUES (%s,%s,%s,%s,%s)",
+                      (tok_hash(tok), u["id"], b.relation.strip(), now, now + PAIR_TTL_S))
     return {"code": tok, "expires_at": now + PAIR_TTL_S, "ttl_s": PAIR_TTL_S}
 
 
@@ -91,18 +99,23 @@ async def invite(b: InviteIn, req: Request, u=Depends(me)):
             if not other:
                 raise HTTPException(404, "that pairing code has expired or was already used")
 
-            c.execute("UPDATE pairings SET used_at=%s, used_by=%s WHERE token_hash=%s",
-                      (now, u["id"], row["token_hash"]))
-            link_both(c, u["id"], other["id"], relation or row["relation"], now)
-            # Any request left pending between these two is now moot.
-            c.execute("UPDATE invites SET state='accepted', settled_at=%s "
-                      "WHERE state='pending' AND ((from_id=%s AND to_id=%s) "
-                      "OR (from_id=%s AND to_id=%s))",
-                      (now, u["id"], other["id"], other["id"], u["id"]))
-            c.commit()
+            # All four writes or none. link_both is two INSERTs and the whole
+            # point of it is that family is mutual -- half of it committed is
+            # the one-way link its own docstring exists to rule out, with the
+            # parent seeing the child and the child never seeing the parent.
+            # Burning the code without linking anyone is the other bad half.
+            with c.transaction():
+                c.execute("UPDATE pairings SET used_at=%s, used_by=%s WHERE token_hash=%s",
+                          (now, u["id"], row["token_hash"]))
+                link_both(c, u["id"], other["id"], relation or row["relation"], now)
+                # Any request left pending between these two is now moot.
+                c.execute("UPDATE invites SET state='accepted', settled_at=%s "
+                          "WHERE state='pending' AND ((from_id=%s AND to_id=%s) "
+                          "OR (from_id=%s AND to_id=%s))",
+                          (now, u["id"], other["id"], other["id"], u["id"]))
 
         await HUB.to(other["id"], {"t": "family_added", "user": pub(u)})
-        print(f"  paired: {u['name']} <-> {other['name']}")
+        log.info("paired: %s <-> %s", u["name"], other["name"])
         return {"ok": True, "linked": True, "member": pub(other, relation)}
 
     # ---- path 2: a user code, which needs their acceptance --------------
@@ -135,7 +148,7 @@ async def invite(b: InviteIn, req: Request, u=Depends(me)):
                     "t": "invite",
                     "invite": {"id": invite_id, "relation": relation,
                                "created_at": now, "from": pub(u)}})
-                print(f"  invite: {u['name']} -> {other['name']} (awaiting consent)")
+                log.info("invite: %s -> %s (awaiting consent)", u["name"], other["name"])
 
     # Identical response whether or not that code belongs to anyone. Without
     # this the endpoint is a directory: guess codes until one comes back
@@ -189,13 +202,17 @@ async def accept_invite(invite_id: int, u=Depends(me)):
         if not other:
             raise HTTPException(404, "that account no longer exists")
 
-        c.execute("UPDATE invites SET state='accepted', settled_at=%s WHERE id=%s",
-                  (now, invite_id))
-        link_both(c, other["id"], u["id"], inv["relation"], now)
-        c.commit()
+        # Same rule as the pairing path: the invite is settled and the link is
+        # made together, or neither happens. A settled invite with no link is
+        # unrecoverable from the app -- accept says it has already been
+        # answered, and there is nothing to re-accept.
+        with c.transaction():
+            c.execute("UPDATE invites SET state='accepted', settled_at=%s WHERE id=%s",
+                      (now, invite_id))
+            link_both(c, other["id"], u["id"], inv["relation"], now)
 
     await HUB.to(other["id"], {"t": "family_added", "user": pub(u)})
-    print(f"  accepted: {u['name']} <-> {other['name']}")
+    log.info("accepted: %s <-> %s", u["name"], other["name"])
     return {"ok": True, "member": pub(other, inv["relation"])}
 
 
@@ -236,13 +253,16 @@ def remove_family(member_id: str, u=Depends(me)):
     LIMIT.check("family_remove", u["id"], 20, 600,
                 "too many changes to your family list - wait a few minutes")
     with closing(db()) as c:
-        c.execute("DELETE FROM links WHERE (owner_id=%s AND member_id=%s) "
-                  "OR (owner_id=%s AND member_id=%s)",
-                  (u["id"], member_id, member_id, u["id"]))
-        # Removing someone has to also clear the old invite, or they can never
-        # be added again -- the UNIQUE(from_id,to_id) row would still be there.
-        c.execute("DELETE FROM invites WHERE (from_id=%s AND to_id=%s) "
-                  "OR (from_id=%s AND to_id=%s)",
-                  (u["id"], member_id, member_id, u["id"]))
-        c.commit()
+        # Together, or the second failure leaves the pair unable to reconnect:
+        # links gone, invite row still there, and every future attempt to add
+        # each other blocked by a UNIQUE(from_id,to_id) neither of them can see.
+        with c.transaction():
+            c.execute("DELETE FROM links WHERE (owner_id=%s AND member_id=%s) "
+                      "OR (owner_id=%s AND member_id=%s)",
+                      (u["id"], member_id, member_id, u["id"]))
+            # Removing someone has to also clear the old invite, or they can never
+            # be added again -- the UNIQUE(from_id,to_id) row would still be there.
+            c.execute("DELETE FROM invites WHERE (from_id=%s AND to_id=%s) "
+                      "OR (from_id=%s AND to_id=%s)",
+                      (u["id"], member_id, member_id, u["id"]))
     return {"ok": True}

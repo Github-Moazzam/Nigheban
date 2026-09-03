@@ -13,12 +13,15 @@ from server.config import BEAT_LOST_S, HIGH_ALERT_MAX_S, HIGH_ALERT_MIN_S
 from server.db import db
 from server.deps import me
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.ratelimit import LIMIT
 from server.schemas import HeartbeatIn, HighAlertIn
 from server.services.checkins import open_checkin
 from server.services.family import family_of
 from server.services.watch import watch_row
 
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -83,7 +86,7 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
                       (u["id"],))
             nxt = None
         c.commit()
-    print(f"  high alert {'ON' if b.on else 'off'} for {u['name']}")
+    log.info("high alert %s for %s", "ON" if b.on else "off", u["name"])
     await HUB.fanout(family_of(u["id"]), {
         "t": "watch_updated",
         "user_id": u["id"],
@@ -161,26 +164,30 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
         # edge of a corridor cleared the latch on every re-link and paged the
         # family again on every re-drop. The rule decides when the latch comes
         # off, and it waits out `lost_rearm_at` first.
-        c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, band_virtual=%s, "
-                  "phone_batt=COALESCE(%s,phone_batt), "
-                  "band_batt=CASE WHEN %s THEN NULL ELSE COALESCE(%s,band_batt) END, "
-                  "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
-                  "beat_band_link=%s, beat_armed=%s, "
-                  "lost_notified=%s, lost_rearm_at=%s, link_lost_at=%s "
-                  "WHERE user_id=%s",
-                  (now, bool(b.band_link), bool(b.virtual),
-                   b.phone_batt, bool(b.virtual), b.band_batt,
-                   b.lat, b.lon,
-                   nxt.beat_band_link, nxt.beat_armed,
-                   nxt.lost_notified, nxt.lost_rearm_at, nxt.link_lost_at,
-                   u["id"]))
-        # The raise to sos stays its own statement rather than joining the
-        # UPDATE above: `mode` is written by /alert and /alert/{id}/resolve too,
-        # and writing back the value read a few lines ago would quietly undo a
-        # stand-down that landed in between.
-        if b.mode == "sos":
-            c.execute("UPDATE watch_state SET mode='sos' WHERE user_id=%s", (u["id"],))
-        c.commit()
+        # One transaction around both, because a beat is one fact. If the first
+        # write lands and the raise to sos does not, the row says the wearer
+        # reported in at `now` while the mode stays whatever it was -- a beat
+        # that quietly threw away the emergency it was carrying.
+        with c.transaction():
+            c.execute("UPDATE watch_state SET last_beat=%s, band_link=%s, band_virtual=%s, "
+                      "phone_batt=COALESCE(%s,phone_batt), "
+                      "band_batt=CASE WHEN %s THEN NULL ELSE COALESCE(%s,band_batt) END, "
+                      "last_lat=COALESCE(%s,last_lat), last_lon=COALESCE(%s,last_lon), "
+                      "beat_band_link=%s, beat_armed=%s, "
+                      "lost_notified=%s, lost_rearm_at=%s, link_lost_at=%s "
+                      "WHERE user_id=%s",
+                      (now, bool(b.band_link), bool(b.virtual),
+                       b.phone_batt, bool(b.virtual), b.band_batt,
+                       b.lat, b.lon,
+                       nxt.beat_band_link, nxt.beat_armed,
+                       nxt.lost_notified, nxt.lost_rearm_at, nxt.link_lost_at,
+                       u["id"]))
+            # The raise to sos stays its own statement rather than joining the
+            # UPDATE above: `mode` is written by /alert and /alert/{id}/resolve too,
+            # and writing back the value read a few lines ago would quietly undo a
+            # stand-down that landed in between.
+            if b.mode == "sos":
+                c.execute("UPDATE watch_state SET mode='sos' WHERE user_id=%s", (u["id"],))
 
     # No alert is raised from here any more. A drop starts the grace window
     # (`link_lost_at`, written above) and the sweeper pages two minutes later
@@ -188,10 +195,10 @@ def heartbeat(b: HeartbeatIn, u=Depends(me)):
     # through are worth seeing in the log, because between them lies every
     # brief Bluetooth drop the family is deliberately not being told about.
     if nxt.link_lost_at is not None and prev.link_lost_at is None:
-        print(f"  [watch_lost] {u['name']}: {decision.reason} "
-              f"({int(WL.WATCH_LOST_DELAY_S)}s)")
+        log.info("watch_lost %s: %s (%ss)",
+                 u["name"], decision.reason, int(WL.WATCH_LOST_DELAY_S))
     elif prev.link_lost_at is not None and nxt.link_lost_at is None:
-        print(f"  [watch_lost] {u['name']}: {decision.reason} — nobody paged")
+        log.info("watch_lost %s: %s - nobody paged", u["name"], decision.reason)
     return {"ok": True, "t": now}
 
 

@@ -4,8 +4,12 @@ The Nigehban server, as a package.
 Split out of a single 2,674-line nigehban_server.py. The layering runs one
 way and only one way:
 
-    config -> db -> security / ratelimit / hub / geo / deps / push
+    logging_setup / config
+           -> db -> security / ratelimit / hub / geo / deps / push
            -> schemas -> services -> routes -> app
+
+logging_setup sits at the bottom with config because everything asks it for a
+logger at import time, and it imports nothing from this package in return.
 
 Nothing below the routes layer may import a route, and nothing at all may
 import `app`. That rule is the whole reason the split holds together: the
@@ -32,4 +36,11 @@ websocket registries that cannot see each other.
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# And logging, for the same reason and in the same place: LOG_LEVEL is read
+# from the environment above, and every module below this one asks for its
+# logger at import time.
+from server.logging_setup import configure_logging  # noqa: E402
+
+configure_logging()
 
