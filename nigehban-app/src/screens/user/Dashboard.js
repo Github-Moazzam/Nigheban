@@ -350,7 +350,21 @@ export default function Dashboard({
       <View style={s.sosRing}>
         <Pressable
           onPress={() => {
-            if (!sending) setSosChoiceOpen(true);
+            if (sending) return;
+            // Off means off: no stranger ever gets asked about her, so her
+            // own SOS does not ask about strangers either. It goes out family
+            // only, with no dialog in the way -- exactly how it worked before
+            // Good Samaritan existed. The choice screen only appears at all
+            // for someone who opted in to being asked for others.
+            if (session?.samaritan_enabled === false) {
+              (async () => {
+                setSending(true);
+                try { await onRaise({ kind: 'sos', source: 'app', allow_samaritan: false }); }
+                finally { setSending(false); }
+              })();
+              return;
+            }
+            setSosChoiceOpen(true);
           }}
           disabled={sending}
           accessibilityRole="button"

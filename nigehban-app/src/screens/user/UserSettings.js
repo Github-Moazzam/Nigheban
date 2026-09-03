@@ -3,7 +3,7 @@ import {
   ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text,
   TextInput, View,
 } from 'react-native';
-import { fetchBandPin, updateUserSettings } from '../../api';
+import { fetchBandPin, saveSession, updateUserSettings } from '../../api';
 import { MODES } from '../../bandLink';
 
 import PinSheet from '../../components/PinSheet';
@@ -102,7 +102,13 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
     try {
       await updateUserSettings(session, { samaritan_enabled: next });
       setSamaritanEnabled(next);
-      if (session) session.samaritan_enabled = next;
+      if (session) {
+        session.samaritan_enabled = next;
+        // The server has it now, but a reload reads the phone's own cached
+        // session, not the server -- so without this the switch snaps back
+        // to Participating the moment the page (or the app) reopens.
+        await saveSession(session);
+      }
     } catch { /* non-fatal */ }
     finally { setSamaritanBusy(false); }
   };
@@ -562,7 +568,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         <View style={s.group}>
           <Row
             icon="users" title="Good Samaritan Helper"
-            sub="Receive emergency requests if someone within 800m needs help"
+            sub={samaritanEnabled
+              ? 'On — strangers within 800m may ask for your help, and your own SOS will ask whether to include them too'
+              : 'Off — you will not be asked to help strangers, and your own SOS goes straight to family only, with no prompt'}
             value={samaritanEnabled ? 'Participating' : 'Disabled'}
             tone={samaritanEnabled ? U.mint : U.dim}
             busy={samaritanBusy}
