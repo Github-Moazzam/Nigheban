@@ -8,6 +8,7 @@ import time
 from contextlib import closing
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from psycopg import errors as pg_errors
 
 from server.db import db
 from server.deps import me
@@ -37,12 +38,28 @@ def register(b: RegisterIn, req: Request):
 
     uid, tok = new_code(), secrets.token_hex(24)
     with closing(db()) as c:
+        # The SELECT is the friendly answer, not the guarantee. Two people
+        # signing up as the same name in the same instant both see no row here
+        # and both go on to INSERT -- so the database has to be the one that
+        # decides, and this has to be ready to be told.
+        #
+        # Which needs migration 010 applied. Without a unique index the second
+        # INSERT succeeds and there are two accounts with one username, and
+        # /login picks between them arbitrarily -- one of the two can never sign
+        # in again and nothing anywhere says why.
         if c.execute("SELECT 1 FROM users WHERE username=%s", (uname,)).fetchone():
             raise HTTPException(409, "that username is taken")
-        c.execute("INSERT INTO users (id,username,pw_hash,name,created_at,token_hash)"
-                  " VALUES (%s,%s,%s,%s,%s,%s)",
-                  (uid, uname, hash_pw(b.password), b.name.strip(), time.time(),
-                   tok_hash(tok)))
+        try:
+            c.execute("INSERT INTO users (id,username,pw_hash,name,created_at,token_hash)"
+                      " VALUES (%s,%s,%s,%s,%s,%s)",
+                      (uid, uname, hash_pw(b.password), b.name.strip(), time.time(),
+                       tok_hash(tok)))
+        except pg_errors.UniqueViolation:
+            # The other half of the race got there first. Same answer as the
+            # SELECT would have given a moment later -- a 409 the app already
+            # knows how to show, rather than a 500 that reads as "the server is
+            # broken" when the user has simply picked a taken name.
+            raise HTTPException(409, "that username is taken")
         c.commit()
     return {"user_id": uid, "token": tok, "name": b.name.strip(), "username": uname, "role": "user"}
 

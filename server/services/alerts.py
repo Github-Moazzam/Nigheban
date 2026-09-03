@@ -8,6 +8,7 @@ socket frame. Two code paths would drift, and the one that drifts is the one
 that only runs at 3 a.m.
 """
 
+import logging
 import time
 from contextlib import closing
 
@@ -20,8 +21,11 @@ from server.config import (
 from server.db import db
 from server.geo import coarsen, metres_between
 from server.hub import HUB, _spawn
+from server.logging_setup import get_logger
 from server.push import send_expo_push_notifications
 from server.services.family import family_of
+
+log = get_logger(__name__)
 
 
 def nearby_strangers(uid, lat, lon, now=None):
@@ -162,18 +166,25 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
     # telling them again is the bug this exists to stop. Hand the app the same
     # row it failed to hear about the first time and stop here.
     if not first_time:
-        print(f"  [{kind}] from {name} ({uid}) -> retry of alert {row['id']}, already sent")
+        log.info("%s from %s (%s) -> retry of alert %s, already sent",
+                 kind, name, uid, row["id"])
         return payload, targets
 
     # A near-miss is written down and told to nobody: it is the wearer's own
     # record that the fall detector nearly fired, not an event.
     if kind in PRIVATE_KINDS:
-        print(f"  [{kind}] from {name} ({uid}) -> logged, nobody told")
+        log.info("%s from %s (%s) -> logged, nobody told", kind, name, uid)
         return payload, []
 
     await HUB.fanout(targets, {"t": "alert", "alert": payload})
-    print(f"  [{kind}] from {name} ({uid}) -> {len(targets)} family member(s), "
-          f"{sum(HUB.online(t) for t in targets)} online")
+    # Warning, not info, when an alert has nowhere to go. Somebody raised an
+    # SOS and there is not one person linked to them to receive it -- the
+    # loudest thing this server can do is write one row and stop, and that is
+    # worth being able to find afterwards.
+    log.log(logging.WARNING if not targets else logging.INFO,
+            "%s from %s (%s) -> %d family member(s), %d online",
+            kind, name, uid, len(targets),
+            sum(HUB.online(t) for t in targets))
 
     # Everything below this line is slow, and none of it is something the
     # sender waits for. Expo is three sequential HTTP calls at a 5 s timeout,
@@ -251,7 +262,8 @@ async def ask_samaritans(row, uid, lat, lon):
         "Someone near you needs help",
         "A Nigehban emergency was raised close by. Open the app if you can go.",
         {"alert_id": row["id"], "severity": row["severity"], "samaritan": True})
-    print(f"  [samaritan] alert {row['id']} -> {len(near[:20])} nearby stranger(s)")
+    log.info("samaritan: alert %s -> %d nearby stranger(s)",
+             row["id"], len(near[:20]))
 
 
 async def notify_owner_of_ack(row, responder, total, samaritan=False):

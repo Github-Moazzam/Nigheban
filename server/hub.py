@@ -12,6 +12,10 @@ work that has to finish after the phone that triggered it has hung up.
 import asyncio
 import json
 
+from server.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 
 class Hub:
     """Live sockets, keyed by user. A phone may be signed in more than once."""
@@ -62,7 +66,9 @@ def _spawn(coro, name):
         e = t.exception()
         if e:
             # A push that fails silently looks exactly like a push that worked.
-            print(f"  [background:{name}] {type(e).__name__}: {e}")
+            # Error, with the traceback: this task is a delivery nobody is
+            # waiting on, so the log is the only place its failure exists.
+            log.error("background task %s failed", name, exc_info=e)
 
     task.add_done_callback(_shout)
     return task

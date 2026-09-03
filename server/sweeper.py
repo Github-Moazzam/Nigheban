@@ -21,9 +21,12 @@ from server.config import (
 )
 from server.db import db
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.push import send_expo_push_notifications
 from server.ratelimit import LIMIT
 from server.services.alerts import emit_alert
+
+log = get_logger(__name__)
 
 
 # ---- the sweeper --------------------------------------------------------
@@ -46,10 +49,16 @@ async def sweeper():
             await sweep_once(time.time())
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception:
             # A sweeper that dies takes every deadline with it, silently. It
             # logs and keeps ticking instead.
-            print(f"  [sweeper] {type(e).__name__}: {e}")
+            #
+            # Reaching here now means the tick failed BEFORE it got to the
+            # escalations -- the query itself, or the pool. Nothing has been
+            # latched at that point, so the next tick finds the same rows and
+            # tries again. Failures of an individual escalation are handled
+            # further down, in _guard, and never reach this.
+            log.exception("sweep failed, still ticking")
         await asyncio.sleep(SWEEP_TICK_S)
 
 
@@ -153,112 +162,214 @@ async def sweep_once(now):
 
     # Process results after releasing the connection -- emit_alert and HUB.to
     # each need their own, and holding one while awaiting would starve the pool.
+    #
+    # Everything above this line is already written down and committed:
+    # `escalated`, `lost_notified`, a cleared `link_lost_at`. Those latches make
+    # a condition that stays true page a family once instead of every five
+    # seconds, and they are set BEFORE the alert they stand for goes out.
+    #
+    # That ordering used to be silently fatal. A pool timeout, a dropped
+    # Supabase session, one unusual row -- the exception left the tick, the loop
+    # in sweeper() caught it and printed a line, and the latch stayed set. The
+    # row could never match its query again, so the family was not told late;
+    # they were never told. And because this was one flat run of loops, the
+    # first failure abandoned everyone else in the same batch too.
+    #
+    # So each item is attempted on its own now, and a failure puts its own latch
+    # back for the next tick to find. That trades a small chance of paging twice
+    # -- if the alert row landed and only the fanout failed -- against the
+    # certainty of not paging at all. In a safety product that is not a close
+    # call, and a duplicate is a thing a family can see and understand.
+    failed = 0
+
     for r in due:
-        late = int(now - r["due_at"])
-
-        # What the silence means depends on what was asked. A parent's question
-        # going unanswered is `checkin_missed` and always was. A fall or a crash
-        # going unanswered is the incident itself -- see INCIDENT_ESCALATION --
-        # and it carries the pin captured at the impact rather than nothing at
-        # all, because "she is not answering" and "she is not answering, here"
-        # are not the same message to send a family at 2 a.m.
-        kind = INCIDENT_ESCALATION.get(r["reason"], "checkin_missed")
-        if kind == "checkin_missed":
-            await emit_alert(r["user_id"], "checkin_missed", source="server",
-                             note=f"no answer to a {r['reason']} check-in ({late}s late)")
-            continue
-
-        what = ("A fall was detected" if kind == "fall"
-                else "A road accident was detected")
-
-        # `.get`, not `[...]`, and this is not defensive habit -- it is the
-        # sweeper. Migration 005 adds `lat`, `lon` and `note`, and on a database
-        # where it has not been applied yet a KeyError here does not just spoil
-        # the wording: it is raised inside the tick, caught by the loop, and
-        # EVERY deadline in the product stops passing -- missed check-ins, High
-        # Alert, the heartbeat watchdog -- while the server goes on printing one
-        # line every five seconds. Degrading to a placeless alert is bad; taking
-        # the whole escalation engine down with it is unacceptable.
-        #
-        # `lat`/`lon` come off the check-in row rather than from watch_state.
-        # The phone may have travelled a long way since -- carried in an
-        # ambulance, or thrown down the road -- and the place worth sending
-        # anyone is where the impact happened.
-        lat, lon = r.get("lat"), r.get("lon")
-        detail = r.get("note") or ""
-        # Only claim a pin when there is one. A fall detected indoors with no
-        # fix produces no coordinates, and telling a family "the pin is where it
-        # happened" over an empty map is worse than saying nothing -- they go
-        # looking at whatever the app last showed them.
-        placed = (" The pin is where the impact happened." if lat is not None
-                  else " There was no position fix, so this alert has no pin.")
-        await emit_alert(
-            r["user_id"], kind, source="detector", lat=lat, lon=lon,
-            note=(f"{what}, and there was no answer within "
-                  f"{int(r['due_at'] - r['created_at'])}s"
-                  + (f". {detail}" if detail else ".")
-                  + placed
-                  + " Try calling; if there is no answer, treat this as real."))
+        ok = await _guard(
+            f"checkin {r['id']} ({r['reason']}) for {r['user_id']}",
+            ("UPDATE checkins SET escalated=FALSE WHERE id=%s", (r["id"],)),
+            _escalate_missed_checkin, r, now)
+        failed += not ok
 
     for w in buzz:
         checkin_id, nxt = opened[w["user_id"]]
-        await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
-                                    "checkin_id": checkin_id,
-                                    "window": CHECKIN_WINDOW_S,
-                                    "due_at": now + CHECKIN_WINDOW_S,
-                                    "next_buzz_at": nxt})
-        # And a push, because the socket is not a delivery guarantee -- it is
-        # a delivery *optimisation*. HUB.to writes to whatever sockets happen
-        # to be open and drops the frame silently when there are none, which on
-        # Android is most of the time: the app is backgrounded, or the OEM
-        # killed it, or the phone is on a train.
-        #
-        # The row is already in the database at this point, so the deadline is
-        # real whether or not the wearer ever hears the question. Ninety
-        # seconds later the sweeper escalates it and the family is told she did
-        # not answer -- a `checkin_missed` for a question that was never put to
-        # her. A person's own check-in gets a push (see /checkin/ask); the
-        # server's own knock was the one path that did not, and it is the path
-        # that runs while nobody is watching.
-        await send_expo_push_notifications(
-            [w["user_id"]], "Nigehban is checking on you",
-            "Tap 'I am fine' to answer.",
-            {"checkin_id": checkin_id, "severity": 2, "reason": "high_alert",
-             "due_at": now + CHECKIN_WINDOW_S})
+        # No latch to put back, and deliberately so. The check-in row is already
+        # written, so the deadline is real whether or not this knock is ever
+        # heard, and the sweeper escalates it on time either way. Re-running the
+        # knock next tick would only move `next_buzz_at` again.
+        ok = await _guard(f"high-alert knock for {w['user_id']}", None,
+                          _knock, w, checkin_id, nxt, now)
+        failed += not ok
 
     for w in lost:
-        silent_s = int(now - w["last_beat"])
-        mins = max(1, round(silent_s / 60))
-        await emit_alert(w["user_id"], "watch_lost", source="server",
-                         lat=w["last_lat"], lon=w["last_lon"],
-                         note=(f"Armed, with the band linked, then went quiet "
-                               f"{mins} min ago. "
-                               "The phone lost signal, was switched off, or the app "
-                               "was stopped — Nigehban cannot tell which. "
-                               "The pin is where it last reported. "
-                               "Try calling; if there is no answer, treat this as real."))
+        ok = await _guard(
+            f"watch_lost (phone silent) for {w['user_id']}",
+            ("UPDATE watch_state SET lost_notified=FALSE, lost_rearm_at=NULL"
+             " WHERE user_id=%s", (w["user_id"],)),
+            _page_phone_silent, w, now)
+        failed += not ok
 
     for r, d in elapsed:
         if not d.notify:
             # Worth a line each: these are the disconnects the family was
             # deliberately not told about, and "why did nobody hear anything"
             # is a question this product has to be able to answer afterwards.
-            print(f"  [watch_lost] {r['user_id']}: {d.reason}")
+            log.info("watch_lost %s: %s", r["user_id"], d.reason)
             continue
-        away = int(now - r["link_lost_at"])
-        # The pin and the wording both come from `link_lost_at`, not from now:
-        # the alert is about a moment two minutes in the past, and saying so is
-        # the difference between a family looking where she is and a family
-        # looking where she was when it started.
-        await emit_alert(
-            r["user_id"], "watch_lost", source="server",
-            lat=r["last_lat"], lon=r["last_lon"],
-            note=(f"The band stopped answering {away}s ago, while an alert was "
-                  "running, and has not come back. The phone is still reporting, "
-                  "so this is the wristband: out of range, switched off, taken "
-                  "off, or its battery is flat. The pin is where the phone was. "
-                  "Try calling; if there is no answer, treat this as real."))
+        # Both halves go back here, not just the latch. `link_lost_at` was
+        # cleared for every row whose window was up, and without it the grace
+        # branch cannot find this row again -- nor will the silence branch,
+        # because the phone in this case is still beating, which is the entire
+        # reason it is a separate branch.
+        ok = await _guard(
+            f"watch_lost (band gone) for {r['user_id']}",
+            ("UPDATE watch_state SET lost_notified=FALSE, lost_rearm_at=NULL,"
+             " link_lost_at=%s WHERE user_id=%s",
+             (r["link_lost_at"], r["user_id"])),
+            _page_band_gone, r, now)
+        failed += not ok
 
     LIMIT.sweep()
     return {"missed": len(due), "buzzed": len(buzz),
-            "lost": len(lost), "band_gone": len(gone)}
+            "lost": len(lost), "band_gone": len(gone), "failed": failed}
+
+
+# ---- one escalation at a time, and what to undo if it does not go ---------
+
+
+def _unlatch(what, sql, params):
+    """Put a latch back, so the next tick retries the alert that never went."""
+    try:
+        with closing(db()) as c:
+            c.execute(sql, params)
+            c.commit()
+        log.warning("%s: latch released, the next tick will try again", what)
+    except Exception as e:
+        # The alert failed and so did its undo, which nearly always means the
+        # database is unreachable rather than that this row is unusual. There is
+        # nowhere left to write the intention down, so say so as loudly as the
+        # log allows -- this is the one path where somebody is not told and
+        # never will be.
+        log.error("%s: FAILED, and its latch could not be released (%s: %s)"
+                  " -- this escalation is lost", what, type(e).__name__, e)
+
+
+async def _guard(what, release, fn, *args):
+    """Run one escalation. Never raises; puts its latch back if it fails.
+
+    `release` is the (sql, params) that undoes the latch, or None where there
+    is nothing to undo. The arguments are built inside `fn` rather than at the
+    call site so that a bad row -- a missing column on an unmigrated database,
+    a null where one was not expected -- is caught here as well.
+    """
+    try:
+        await fn(*args)
+        return True
+    except Exception:
+        log.exception("%s: failed", what)
+        if release:
+            _unlatch(what, *release)
+        return False
+
+
+async def _escalate_missed_checkin(r, now):
+    late = int(now - r["due_at"])
+
+    # What the silence means depends on what was asked. A parent's question
+    # going unanswered is `checkin_missed` and always was. A fall or a crash
+    # going unanswered is the incident itself -- see INCIDENT_ESCALATION --
+    # and it carries the pin captured at the impact rather than nothing at
+    # all, because "she is not answering" and "she is not answering, here"
+    # are not the same message to send a family at 2 a.m.
+    kind = INCIDENT_ESCALATION.get(r["reason"], "checkin_missed")
+    if kind == "checkin_missed":
+        await emit_alert(r["user_id"], "checkin_missed", source="server",
+                         note=f"no answer to a {r['reason']} check-in ({late}s late)")
+        return
+
+    what = ("A fall was detected" if kind == "fall"
+            else "A road accident was detected")
+
+    # `.get`, not `[...]`, and this is not defensive habit -- it is the
+    # sweeper. Migration 005 adds `lat`, `lon` and `note`, and on a database
+    # where it has not been applied yet a KeyError here would stop this
+    # escalation dead. _guard catches it and puts the latch back, so the next
+    # tick tries again rather than the family never hearing -- but a retry
+    # that fails the same way every five seconds is not a fix. Degrading to a
+    # placeless alert sends something; raising sends nothing.
+    #
+    # `lat`/`lon` come off the check-in row rather than from watch_state.
+    # The phone may have travelled a long way since -- carried in an
+    # ambulance, or thrown down the road -- and the place worth sending
+    # anyone is where the impact happened.
+    lat, lon = r.get("lat"), r.get("lon")
+    detail = r.get("note") or ""
+    # Only claim a pin when there is one. A fall detected indoors with no
+    # fix produces no coordinates, and telling a family "the pin is where it
+    # happened" over an empty map is worse than saying nothing -- they go
+    # looking at whatever the app last showed them.
+    placed = (" The pin is where the impact happened." if lat is not None
+              else " There was no position fix, so this alert has no pin.")
+    await emit_alert(
+        r["user_id"], kind, source="detector", lat=lat, lon=lon,
+        note=(f"{what}, and there was no answer within "
+              f"{int(r['due_at'] - r['created_at'])}s"
+              + (f". {detail}" if detail else ".")
+              + placed
+              + " Try calling; if there is no answer, treat this as real."))
+
+
+async def _knock(w, checkin_id, nxt, now):
+    """High Alert coming round again: buzz the wrist, and push in case it cannot."""
+    await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
+                                "checkin_id": checkin_id,
+                                "window": CHECKIN_WINDOW_S,
+                                "due_at": now + CHECKIN_WINDOW_S,
+                                "next_buzz_at": nxt})
+    # And a push, because the socket is not a delivery guarantee -- it is
+    # a delivery *optimisation*. HUB.to writes to whatever sockets happen
+    # to be open and drops the frame silently when there are none, which on
+    # Android is most of the time: the app is backgrounded, or the OEM
+    # killed it, or the phone is on a train.
+    #
+    # The row is already in the database at this point, so the deadline is
+    # real whether or not the wearer ever hears the question. Ninety
+    # seconds later the sweeper escalates it and the family is told she did
+    # not answer -- a `checkin_missed` for a question that was never put to
+    # her. A person's own check-in gets a push (see /checkin/ask); the
+    # server's own knock was the one path that did not, and it is the path
+    # that runs while nobody is watching.
+    await send_expo_push_notifications(
+        [w["user_id"]], "Nigehban is checking on you",
+        "Tap 'I am fine' to answer.",
+        {"checkin_id": checkin_id, "severity": 2, "reason": "high_alert",
+         "due_at": now + CHECKIN_WINDOW_S})
+
+
+async def _page_phone_silent(w, now):
+    """The phone itself went quiet while armed, with a band linked."""
+    silent_s = int(now - w["last_beat"])
+    mins = max(1, round(silent_s / 60))
+    await emit_alert(w["user_id"], "watch_lost", source="server",
+                     lat=w["last_lat"], lon=w["last_lon"],
+                     note=(f"Armed, with the band linked, then went quiet "
+                           f"{mins} min ago. "
+                           "The phone lost signal, was switched off, or the app "
+                           "was stopped — Nigehban cannot tell which. "
+                           "The pin is where it last reported. "
+                           "Try calling; if there is no answer, treat this as real."))
+
+
+async def _page_band_gone(r, now):
+    """The band went away, the grace window ran out, and it has not come back."""
+    away = int(now - r["link_lost_at"])
+    # The pin and the wording both come from `link_lost_at`, not from now:
+    # the alert is about a moment two minutes in the past, and saying so is
+    # the difference between a family looking where she is and a family
+    # looking where she was when it started.
+    await emit_alert(
+        r["user_id"], "watch_lost", source="server",
+        lat=r["last_lat"], lon=r["last_lon"],
+        note=(f"The band stopped answering {away}s ago, while an alert was "
+              "running, and has not come back. The phone is still reporting, "
+              "so this is the wristband: out of range, switched off, taken "
+              "off, or its battery is flat. The pin is where the phone was. "
+              "Try calling; if there is no answer, treat this as real."))

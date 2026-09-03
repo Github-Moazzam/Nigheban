@@ -9,8 +9,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from server.db import db
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.security import tok_hash
 
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -28,7 +31,7 @@ async def ws_endpoint(ws: WebSocket, token: str = ""):
     uid = u["id"]
     await ws.accept()
     HUB.add(uid, ws)
-    print(f"  {u['name']} ({uid}) came online")
+    log.info("%s (%s) came online", u["name"], uid)
     try:
         await ws.send_text(json.dumps({"t": "ready", "user_id": uid, "name": u["name"]}))
         while True:
@@ -40,9 +43,17 @@ async def ws_endpoint(ws: WebSocket, token: str = ""):
             if msg.get("t") == "ping":
                 await ws.send_text(json.dumps({"t": "pong"}))
     except WebSocketDisconnect:
+        # The ordinary way a socket ends: the app was closed, the screen went
+        # off, the train went into a tunnel. Not worth a line.
         pass
     except Exception:
-        pass
+        # Anything else is a bug in here, and it used to be swallowed whole.
+        # The symptom was invisible and looked like nothing at all: the socket
+        # closed, the app reconnected 2.5 s later (see useLive in api.js), and
+        # it did that for ever while the log stayed silent. A reconnect loop is
+        # exactly what a flaky network looks like, so nobody would have gone
+        # looking for a server-side exception.
+        log.exception("socket for %s (%s) failed", u["name"], uid)
     finally:
         HUB.drop(uid, ws)
-        print(f"  {u['name']} ({uid}) went offline")
+        log.info("%s (%s) went offline", u["name"], uid)
