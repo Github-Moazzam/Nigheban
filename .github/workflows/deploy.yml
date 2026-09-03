@@ -1,0 +1,70 @@
+name: Deploy to AWS
+
+# Fires on every push that lands on main -- i.e. every merged PR. See
+# docs/AWS_DEPLOYMENT.md section 16 for the full design and the one-time
+# server setup this depends on (a `deployer` account, a narrow sudoers rule,
+# and /opt/nigehban/deploy.sh already in place).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # manual "Run workflow" button, for a re-deploy with no new commit
+
+# One deploy in flight at a time -- this server is a single instance and a
+# single sweeper (server/config.py / server/sweeper.py), so two deploys
+# racing each other is not a speed-up, it is two restarts stepping on one
+# systemd unit. cancel-in-progress stays false: a deploy already applying
+# migrations must finish, not get killed mid-way.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Fast safety tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run dependency-free tests
+        # Only these two of the ten files under tests/ need no live server
+        # and no database (see each file's own header comment). The other
+        # eight are written to run against `python server/nigehban_server.py`
+        # with a real Postgres behind it, for local/manual use -- wiring them
+        # into CI would mean pointing a test run at a database, and that must
+        # never be the production DATABASE_URL. Do not "fix" this by adding
+        # DATABASE_URL as a repo secret without first reading
+        # docs/AWS_DEPLOYMENT.md section 16.1.
+        run: |
+          set -e
+          python tests/test_sweeper_recovers.py
+          python tests/test_watch_lost_transition.py
+
+  deploy:
+    name: Deploy to EC2
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Install deploy key
+        run: |
+          install -d -m 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run the remote deploy script
+        # deployer's sudoers rule allows exactly this one command, NOPASSWD,
+        # and nothing else -- see docs/AWS_DEPLOYMENT.md section 16.2.
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "deployer@${{ secrets.DEPLOY_HOST }}" \
+            "sudo /opt/nigehban/deploy.sh ${{ github.sha }}"
+
+      - name: Verify from outside the box
+        run: curl -sf -m 10 "https://${{ secrets.DEPLOY_HOST }}/health"
