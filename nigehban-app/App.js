@@ -48,6 +48,7 @@ import {
   stopBandWake,
 } from './src/bandWake';
 import { runFirstRunAsks } from './src/permissions';
+import { clearPin } from './src/security';
 import {
   DEFAULT_CHANNEL_ID, clearOwnSosNotification, registerPushToken,
   sendEmergencyAlarmIfNothingShown, setupNotificationChannels,
@@ -1474,6 +1475,7 @@ function Main() {
     await stopBackgroundWatch();
     await clearSession();
     await clearQueue();
+    await clearPin();
     dispatch('RESET');
     setSession(null);
     setIncoming(null);
