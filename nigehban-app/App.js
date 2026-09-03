@@ -5,7 +5,8 @@ import {
   Vibration, View,
 } from 'react-native';
 import {
-  ALERT_TIMEOUT, call, clearSession, loadSession, optinSamaritan, saveSession, useLive,
+  ALERT_TIMEOUT, call, clearSession, loadSession, optinSamaritan, saveBandPin,
+  saveSession, useLive,
 } from './src/api';
 
 import { clearQueue, dequeue, enqueue, flushQueue, pendingCount, pressId } from './src/alertQueue';
@@ -814,7 +815,41 @@ function Main() {
   }, [dispatch, raise, resolve, ackCheckin, toggleHighAlert, reportOutcome,
       openIncidentCheckin]);
 
-  const band = useBandLink(onBandEvent);
+  // ---- the band PIN, kept against the account ---------------------------
+  //
+  // `band.js` knows when a PIN has been ACCEPTED by the wristband, and knows
+  // nothing about accounts. This is the seam: it turns that fact into a row on
+  // the server, so a wearer who forgets the PIN can get it back.
+  //
+  // It exists because pressing Disconnect makes the phone forget the PIN, which
+  // is deliberate and stays -- and which removes the local copy in precisely
+  // the situation somebody wants it back.
+  //
+  // `escrowReachable` is the guard that keeps the two copies honest. A PIN
+  // changed with no signal would leave the account holding the old one, and an
+  // account confidently handing back a PIN the band has stopped accepting is
+  // worse than an account holding none: the wearer types it, the band refuses,
+  // and they have spent attempts against a lockout believing they had the
+  // answer. So a change without a network is refused rather than allowed to
+  // diverge.
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  const escrowPin = useCallback(async (pin) => {
+    const s = sessionRef.current;
+    if (!s) return false;
+    try { await saveBandPin(s, pin); return true; } catch { return false; }
+  }, []);
+
+  const escrowReachable = useCallback(async () => {
+    const s = sessionRef.current;
+    if (!s) return false;
+    // `/me` rather than the PIN endpoint: it is cheap, unlimited, and reading
+    // the PIN is rate limited precisely so it cannot be used as a heartbeat.
+    try { await call(s, '/me'); return true; } catch { return false; }
+  }, []);
+
+  const band = useBandLink(onBandEvent, { escrowPin, escrowReachable });
   bandRef.current = band;
 
   // Two separate things need this app's Android process alive, and the service

@@ -29,6 +29,18 @@ evidence of anything. **[BUG_LIST.md](BUG_LIST.md) is the live defect record**
 **Done since, and observed on hardware** (Samsung, Android 14, release APK on
 `fix/ble-scan-throttle`, 1 Sep):
 
+- **The band has a lock and a name** (3 Sep). It used to advertise an open
+  Nordic UART Service: anybody in range with nRF Connect could subscribe to
+  every press and heartbeat, or write `{"c":"alarm"}` and buzz it flat. It now
+  pairs with a six-digit passkey *and* stays mute behind `{"c":"auth"}` over
+  that encrypted link — two locks, because a bond proves a phone paired once
+  and not that it still should be here, so changing the PIN is what actually
+  revokes a phone. The wearer can also rename the band; the name lives in the
+  nRF52's flash and goes out in the advertisement, so Android's Bluetooth list
+  follows it. Pressing **Disconnect** forgets the PIN, losing signal does not.
+  Full reasoning, protocol and the honest limits of legacy passkey pairing:
+  [BAND_PIN_AND_NAME.md](BAND_PIN_AND_NAME.md).
+
 - **The offline SOS queue** — the item §5 called "highest-value on this list".
   Local-first dispatch, unsent alerts persisted, flushed on reconnect, and
   delivery state rendered honestly. §3.3's caveat and Blocker #3 are corrected
@@ -696,6 +708,7 @@ reads as broken. [Blocker #11](#6-blockers-ranked).
 | Advertise, NUS, connect, gesture map, frozen protocol | ✅ verified 27 Aug 2026 |
 | Line framing — explicit chunking, retry only the failed piece | ✅ (the fault that made everything else look broken) |
 | Scan by service UUID, 10 s timeout, one connect guard, data watchdog | ✅ |
+| **Pairing + PIN + user-set band name** | ✅ observed on hardware 3 Sep 2026 — [BAND_PIN_AND_NAME.md](BAND_PIN_AND_NAME.md) |
 | Battery ADC | ◑ code written, **unstable and uncalibrated** |
 | IMU / fall / impact | ✅ `HAS_IMU 1`, both machines live · ❌ thresholds uncalibrated, IMU power cost not measured |
 | Motor driver, LiPo, power budget, enclosure | ❌ not built |
@@ -709,6 +722,13 @@ reads as broken. [Blocker #11](#6-blockers-ranked).
 - [ ] The direct-connect-by-id path hits before the scan fallback (visible in
       the dev log as `BAND direct connect failed:` only when it misses).
 - [ ] DISCONNECT actually forgets the band and does **not** trigger the retry.
+- [x] First link to an unknown band: Android asks for the passkey, the app then
+      asks for the same six digits, and the band goes live. Both prompts appear
+      exactly once per phone.
+- [x] Renaming the band changes what Android's own Bluetooth list calls it, not
+      just what the app prints.
+- [ ] Pressing **Disconnect** forgets the PIN; walking out of range does not.
+      Prove both, in that order, on the same phone.
 - [ ] **The Phase 2 exit gate:** phone locked, screen off, app swiped from
       Recents, 20 minutes in a pocket, press the band, the family phone rings.
 
@@ -725,6 +745,17 @@ reads as broken. [Blocker #11](#6-blockers-ranked).
 3. **A Metro reload restarts the JS without closing the native BLE
    connection**, leaving the band linked to a context that no longer exists —
    so it stops advertising and the next scan cannot find it.
+4. **The first operation against the band always fails, and that is normal.**
+   Android does not pair on connect — it pairs the first time something touches
+   an attribute that demands it, fails *that* operation with
+   `InsufficientAuthentication`, raises its dialog, and never goes back to what
+   it was doing. The subscribe is that operation, so it is retried until the
+   bond exists. Classify these on `attErrorCode` (5/8/12/15), never on
+   `errorCode` — 403 is `CharacteristicNotifyChangeFailed`, not "unauthorized",
+   and reading it as the latter files every pairing as a hardware fault.
+5. **Upgrading a band from pre-lock firmware needs the bond cleared on the
+   phone.** The old build required no pairing; a phone reconnecting with a bond
+   the band never made fails encryption, and no app can clear an Android bond.
 
 ---
 
@@ -854,8 +885,12 @@ leave in either direction.
 - [ ] **F4.1–F4.3** Motor driver (transistor + flyback + 100 µF bulk cap),
       LiPo via JST-PH, power budget. *If the band disconnects whenever it
       buzzes, the 100 µF cap is what is missing.*
-- [ ] Fix [`nigehban_hub.py:66`](../nigehban_hub.py#L66) — it looks for
-      `Nigehban-01`; the band is now `Nigehban-02`
+- [x] Fix [`nigehban_hub.py`](../nigehban_hub.py) — it looked for the exact
+      name `Nigehban-01` against a band called `Nigehban-02`. It now matches on
+      the NUS service UUID, which is the identity and cannot be renamed; a name
+      is only consulted when `config.json` names one because two bands are in
+      range. It also pairs and sends `{"c":"auth"}`, since the band no longer
+      answers a peer it has not checked
 
 ### Deployment (M3)
 - [ ] **D0** Alibaba account verification — 5 minutes, then it waits hours
@@ -997,10 +1032,13 @@ not happening. Expiry must not ship before that branch does.
   docstring: a 429 on either one is indistinguishable from a dead phone, so a
   rate limit there would invent the emergency it is meant to protect.
 
-### 14. `nigehban_hub.py` cannot find the band
-**Severity: low.** [Line 66](../nigehban_hub.py#L66) matches `Nigehban-01` exactly;
-the firmware is `Nigehban-02`. The laptop bridge — the best rig for testing
-firmware with no phone — fails for the same reason the app once did.
+### 14. `nigehban_hub.py` cannot find the band — FIXED
+Matched the exact name `Nigehban-01` against a band called `Nigehban-02`, so the
+laptop bridge failed for the same reason the app once did. It now filters on the
+NUS service UUID instead, which is the right fix twice over: the name was never
+the identity, and it is now user-settable, so any name match would go blind the
+first time somebody renamed their band. `config.json` gained `band_pin`, and the
+bridge pairs and authenticates like the app does.
 
 ### 15. iOS is not supported and is not planned
 **Severity: scope, stated plainly.** iOS forbids background BLE scanning without

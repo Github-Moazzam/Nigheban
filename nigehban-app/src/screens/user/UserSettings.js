@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View,
+  ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text,
+  TextInput, View,
 } from 'react-native';
-import { updateUserSettings } from '../../api';
+import { fetchBandPin, updateUserSettings } from '../../api';
 import { MODES } from '../../bandLink';
 
 import PinSheet from '../../components/PinSheet';
+import Dialog from './Dialog';
 import {
   OEM, askPermission, ladderRows, openActivity, openBatterySettings,
   readPermissions, vendorKey,
@@ -31,7 +33,32 @@ const BAND_LABEL = {
   throttled: 'Bluetooth busy…', 'bt-stuck': 'Restart Bluetooth',
   'bluetooth-off': 'Bluetooth off', 'location-off': 'Location off',
   'no-service': 'Needs re-pairing', 'no-notify': 'Band not responding',
+  // The states the band's PIN introduced. None of them is a fault -- the radio
+  // is fine and a person has to do something -- so none may read like one.
+  pairing: 'Pairing…', authenticating: 'Unlocking…',
+  'needs-pin': 'Needs its PIN', 'bad-pin': 'Wrong PIN',
+  'pair-failed': 'Band refused this phone', 'old-firmware': 'Needs re-flashing',
+  'locked-out': 'Locked — too many PINs',
 };
+
+/**
+ * The band is waiting on six digits, and only a person can supply them.
+ *
+ * This is the second of the two prompts on the way to a linked band. The first
+ * is Android's own passkey dialog, which the OS raises and this app can neither
+ * draw nor influence. This one is the band asking again over the encrypted
+ * link, because a bond proves the phone paired once and not that it still
+ * should be here.
+ *
+ * It has to be on THIS screen. Connecting the band happens here, so a status
+ * row that says "Needs its PIN" with nothing to type into is a dead end -- the
+ * exact dead end this screen shipped with, and the reason a wearer could get
+ * stuck with a band that was six inches away and merely asking to be let in.
+ */
+const NEEDS_PIN = new Set(['needs-pin', 'bad-pin']);
+
+/** The recovery dialog's three non-answers; anything else is the PIN itself. */
+const RECOVER_TONE = { offline: U.amber, none: U.amber, loading: U.mint };
 
 /**
  * Setup for the end user: what is working, what is not, and the two things
@@ -48,6 +75,14 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   // App.js already treats it as a live link when it sends heartbeats. Saying
   // otherwise here would report a fault that does not exist.
   const linked = band?.status === 'connected' || band?.status === 'virtual';
+  // Which of the band's two settings is open, if either. One at a time: they
+  // sit inside the same group and two expanded panels push the rest of the
+  // screen somewhere nobody expected it to go.
+  const [editing, setEditing] = useState(null);
+  const [confirmDrop, setConfirmDrop] = useState(false);
+  // The forgotten-PIN path: 'ask' while the disarm gate is up, then the six
+  // digits themselves once it has been passed. Never held in state before that.
+  const [recover, setRecover] = useState(null);
   const virtual = band?.status === 'virtual';
   const phoneBatt = usePhoneBattery();
 
@@ -148,7 +183,33 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           </Text>
         </View>
 
-        {!linked ? (
+        {NEEDS_PIN.has(band?.status) ? (
+          /* The band is right there and asking to be let in. Offering
+             "Reconnect" here would be offering the one button that cannot
+             help -- the link is already up, it is the six digits that are
+             missing -- so this replaces the notice rather than sitting under
+             it. */
+          <View style={s.notice}>
+            <View style={s.noticeHead}>
+              <View style={s.noticeMark}>
+                <Icon name="lock" size={17} color={U.amber} />
+              </View>
+              <Text style={[T.h2, { color: U.amber, flex: 1 }]}>
+                The band wants its PIN
+              </Text>
+            </View>
+            <Text style={[T.meta, { color: U.dim }]}>
+              {band?.status === 'bad-pin'
+                ? 'Those six digits were not right. Try again — this is the same '
+                  + 'PIN Android asked for when it paired.'
+                : 'Your wristband is paired but locked. Type the same six digits '
+                  + 'Android asked for. You only do this once on this phone.'}
+            </Text>
+            <BandPinAsk wrong={band?.status === 'bad-pin'}
+                        onForgot={() => setRecover('ask')}
+                        onSubmit={(pin) => band?.submitPin?.(pin)} />
+          </View>
+        ) : !linked ? (
           <View style={s.notice}>
             <View style={s.noticeHead}>
               <View style={s.noticeMark}>
@@ -202,6 +263,78 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             tone={linked ? U.mint : U.amber}
           />
           <View style={r.line} />
+
+          {/* ---- the two things about the band that are hers to change ------
+              Only while it is actually connected: both are commands written to
+              the wristband, so offering them against a band that is not there
+              would be offering a control that silently does nothing. */}
+          {linked ? (
+            <>
+              <Row
+                icon="edit-3" title="Band name"
+                sub="Shown here, and in your phone's Bluetooth list"
+                value={band?.bandName || '—'}
+                onPress={() => setEditing(editing === 'name' ? null : 'name')}
+              />
+              {editing === 'name' ? (
+                <NameEditor
+                  current={band?.bandName}
+                  onCancel={() => setEditing(null)}
+                  onSave={async (n) => {
+                    const okDone = await band?.renameBand?.(n);
+                    if (okDone) setEditing(null);
+                    return okDone;
+                  }}
+                />
+              ) : null}
+              <View style={r.line} />
+            </>
+          ) : null}
+
+          {/* The PIN row is gated on `canSetPin` as well, because when this
+              phone IS the band there is nobody to keep out and a lock that
+              locks nothing is worse than no lock on the screen. */}
+          {/* Shown whenever a real band is the chosen radio, connected or not.
+              Gating this on `linked` put the only route to "I have forgotten
+              it" behind being connected -- which is precisely what a forgotten
+              PIN prevents. Changing a PIN still needs the band present, because
+              it is a command written to it; looking one up does not, because it
+              comes from the account. So the row is always here and the panel
+              offers whichever of the two is actually possible. */}
+          {!virtual && band?.canSetPin !== false ? (
+            <>
+              <Row
+                icon="key" title="Band PIN"
+                sub={!linked
+                  ? 'Connect the band to change it — or tap to look it up'
+                  : band?.defaultPin
+                    ? 'Still the factory PIN — anyone who knows it can pair'
+                    : 'Asked for once on each phone you link'}
+                value={!linked ? 'Forgot it?'
+                       : band?.defaultPin ? 'Change it' : '••••••'}
+                tone={band?.defaultPin && linked ? U.amber : U.dim}
+                onPress={() => {
+                  // With no band on the other end there is nothing to change,
+                  // so the tap goes straight to the only useful action.
+                  if (!linked) { setRecover('ask'); return; }
+                  setEditing(editing === 'pin' ? null : 'pin');
+                }}
+              />
+              {editing === 'pin' && linked ? (
+                <PinEditor
+                  onCancel={() => setEditing(null)}
+                  onForgot={() => setRecover('ask')}
+                  onSave={async (op, np) => {
+                    const okDone = await band?.changePin?.(op, np);
+                    if (okDone) setEditing(null);
+                    return okDone;
+                  }}
+                />
+              ) : null}
+              <View style={r.line} />
+            </>
+          ) : null}
+
           {/* Two cells, and in virtual mode only one of them exists.
               `band.battery` is the *phone's* charge read through expo-battery
               when this phone is standing in for the band, so showing it here
@@ -258,7 +391,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               <Action
                 icon="x" label="Disconnect" busyLabel="Disconnecting…"
                 busy={pending === 'disconnect'} disabled={!!pending}
-                onPress={() => run('disconnect', band.disconnect)}
+                onPress={() => setConfirmDrop(true)}
               />
             </>
           ) : virtual ? (
@@ -280,9 +413,11 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                 icon="bluetooth" label="Connect to band" busyLabel="Searching…"
                 filled
                 busy={band?.status === 'scanning' || band?.status === 'connecting'
-                      || band?.status === 'throttled' || pending === 'connect'}
+                      || band?.status === 'throttled' || band?.status === 'pairing'
+                      || band?.status === 'authenticating' || pending === 'connect'}
                 disabled={band?.status === 'scanning' || band?.status === 'connecting'
-                          || band?.status === 'throttled' || !!pending}
+                          || band?.status === 'throttled' || band?.status === 'pairing'
+                          || band?.status === 'authenticating' || !!pending}
                 onPress={() => run('connect', band?.connect)}
               />
               <Action
@@ -458,11 +593,106 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         </Pressable>
       </ScrollView>
 
+      {/* Unlinking on purpose now costs the PIN on the way back -- see
+          disconnect() in band.js. That is the point of it, and it is exactly
+          why it cannot be a button that just happens. A band that walked out of
+          range is not this: that comes back on its own and never asks. */}
+      <Dialog
+        visible={confirmDrop}
+        tone={U.amber}
+        icon="unlock"
+        title="Unlink the wristband?"
+        body={'Fall detection and the SOS key stop working until you link it '
+              + 'again — and this phone will forget the band’s PIN, so you '
+              + 'will need those six digits to reconnect.'}
+        note="Losing signal or walking out of range does none of this. The band comes back on its own."
+        actions={[
+          {
+            label: 'Unlink it', busyLabel: 'Disconnecting…', icon: 'x', danger: true,
+            onPress: async () => {
+              await run('disconnect', band.disconnect);
+              setConfirmDrop(false);
+            },
+          },
+          { label: 'Keep it linked', icon: 'check', onPress: () => setConfirmDrop(false) },
+        ]}
+        onClose={() => setConfirmDrop(false)}
+      />
+
       <PinSheet
         visible={sheet}
         mode="set"
         onCancel={() => setSheet(false)}
         onDone={() => { setSheet(false); refreshPin(); }}
+      />
+
+      {/* ---- a forgotten band PIN ---------------------------------------
+          This phone is still linked, so it is still holding the six digits in
+          the keystore. Showing them to whoever is holding the handset would be
+          careless, so the disarm PIN stands in front -- the gate this app
+          already uses for "prove you are the owner of this phone".
+          It gives away nothing an attacker with this unlocked, signed-in phone
+          could not already do: the band is linked and obeys it. What it saves
+          is the alternative, which is a factory reset and re-pairing every
+          phone in the family. */}
+      <PinSheet
+        visible={recover === 'ask'}
+        mode={pinSet ? 'verify' : 'set'}
+        title={pinSet ? 'Enter your PIN to see the band PIN' : 'Choose a PIN first'}
+        body={pinSet
+          ? 'This is your four-digit app PIN, not the band’s six.'
+          : 'You have no app PIN yet, and it is what protects the band’s. '
+            + 'Choose one now and the band PIN will be shown.'}
+        wrongNote="Wrong PIN."
+        lockedNote="Too many attempts. The band PIN stays hidden."
+        onCancel={() => setRecover(null)}
+        onDone={async () => {
+          await refreshPin();
+          setRecover('loading');
+          // The ACCOUNT, not the keystore. The phone deliberately forgets the
+          // band PIN when somebody presses Disconnect, so the local copy is
+          // gone in exactly the situation this screen exists for. The account's
+          // copy is written every time the band accepts a PIN, and a PIN change
+          // is refused without a network so the two cannot drift apart.
+          try {
+            const stored = await fetchBandPin(session);
+            setRecover(stored || 'none');
+          } catch {
+            setRecover('offline');
+          }
+        }}
+      />
+
+      <Dialog
+        visible={!!recover && recover !== 'ask'}
+        loading={recover === 'loading'}
+        loadingLabel="Asking your account…"
+        tone={RECOVER_TONE[recover] || U.mint}
+        icon={recover === 'offline' ? 'wifi-off'
+              : recover === 'none' ? 'alert-circle' : 'key'}
+        title={recover === 'offline' ? 'No connection'
+               : recover === 'none' ? 'Your account does not have it'
+               : 'Your band PIN'}
+        body={recover === 'offline'
+          ? 'Your band PIN is kept on your account, not on this phone — the '
+            + 'phone forgets it whenever you disconnect the band. Getting it '
+            + 'back needs an internet connection. Try again when you have signal.'
+          : recover === 'none'
+            ? 'No band PIN has ever been saved to your account, so there is '
+              + 'nothing to give you. The band itself is the way back — hold '
+              + 'its button down while it restarts, keep holding for five '
+              + 'seconds, and its name and PIN go back to factory. Then forget '
+              + 'the band in Android’s Bluetooth settings before linking again.'
+            : recover}
+        note={recover === 'offline' || recover === 'none' || recover === 'loading'
+          ? undefined
+          : 'Write it somewhere safe. If the band refuses it, it was changed on '
+            + 'another phone that had no signal at the time — reset the band '
+            + 'with its own button.'}
+        actions={recover === 'loading' ? [] : [
+          { label: 'Done', icon: 'check', onPress: () => setRecover(null) },
+        ]}
+        onClose={() => setRecover(null)}
       />
     </>
   );
@@ -484,6 +714,208 @@ function Section({ title, tone }) {
  * control says which of these it is doing -- "Searching…" and "Switching…" are
  * different waits, and a bare spinner makes them look like the same one.
  */
+/**
+ * Renaming the band, from the screen the wearer actually uses.
+ *
+ * Worth being plain about what this changes, because it is not what "device
+ * name" usually means in an app: it is written into the wristband's own memory
+ * and broadcast, so her phone's Bluetooth list and every other phone in the
+ * family follow it. The band's reply is what closes the panel -- closing on the
+ * strength of the write alone would show a rename the band may have refused.
+ */
+function NameEditor({ current, onCancel, onSave }) {
+  const [draft, setDraft] = useState(current || '');
+  const [busy, setBusy] = useState(false);
+
+  const n = draft.trim();
+  const ok = n.length >= 1 && n.length <= 20 && !/["\\]/.test(n) && n !== current;
+
+  return (
+    <View style={p.panel}>
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        placeholder="e.g. Ayesha's band"
+        placeholderTextColor={U.faint}
+        maxLength={20}
+        autoFocus
+        accessibilityLabel="Band name"
+        style={p.text}
+      />
+      <Text style={[T.meta, { color: U.faint }]}>
+        Up to 20 characters. Stored on the wristband, so your Bluetooth list and
+        the rest of your family see it too.
+      </Text>
+      <View style={p.row}>
+        <View style={{ flex: 1 }}>
+          <Action icon="check" label="Save" busyLabel="Saving…" filled
+                  busy={busy} disabled={!ok || busy}
+                  onPress={async () => {
+                    setBusy(true);
+                    try { await onSave?.(n); } finally { setBusy(false); }
+                  }} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Action icon="x" label="Cancel" disabled={busy} onPress={onCancel} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * Changing the six digits.
+ *
+ * Typed twice, because getting this wrong is expensive in a way almost nothing
+ * else on this screen is: the band takes the new PIN whether or not she meant
+ * it, and the only way back from a PIN nobody knows is holding the wristband's
+ * button down while it restarts.
+ *
+ * Every other phone in the family is asked for the new one the next time it
+ * links. That is the feature, not a side effect -- it is how a phone is
+ * revoked without anybody touching Android's Bluetooth settings.
+ */
+function PinEditor({ onCancel, onSave, onForgot }) {
+  const [current, setCurrent] = useState('');
+  const [pin, setPin] = useState('');
+  const [again, setAgain] = useState('');
+  const [busy, setBusy] = useState(false);
+  const ok = /^\d{6}$/.test(current) && /^\d{6}$/.test(pin) && pin === again;
+
+  return (
+    <View style={p.panel}>
+      {/* Typed, never filled in from the keystore.
+          The band checks this, and the check is only worth anything if a PERSON
+          supplied the answer. Pre-filling it would mean anybody holding this
+          phone unlocked could change the PIN and lock the real owner out of
+          their own band -- which is the exact thing a PIN is for. */}
+      <TextInput
+        value={current}
+        onChangeText={(t) => setCurrent(t.replace(/\D/g, '').slice(0, 6))}
+        placeholder="current PIN"
+        placeholderTextColor={U.faint}
+        keyboardType="number-pad" maxLength={6} secureTextEntry autoFocus
+        accessibilityLabel="Current band PIN"
+        style={p.input}
+      />
+      <Pressable onPress={onForgot} hitSlop={8} accessibilityRole="button"
+                 accessibilityLabel="I have forgotten the band PIN">
+        <Text style={[T.meta, { color: U.mint }]}>I have forgotten it</Text>
+      </Pressable>
+
+      <View style={p.rule} />
+
+      <TextInput
+        value={pin}
+        onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))}
+        placeholder="new PIN"
+        placeholderTextColor={U.faint}
+        keyboardType="number-pad" maxLength={6} secureTextEntry
+        accessibilityLabel="New band PIN, six digits"
+        style={p.input}
+      />
+      <TextInput
+        value={again}
+        onChangeText={(t) => setAgain(t.replace(/\D/g, '').slice(0, 6))}
+        placeholder="once more"
+        placeholderTextColor={U.faint}
+        keyboardType="number-pad" maxLength={6} secureTextEntry
+        accessibilityLabel="Repeat the new band PIN"
+        style={[p.input, again && pin !== again ? { borderColor: U.red } : null]}
+      />
+      <Text style={[T.meta, { color: again && pin !== again ? U.red : U.faint }]}>
+        {again && pin !== again
+          ? 'Those two do not match.'
+          : 'Six digits. This phone remembers the new one straight away; every '
+            + 'OTHER phone linked to this band has to be told it.'}
+      </Text>
+      <View style={p.row}>
+        <View style={{ flex: 1 }}>
+          <Action icon="lock" label="Set it" busyLabel="Saving…" filled
+                  busy={busy} disabled={!ok || busy}
+                  onPress={async () => {
+                    setBusy(true);
+                    try { await onSave?.(current, pin); } finally { setBusy(false); }
+                  }} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Action icon="x" label="Cancel" disabled={busy} onPress={onCancel} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/** Six digits, in this shell's own kit rather than the console's. */
+function BandPinAsk({ wrong, onSubmit, onForgot }) {
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const ok = /^\d{6}$/.test(pin);
+
+  return (
+    <View style={{ gap: S.md }}>
+      <TextInput
+        value={pin}
+        onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))}
+        placeholder="******"
+        placeholderTextColor={U.faint}
+        keyboardType="number-pad"
+        maxLength={6}
+        secureTextEntry
+        autoFocus
+        accessibilityLabel="Band PIN, six digits"
+        style={[p.input, wrong && { borderColor: U.red }]}
+      />
+      <Action
+        icon="unlock" label="Unlock the band" busyLabel="Unlocking…" filled
+        busy={busy} disabled={!ok || busy}
+        onPress={async () => {
+          setBusy(true);
+          try { await onSubmit?.(pin); } finally { setBusy(false); }
+        }}
+      />
+      {/* THE screen a person with a forgotten PIN is looking at.
+          The way out used to live only inside the change-PIN panel, which only
+          renders while the band is connected -- so it was reachable exactly
+          when it was not needed, and gone the moment it was. Somebody who has
+          forgotten the PIN cannot connect; this is where they end up, so this
+          is where the way out belongs. */}
+      <Pressable onPress={onForgot} hitSlop={8} accessibilityRole="button"
+                 accessibilityLabel="I have forgotten the band PIN">
+        <Text style={[T.meta, { color: U.mint }]}>I have forgotten it</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const p = StyleSheet.create({
+  panel: { gap: S.md, paddingHorizontal: S.lg, paddingBottom: S.lg, paddingTop: S.sm },
+  rule: { height: 1, backgroundColor: U.line, marginVertical: 2 },
+  row: { flexDirection: 'row', gap: S.md },
+  text: {
+    backgroundColor: U.raised,
+    borderRadius: RU.inner,
+    borderWidth: 1,
+    borderColor: U.line,
+    color: U.text,
+    paddingHorizontal: S.lg,
+    minHeight: 52,
+    fontSize: 16,
+  },
+  input: {
+    backgroundColor: U.raised,
+    borderRadius: RU.inner,
+    borderWidth: 1,
+    borderColor: U.line,
+    color: U.text,
+    paddingHorizontal: S.lg,
+    minHeight: 52,
+    fontSize: 20,
+    letterSpacing: 8,
+    textAlign: 'center',
+  },
+});
+
 function Action({ icon, label, busyLabel, onPress, filled, disabled, busy }) {
   const fg = filled ? U.bg : U.dim;
   const inactive = disabled || busy;

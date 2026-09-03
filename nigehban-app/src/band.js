@@ -1,14 +1,24 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
+import {
+  clearBandPin, getBandName, getBandPin, nameLegal, pinLegal, rememberBandName,
+  setBandPin,
+} from './bandIdentity';
 
 export const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 export const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // phone -> band
 export const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // band -> phone
-// Every band answers to `Nigehban-<serial>`, so pinning the match to one exact
-// string only ever finds one board. The firmware bumped to Nigehban-02 and the
-// app went blind on a name compare -- nRF Connect kept seeing the band the
-// whole time, because nRF Connect filters on nothing.
+// The name a band comes out of the box with. It is a fallback label and NOTHING
+// else -- not a filter, not an identity.
+//
+// It used to be both, and the scan skipped anything whose name did not start
+// with it. Now that the wearer can call the band whatever they like, that check
+// would go blind on the very first rename: the band would be advertising three
+// feet away, answering to "Ayesha's band", and the app would step over every
+// report it produced. The NUS service UUID is the identity, it is in the
+// advertising packet rather than the scan response, and it is what the scan
+// filters on.
 export const BAND_PREFIX = 'Nigehban-';
 
 // How long to look before admitting the band is not there. A BLE scan has no
@@ -63,6 +73,23 @@ const DATA_TIMEOUT_MS = 25000;
 // under the scan timeout so the fallback scan still gets its full ten seconds.
 const DIRECT_TIMEOUT_MS = 6000;
 
+// How long to keep re-offering the subscription while Android pairs.
+//
+// Android does not pair on connect. It pairs the first time an operation
+// touches an attribute that demands it, fails that operation with
+// InsufficientAuthentication, puts its passkey dialog up, and does not come
+// back to what it was doing. On this band the subscribe is that operation, so
+// the FIRST link to a band the phone has never met always fails once -- and
+// without this the app reported "the band sent nothing" for a band that was
+// waiting perfectly politely for six digits to be typed.
+//
+// The budget is generous because what it is really waiting for is a person
+// finding the notification, reading the PIN and typing it. Forty seconds is
+// slow typing plus a fumble; the retries are cheap (no scan, no connection --
+// just a CCCD write on a link that is already up).
+const PAIR_RETRY_MS = 2500;
+const PAIR_RETRY_BUDGET_MS = 40000;
+
 // Written the first time a band is linked and cleared only when the user
 // presses DISCONNECT. Its presence is the standing instruction "this phone
 // wants that band", and its value is the id to go back to -- together they are
@@ -116,6 +143,11 @@ let wantsLink = false;    // the standing "keep this link up" instruction
 let retryTimer = null;
 let scanTimer = null;
 let dataTimer = null;
+// The re-offer of the notify subscription while Android is pairing. Module
+// scope like every other timer here: it has to outlive the React tree, and it
+// has to be cancellable from disconnect() so a torn-down link cannot go on
+// quietly re-subscribing to a band nobody asked for any more.
+let pairTimer = null;
 let lastDataAt = 0;
 let connectFn = null;     // the newest mounted tree's connect(), for the retry
 // The band advertises every 20 ms, so several scan callbacks for the same
@@ -136,6 +168,34 @@ let retryCap = RETRY_MAX_MS;
 // of Android's scan budget -- see scanGateDelay().
 let scanStarts = [];
 
+// ---- the gate --------------------------------------------------------------
+// The band answers nothing until the app sends {"c":"auth","pin":...} over the
+// paired link, so a GATT connection is no longer the same thing as a working
+// band. `authed` is the difference, and like everything else here it is module
+// scope because it belongs to the link and not to a React tree.
+let authed = false;
+// The link is blocked on a person, not on the radio: either no PIN has ever
+// been stored for this band, or the one that has was refused.
+//
+// It stops the retry loop, and that is the whole reason it exists. Retrying
+// changes nothing -- waiting three seconds does not make the same six digits
+// right, and an empty keystore stays empty -- while the loop itself does real
+// damage: the band hangs up on an unauthenticated link after a few seconds, so
+// the app would reconnect, fail and reconnect, cycling the status every few
+// seconds underneath somebody who is halfway through typing into the field it
+// keeps unmounting. Cleared only by submitPin().
+let pinBlocked = false;
+// Has {"c":"auth"} been attempted on THIS link yet. It separates two states
+// that otherwise look identical from here -- a band that has not been asked,
+// and a band that was asked and ignored the question -- and getting them
+// confused reports perfectly good hardware as needing a re-flash. See the
+// unauthenticated-event branch in handleLine().
+let authTried = false;
+// A new PIN that has been sent to the band and not yet acknowledged. It is
+// written to the keystore by the `pin_set` branch and nowhere else, so a PIN the
+// band refused is never the one this phone tries to reconnect with.
+let pendingPin = null;
+
 function bleManager() {
   if (!manager && BleManager) manager = new BleManager();
   return manager;
@@ -152,6 +212,9 @@ function bleManager() {
  */
 function retrySoon(ms) {
   if (!wantsLink) return;
+  // Blocked on a person. Not retryable, and retrying is actively harmful --
+  // see the flag's own comment.
+  if (pinBlocked) return;
   clearTimeout(retryTimer);
   const wait = ms == null ? retryDelay : ms;
   // A caller-supplied wait is a fact about the radio, not a failure count, so
@@ -242,6 +305,38 @@ function isAlreadyConnected(e) {
   return /already connected/i.test(e?.reason || e?.message || '');
 }
 
+/**
+ * Did this fail because the link is not encrypted, or not encrypted enough?
+ *
+ * Read `attErrorCode`, not `errorCode`. `errorCode` says WHICH operation
+ * failed -- 403 is CharacteristicNotifyChangeFailed -- and an earlier version
+ * of this function tested it as though it meant "not authorized", which it
+ * does not. `attErrorCode` is the reason the peripheral itself gave, and it is
+ * the only field that separates "this needs pairing" from "the radio is
+ * broken". `androidErrorCode` 0x8e (NotEncrypted) is the same answer arriving
+ * from below the ATT layer.
+ *
+ * This is the ordinary first-connection path, not an exception. Android does
+ * not pair on connect; it pairs the first time something touches an attribute
+ * that demands it -- on this band, the subscribe -- and it fails THAT
+ * operation while the passkey dialog goes up. Nothing retries it on the app's
+ * behalf, so a link that is about to work perfectly reports a fault first.
+ */
+const ATT_NEEDS_PAIRING = new Set([
+  5,    // InsufficientAuthentication
+  8,    // InsufficientAuthorization
+  12,   // InsufficientEncryptionKeySize
+  15,   // InsufficientEncryption
+]);
+
+function isAuthFailure(e) {
+  if (ATT_NEEDS_PAIRING.has(e?.attErrorCode)) return true;
+  if (e?.androidErrorCode === 0x8e) return true;            // NotEncrypted
+  // Belt and braces for a backend that only hands us prose.
+  const msg = e?.reason || e?.message || '';
+  return /insufficient (authentication|authorization|encryption)|not encrypted/i.test(msg);
+}
+
 async function rememberBand(id) {
   try { await AsyncStorage.setItem(LINK_KEY, id); } catch { /* non-fatal */ }
 }
@@ -297,6 +392,28 @@ function b64encode(s) {
         + (isNaN(c) ? '=' : tbl[c & 63]);
   }
   return out;
+}
+
+/**
+ * One command onto the wire, with no opinion about what it means.
+ *
+ * Module scope rather than inside the hook because the handshake runs from
+ * setUpLink() and from the notification handler, both of which can fire while
+ * no React tree is mounted -- the link outlives the tree, and so does the
+ * authentication it needs.
+ *
+ * Returns the failure rather than throwing it: every caller here has a better
+ * message for the screen than a native BLE reason string.
+ */
+async function writeCmd(obj) {
+  if (!linked) return 'no band connected';
+  try {
+    await linked.writeCharacteristicWithoutResponseForService(
+      NUS_SERVICE, NUS_RX, b64encode(JSON.stringify({ t: 'cmd', ...obj }) + '\n'));
+    return null;
+  } catch (e) {
+    return e.reason || e.message || 'write failed';
+  }
 }
 
 async function askPermissions() {
@@ -360,7 +477,9 @@ async function locationServicesOff() {
  * Only then will the hook re-link on its own; in virtual mode a remembered
  * band must not pull the phone back onto a scan nobody asked for.
  */
-export function useBand(onEvent, { autoLink = false } = {}) {
+export function useBand(onEvent, {
+  autoLink = false, escrowPin, escrowReachable,
+} = {}) {
   const [status, setStatus] = useState(
     BleManager ? (linked ? 'connecting' : 'idle') : 'simulated');
   const [battery, setBattery] = useState(null);
@@ -371,9 +490,37 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   // failed write were both caught and dropped, so "connected" was the last
   // thing the UI ever said. Whatever went wrong now has somewhere to surface.
   const [lastError, setLastError] = useState(null);
+  // What this band calls itself. Seeded from the last link so the screen has a
+  // name to show before the radio is up, then replaced by whatever the band
+  // says in auth_ok -- which is authoritative, because it may have been
+  // renamed from a different phone in the family since we last looked.
+  const [bandName, setBandName] = useState(null);
+  // True once the band has said this PIN is still the factory default. It is
+  // the one thing worth nagging about: a band on 123456 is a band anybody who
+  // has read this repo can pair with.
+  const [defaultPin, setDefaultPin] = useState(false);
+
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const n = await getBandName();
+      if (!dead && n) setBandName((cur) => cur || n);
+    })();
+    return () => { dead = true; };
+  }, []);
 
   const cb = useRef(onEvent);
   cb.current = onEvent;
+
+  // Called with a PIN the BAND has accepted -- never with a guess. This file
+  // deliberately knows nothing about accounts or servers; it reports the one
+  // fact it is in a position to know, and App.js decides that fact is worth
+  // keeping against the account. Refs because they are called from module-scope
+  // listeners that outlive any particular render.
+  const pinCb = useRef(escrowPin);
+  pinCb.current = escrowPin;
+  const reachCb = useRef(escrowReachable);
+  reachCb.current = escrowReachable;
 
   // Everything the link needs to keep itself up -- the standing instruction,
   // the retry, the scan guard, the data watchdog, the partial line -- now
@@ -383,11 +530,247 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   // had been closed.
   const simulated = !BleManager;
 
+  /**
+   * Answer the band's challenge with the six digits this phone has stored.
+   *
+   * No PIN stored is not an error and must not look like one: it is a band
+   * nobody has told this phone about yet, and the only thing that fixes it is
+   * a person typing. The link is deliberately left up while that happens --
+   * the band gives us a few seconds before it hangs up, and if it does, the
+   * ordinary retry brings it back the moment submitPin() has something to say.
+   */
+  const beginAuth = useCallback(async () => {
+    authTried = true;
+    const pin = await getBandPin();
+    if (!pin) {
+      pinBlocked = true;
+      setLastError(null);
+      setStatus('needs-pin');
+      return;
+    }
+    setStatus('authenticating');
+    const err = await writeCmd({ c: 'auth', pin });
+    if (err) {
+      setLastError('Could not send the band PIN: ' + err);
+      setStatus('error:' + err);
+    }
+  }, []);
+
+  /**
+   * The band said yes.
+   *
+   * Everything that used to happen at the end of setUpLink and means "there is
+   * a working band on the other end of this" lives here instead, because until
+   * auth_ok none of it was true.
+   */
+  const goLive = useCallback((msg) => {
+    authed = true;
+    pinBlocked = false;
+
+    // The band said yes to whatever this phone sent, so this is a PIN known to
+    // work -- the only kind worth remembering anywhere. It also quietly covers
+    // the factory reset: a wiped band answers to the factory PIN, the phone is
+    // told that PIN, it authenticates with it, and the escrowed copy follows
+    // the band back to factory without anybody doing anything.
+    // Best effort, and safe to be: this writes a PIN that is known to WORK, so
+    // the worst a failure leaves behind is an account with no copy -- which is
+    // recoverable. Writing a copy that is WRONG is the dangerous direction, and
+    // only a PIN change can do that; see changePin().
+    getBandPin().then((pin) => { if (pin) pinCb.current?.(pin); }).catch(() => {});
+
+    // The band's own name wins over anything cached. It may have been renamed
+    // from another phone in the family since this one last looked.
+    if (msg?.name) {
+      setBandName(msg.name);
+      rememberBandName(msg.name);
+    }
+    setDefaultPin(msg?.defpin === 1);
+
+    setLastError(null);
+    setStatus('connected');
+    // Whatever the last run of failures cost, this link proves the situation
+    // has changed. The next drop starts from a short wait rather than from a
+    // minute the band did nothing to deserve.
+    resetBackoff();
+
+    // "Connected" is a claim about the radio, not about the data. The band
+    // heartbeats every 10 s, so silence past 25 s means the subscription is
+    // not live however healthy the link looks -- drop it and start over,
+    // and leave a note saying why rather than sitting there blank.
+    lastDataAt = Date.now();
+    clearInterval(dataTimer);
+    dataTimer = setInterval(() => {
+      if (Date.now() - lastDataAt < DATA_TIMEOUT_MS) return;
+      clearInterval(dataTimer);
+      setLastError(
+        'Link was up but the band sent nothing for '
+        + Math.round(DATA_TIMEOUT_MS / 1000) + 's -- the notify subscription '
+        + 'never went live. Relinking.');
+      // onDisconnected does the retry and clears the guard.
+      try { linked?.cancelConnection(); } catch { /* already gone */ }
+    }, 5000);
+  }, []);
+
   const handleLine = useCallback((line) => {
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
     if (msg.t !== 'evt') return;
     setLastSeen(Date.now());
+
+    // ---- the handshake, and the settings that ride on it -------------------
+    //
+    // Handled here and returned from, rather than passed on to cb.current.
+    // These are a conversation between this file and the firmware; the rest of
+    // the app deals in "somebody pressed the button", and an auth_bad arriving
+    // at the alert router would be an event nothing knows what to do with.
+    switch (msg.e) {
+      case 'need_auth':
+        // The band asks the moment the subscription goes live. Answering the
+        // question it actually asked is better than assuming it was going to.
+        beginAuth();
+        return;
+
+      case 'auth_ok':
+        goLive(msg);
+        return;
+
+      case 'auth_locked':
+        // Not a wrong PIN -- the band has stopped listening for a while after
+        // too many. Distinguished from bad-pin because the answer is different:
+        // waiting fixes this, and typing does not.
+        authed = false;
+        pinBlocked = true;
+        setLastError(
+          'Too many wrong PINs. The band has stopped accepting them for '
+          + (msg.for_s > 90 ? Math.ceil(msg.for_s / 60) + ' minutes'
+                            : (msg.for_s || 30) + ' seconds')
+          + '. Waiting is the only thing that clears it — a correct PIN after '
+          + 'that does, immediately.');
+        setStatus('locked-out');
+        return;
+
+      case 'auth_bad':
+        // Not retryable, and saying so is the point -- otherwise the band
+        // reads as "out of range" and the user has no idea the six digits are
+        // the problem. The band hangs up after three of these on its own.
+        authed = false;
+        pinBlocked = true;
+        setLastError(msg.locked_s
+          ? 'Wrong PIN. Too many now — the band has stopped accepting them for '
+            + msg.locked_s + 's.'
+          : 'The band did not accept this PIN.');
+        setStatus(msg.locked_s ? 'locked-out' : 'bad-pin');
+        return;
+
+      case 'name_set':
+        if (msg.name) { setBandName(msg.name); rememberBandName(msg.name); }
+        setLastError(null);
+        return;
+
+      case 'name_rejected':
+        setLastError('The band would not take that name'
+                     + (msg.why ? ' (' + msg.why + ').' : '.'));
+        return;
+
+      case 'pin_set':
+        // The band agreed, so now -- and only now -- this phone remembers it.
+        if (pendingPin) {
+          const accepted = pendingPin;
+          pendingPin = null;
+          setDefaultPin(false);
+          setLastError(null);
+
+          // The band has moved on. Both copies now have to catch up, and
+          // neither failing is allowed to be quiet -- whichever one misses, the
+          // person is the fallback and has to be told the number.
+          setBandPin(accepted).catch(() => {
+            setLastError('The band took the new PIN but this phone could not '
+                         + 'save it. Write it down — you will be asked for it '
+                         + 'the next time the band reconnects.');
+          });
+
+          // The reachability check in changePin() ran seconds ago, so this
+          // should not fail. If it does, the account is now holding the OLD
+          // PIN against a band that has stopped accepting it -- the one
+          // divergence that matters -- so it is reported in full rather than
+          // swallowed, with the digits, because at this point the person is
+          // the only reliable copy left.
+          Promise.resolve(pinCb.current?.(accepted))
+            .then((saved) => {
+              if (saved === false) throw new Error('escrow refused');
+            })
+            .catch(() => {
+              setLastError('The band took the new PIN, but it could not be '
+                           + 'saved to your account — so "I have forgotten it" '
+                           + 'would give you the OLD one. Write ' + accepted
+                           + ' down now, and set the PIN again when you have '
+                           + 'signal to fix the copy on your account.');
+            });
+        } else {
+          setDefaultPin(false);
+          setLastError(null);
+        }
+        return;
+
+      case 'pin_rejected':
+        pendingPin = null;
+        setLastError('The band would not take that PIN'
+                     + (msg.why ? ' (' + msg.why + ').' : '.')
+                     + (msg.locked_s
+                        ? ' Too many wrong answers -- it has stopped listening for '
+                          + msg.locked_s + 's.'
+                        : ''));
+        return;
+
+      case 'cfg':
+        if (msg.name) { setBandName(msg.name); rememberBandName(msg.name); }
+        setDefaultPin(msg.defpin === 1);
+        return;
+
+      case 'unpaired':
+        setLastError('The band has forgotten every paired phone. Remove it in '
+                     + 'Android Bluetooth settings before linking again.');
+        return;
+
+      default:
+        break;
+    }
+
+    // An ordinary event, on a link that has not authenticated. Two very
+    // different things produce this, and telling them apart is what `authTried`
+    // is for.
+    if (!authed) {
+      // FIRST: a band that is already through its handshake and simply did not
+      // re-ask. That is the ADOPTED link -- Android rebuilt the activity, the
+      // GATT connection survived, and the firmware still has us marked
+      // authenticated, so its need_auth prompt (which only fires for an
+      // unauthenticated subscriber) never comes. It is heartbeating at us
+      // perfectly happily. Asking is what resolves it; the firmware answers an
+      // `auth` from an already-authenticated peer with a fresh auth_ok, and
+      // deliberately without the buzz, because this is not a new link.
+      if (!authTried) {
+        beginAuth();
+        return;
+      }
+
+      // SECOND: we asked, and it carried on as though nothing had been said.
+      // Only firmware from before the lock does that.
+      //
+      // It is reported rather than accepted. Going live anyway would mean the
+      // one state this whole feature exists to prevent -- an open band, with
+      // the app calling it locked -- and re-flashing is a two-minute job with
+      // a clear instruction attached. The events are still dropped: a band
+      // this app cannot vouch for must not raise alerts in somebody's name.
+      pinBlocked = true;                       // no retry will change this
+      setLastError(
+        'This band is running firmware from before the PIN lock: it never asked '
+        + 'for one and ignores the handshake. Re-flash it from '
+        + 'nigehban_band_nrf52/ and forget the band in Android Bluetooth '
+        + 'settings before linking again.');
+      setStatus('old-firmware');
+      return;
+    }
+
     if (typeof msg.bat === 'number') setBattery(msg.bat);
     if (msg.e === 'armed') setArmed(true);
     if (msg.e === 'disarmed') setArmed(false);
@@ -395,10 +778,16 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     if (msg.e === 'high_alert_off') setHighAlert(false);
     if (msg.e === 'hb') return;              // heartbeat is status, not an event
     cb.current?.(msg);
-  }, []);
+  }, [beginAuth, goLive]);
 
   const setUpLink = useCallback(async (c) => {
     linked = c;
+    // This link has not authenticated, whatever the last one managed. The
+    // adopt path lands here with a connection that outlived its React tree,
+    // and inheriting a stale `true` would let commands go out to a band that
+    // is going to ignore them.
+    authed = false;
+    authTried = false;
 
     // Adopting an existing link re-runs this over listeners that are already
     // registered. Leave them and every notification is delivered twice, the
@@ -415,9 +804,21 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     dropSub = c.onDisconnected(() => {
       linked = null;
       connecting = false;
+      // Authentication belongs to the connection that earned it. The band
+      // clears its own on the same edge; leaving ours set would have the app
+      // believing the next connection -- to anything -- was already trusted.
+      authed = false;
       clearInterval(dataTimer);
-      setStatus('disconnected');
-      retrySoon();
+      clearTimeout(pairTimer); pairTimer = null;
+      // A band waiting on six digits hangs up on its own after a few seconds.
+      // Overwriting the prompt with "disconnected" would replace the one screen
+      // that can fix this with one that cannot, in the moment somebody is
+      // reading it -- so the question stays up and the retry stays down until
+      // it is answered.
+      if (!pinBlocked) {
+        setStatus('disconnected');
+        retrySoon();
+      }
     });
 
     // A link can come up perfectly and still be useless: Android caches a
@@ -463,20 +864,68 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // line of this one.
     buf = '';
 
+    // The subscription, offered again for as long as Android is still pairing.
+    //
+    // `subscribe` is a named function rather than one inline call because the
+    // first attempt against a band this phone has never met is EXPECTED to
+    // fail -- see isAuthFailure(). Android answers it with
+    // InsufficientAuthentication, raises its own passkey dialog, and then
+    // never returns to the operation that caused it. Offering the subscription
+    // again a few seconds later, once the bond exists, is the whole fix.
     if (__DEV__) console.log('BAND subscribing to', NUS_TX);
-    notifySub = c.monitorCharacteristicForService(NUS_SERVICE, NUS_TX, (e, ch) => {
+    const pairingSince = Date.now();
+
+    const subscribe = () => {
+      // Whatever the last attempt left registered. Without this each retry
+      // stacks another listener and every line arrives once per attempt.
+      try { notifySub?.remove(); } catch { /* never registered */ }
+      notifySub = c.monitorCharacteristicForService(NUS_SERVICE, NUS_TX, onNotify);
+    };
+
+    const onNotify = (e, ch) => {
       if (e) {
-        if (__DEV__) console.log('BAND notify ERR:', e.reason || e.message);
+        if (__DEV__) console.log('BAND notify ERR:', e.reason || e.message,
+                                 'att=', e.attErrorCode, 'android=', e.androidErrorCode);
+        if (!wantsLink) return;
+
+        // ---- still pairing ------------------------------------------------
+        // Not a fault, and reporting it as one is what put "Band not
+        // responding" on screen while the wearer was still reading Android's
+        // dialog. Say what is actually happening and try again.
+        if (isAuthFailure(e)) {
+          if (linked !== c) return;              // this link is gone; stop
+          if (Date.now() - pairingSince < PAIR_RETRY_BUDGET_MS) {
+            setStatus('pairing');
+            setLastError(null);
+            clearTimeout(pairTimer);
+            pairTimer = setTimeout(() => { if (linked === c) subscribe(); },
+                                   PAIR_RETRY_MS);
+            return;
+          }
+          // Out of patience. Either nobody answered the dialog, or Android is
+          // holding a bond the band has forgotten -- which no amount of
+          // retrying fixes and this app cannot clear.
+          setLastError(
+            'Android would not encrypt the link to the band. If it asked for a '
+            + 'PIN and you typed one, it was not accepted; if it never asked, '
+            + 'this phone is holding a pairing the band has forgotten -- open '
+            + 'Android Bluetooth settings, forget the band, and connect again.');
+          setStatus('pair-failed');
+          return;
+        }
+
         // Swallowing this is how a dead link passes for a live one: the
         // subscribe can fail on its own (cached table, notify not granted)
         // long after connect() resolved, and nothing else reports it.
-        if (wantsLink) {
-          setLastError('Notify subscribe failed: ' + (e.reason || e.message));
-          setStatus('no-notify');
-        }
+        setLastError('Notify subscribe failed: ' + (e.reason || e.message));
+        setStatus('no-notify');
         return;
       }
       if (!ch?.value) return;
+
+      // The subscription is live, so pairing is behind us.
+      clearTimeout(pairTimer); pairTimer = null;
+
       // Fed on raw bytes, not on parsed lines. A band whose lines arrive
       // truncated is a real fault, but it is not a dead subscription, and
       // tearing the link down every 25 s only hid the actual problem.
@@ -494,7 +943,9 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         console.log('BAND first line:', parts[0].trim());
       }
       parts.forEach((p) => p.trim() && handleLine(p.trim()));
-    });
+    };
+
+    subscribe();
 
     // Now that the subscription exists, a bigger MTU only means fewer
     // packets per line. Failing is cosmetic, so it must never take the
@@ -506,31 +957,32 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     // Remember which band this was, so the next launch -- or the next
     // reconnect after Android finally does kill the process -- goes straight
     // back to it instead of scanning the room for a device it already knows.
+    //
+    // Deliberately BEFORE authentication. This is "which band is ours", not
+    // "which band let us in", and a wrong PIN is a reason to ask the user for
+    // six digits, never a reason to forget which wristband they own.
     rememberBand(c.id);
 
     setLastError(null);
-    setStatus('connected');
-    // Whatever the last run of failures cost, this link proves the situation
-    // has changed. The next drop starts from a short wait rather than from a
-    // minute the band did nothing to deserve.
-    resetBackoff();
 
-    // "Connected" is a claim about the radio, not about the data. The band
-    // heartbeats every 10 s, so silence past 25 s means the subscription is
-    // not live however healthy the link looks -- drop it and start over,
-    // and leave a note saying why rather than sitting there blank.
-    lastDataAt = Date.now();
-    clearInterval(dataTimer);
-    dataTimer = setInterval(() => {
-      if (Date.now() - lastDataAt < DATA_TIMEOUT_MS) return;
-      clearInterval(dataTimer);
-      setLastError(
-        'Link was up but the band sent nothing for '
-        + Math.round(DATA_TIMEOUT_MS / 1000) + 's -- the notify subscription '
-        + 'never went live. Relinking.');
-      // onDisconnected does the retry and clears the guard.
-      try { linked?.cancelConnection(); } catch { /* already gone */ }
-    }, 5000);
+    // "Connected" is not claimed here, and neither is the handshake started.
+    //
+    // Writing {"c":"auth"} from here was a bug with the same root as the
+    // subscribe failing: RXD needs an encrypted link too, so an auth sent now
+    // races Android's pairing and is refused exactly as the subscription was.
+    // Both operations would then be sitting on a dialog nobody has answered.
+    //
+    // The band's own `need_auth` is the correct trigger, and the firmware makes
+    // it a guarantee: it is sent from the CCCD-write callback, which cannot
+    // fire until the subscription is genuinely live -- which cannot happen
+    // until pairing has succeeded. By the time it arrives, a write will go
+    // through. handleLine() answers it; goLive() is reached from auth_ok and
+    // nowhere else.
+    //
+    // `pairing`, not `authenticating`: on a first link this is precisely the
+    // moment Android's passkey dialog goes up, and the wearer is looking at
+    // that, not at us.
+    setStatus('pairing');
   }, [handleLine]);
 
   /**
@@ -597,6 +1049,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     clearTimeout(retryTimer); retryTimer = null;
     clearTimeout(scanTimer); scanTimer = null;
     clearInterval(dataTimer); dataTimer = null;
+    clearTimeout(pairTimer); pairTimer = null;
 
     const mgr = bleManager();
     if (!mgr) { setStatus('simulated'); return; }
@@ -742,13 +1195,19 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         return;
       }
       if (!d) return;
-      // The name is a nicety here, not the identity: it rides in the scan
-      // response, and Android hands us plenty of reports before that lands.
-      // The service filter above already proves this is a band, so a hit with
-      // no name yet counts -- only a name that is clearly somebody else's is
-      // grounds to skip.
+      // No name check at all any more, and that is the fix rather than a
+      // loosening. A band the wearer has renamed advertises whatever they
+      // called it, so `startsWith('Nigehban-')` would skip the one device we
+      // are looking for -- and the check never did any work anyway: the OS
+      // scan filter above matched on the NUS service UUID, which nothing else
+      // in the room advertises.
+      //
+      // The name is still read, because it is the label the UI shows until the
+      // band states its own in auth_ok -- which is after pairing, and pairing
+      // is the part with a dialog on it. Having something to call the band on
+      // that screen is worth one assignment.
       const name = d.name || d.localName || '';
-      if (name && !name.startsWith(BAND_PREFIX)) return;
+      if (name) setBandName(name);
 
       // First match wins. Set before any await, or the callbacks already
       // queued behind this one race straight past it.
@@ -799,6 +1258,27 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   const disconnect = useCallback(async () => {
     wantsLink = false;
     connecting = false;
+    // The PIN is forgotten, and ONLY here.
+    //
+    // This function is the deliberate act -- somebody pressed DISCONNECT, or
+    // signed out. It is not how a band that walked out of range comes down: an
+    // automatic drop goes through onDisconnected() and retrySoon(), never
+    // through here, so a wearer who steps into a lift or leaves her phone in
+    // another room gets her band back silently, exactly as before. Nothing on
+    // that path touches the keystore.
+    //
+    // Deliberately unlinking is different in kind. It is the one moment the
+    // wearer has said "this phone and that band are finished", and the stored
+    // PIN is what lets any hand holding this phone put them back together
+    // without knowing anything. So the six digits go, and coming back means
+    // typing them -- which is also what makes DISCONNECT a real answer to
+    // "somebody else has my phone" rather than a cosmetic one.
+    //
+    // Sign-out gets this for free and wants it: App.js disconnects there
+    // precisely so the next account cannot inherit the last one's wristband.
+    authed = false;
+    pinBlocked = false;
+    await clearBandPin();
     // A deliberate disconnect ends the episode, so the next link starts fresh.
     // `scanStarts` is deliberately NOT cleared: that window belongs to Android,
     // not to us, and forgetting it here would let connect/disconnect/connect
@@ -809,6 +1289,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
     clearTimeout(retryTimer); retryTimer = null;
     clearTimeout(scanTimer); scanTimer = null;
     clearInterval(dataTimer); dataTimer = null;
+    clearTimeout(pairTimer); pairTimer = null;
     // The only place the standing "this phone wants that band" instruction is
     // withdrawn. Leave it set and the effects below would helpfully undo the
     // button the user just pressed.
@@ -888,17 +1369,132 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       setLastError('Command dropped -- no band connected: ' + JSON.stringify(obj));
       return false;
     }
-    try {
-      await linked.writeCharacteristicWithoutResponseForService(
-        NUS_SERVICE, NUS_RX, b64encode(JSON.stringify({ t: 'cmd', ...obj }) + '\n'));
-      return true;
-    } catch (e) {
-      // This is the check-in buzz that never reached the wrist. Silence here
-      // reads as "the motor is broken" when the write never left the phone.
-      setLastError('Write failed (' + (obj.c || '?') + '): ' + (e.reason || e.message));
+    // A write that leaves the phone and is then ignored is the worst of both
+    // worlds: the app believes the check-in buzz went to the wrist, and the
+    // band drops it on the floor because this connection never authenticated.
+    // Say so instead.
+    if (!authed) {
+      setLastError('Command dropped -- the band has not accepted this phone yet: '
+                   + JSON.stringify(obj));
       return false;
     }
+    const err = await writeCmd(obj);
+    if (err) {
+      // This is the check-in buzz that never reached the wrist. Silence here
+      // reads as "the motor is broken" when the write never left the phone.
+      setLastError('Write failed (' + (obj.c || '?') + '): ' + err);
+      return false;
+    }
+    return true;
   }, []);
+
+  // ---------------------------------------------------- NAME AND PIN ---
+
+  /**
+   * The user has typed six digits. Store them and try again.
+   *
+   * Stored before the band is asked, on purpose. The alternative -- prove it
+   * first, save it after -- loses the PIN in exactly the case where losing it
+   * hurts: the band accepts it, the link drops before the reply lands, and the
+   * phone reconnects knowing nothing.
+   */
+  const submitPin = useCallback(async (pin) => {
+    await setBandPin(pin);
+    pinBlocked = false;
+    setLastError(null);
+    if (linked && !authed) { await beginAuth(); return; }
+    // No link to authenticate on: the band hung up while the user was typing,
+    // or was never found. Start the loop again -- it has the PIN now.
+    connectFn?.();
+  }, [beginAuth]);
+
+  /**
+   * Rename the band itself.
+   *
+   * This is not a label on this phone. It goes into the nRF52's flash and out
+   * in the advertisement, so Android's Bluetooth list, nRF Connect and every
+   * other phone in the family see the new name too. The band answers with
+   * `name_set` and that answer -- not this call -- is what updates the screen.
+   */
+  const renameBand = useCallback(async (name) => {
+    const n = (name || '').trim();
+    if (!nameLegal(n)) {
+      setLastError('A band name is 1-20 plain characters, with no quotes.');
+      return false;
+    }
+    return send({ c: 'setname', name: n });
+  }, [send]);
+
+  /**
+   * Change the six digits, on the band and on this phone.
+   *
+   * `oldPin` is the current one, and the caller must have made a person TYPE
+   * it. Filling it in from the keystore would turn the band's check into
+   * theatre -- the whole point is to require something the owner knows rather
+   * than something the phone in somebody's hand happens to be holding.
+   *
+   * The new PIN is stored only once the band has confirmed it, in the `pin_set`
+   * branch of handleLine(). The old order -- save first, then ask -- was safe
+   * while the band accepted every setpin, and stopped being safe the moment it
+   * could refuse one: mistyping the current PIN would have left this phone
+   * holding a PIN the band had never agreed to, and the next reconnect failing
+   * against it. If the confirmation is lost in flight instead, the band has the
+   * new PIN and this phone the old one, which surfaces as an ordinary bad-pin
+   * prompt the person can answer.
+   *
+   * Other phones in the family keep their pairing but stop authenticating, so
+   * each needs the new PIN typed in once. That is the intended behaviour and
+   * the reason this is worth having: it revokes a phone without anybody going
+   * near Android's Bluetooth settings.
+   */
+  const changePin = useCallback(async (oldPin, pin) => {
+    if (!pinLegal(oldPin) || !pinLegal(pin)) {
+      setLastError('A band PIN is six digits.');
+      return false;
+    }
+
+    // ---- the network is a PRECONDITION, not a nicety ---------------------
+    //
+    // The account holds a copy of this PIN so a forgotten one can be recovered,
+    // and the one thing that copy must never be is WRONG. Missing is survivable
+    // -- the wearer falls back to the band's own button. Wrong is not: it hands
+    // somebody six digits with total confidence, they type them, the band
+    // refuses, and they have spent attempts against a lockout while believing
+    // they hold the answer.
+    //
+    // Changing the PIN offline is exactly how that happens. The band would take
+    // the new one and the account would go on holding the old one, with nothing
+    // anywhere aware they had diverged. So the server is checked BEFORE the
+    // band is touched, and a phone with no signal is told to wait.
+    //
+    // Checked rather than written, and in that order deliberately. Writing the
+    // new PIN first would put an unconfirmed value in the account, and a band
+    // that then refused the change -- wrong current PIN, most likely -- would
+    // leave the same divergence pointing the other way.
+    if (reachCb.current && !(await reachCb.current())) {
+      setLastError('Changing the band PIN needs an internet connection, so the '
+                   + 'new one can be saved to your account. Without that, a PIN '
+                   + 'you forget later could not be recovered. Try again when '
+                   + 'you have signal.');
+      return false;
+    }
+
+    pendingPin = pin;
+    const ok = await send({ c: 'setpin', old: oldPin, pin });
+    if (!ok) pendingPin = null;
+    return ok;
+  }, [send]);
+
+  /**
+   * Make the band forget every phone that has ever paired with it.
+   *
+   * The heavy option, and the link goes with it -- this phone's keys were in
+   * that list too. Android will still be holding its side of the bond, which
+   * is why the reply says to clear it there; a phone that reconnects with a
+   * bond the band has forgotten fails encryption and nothing in this app can
+   * fix that from here.
+   */
+  const unpairAll = useCallback(() => send({ c: 'unpair' }), [send]);
 
   /** Stands in for a real key press when there is no radio (Expo Go). */
   const simulate = useCallback((e, extra = {}) => {
@@ -940,6 +1536,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       clearTimeout(retryTimer); retryTimer = null;
       clearTimeout(scanTimer); scanTimer = null;
       clearInterval(dataTimer); dataTimer = null;
+      clearTimeout(pairTimer); pairTimer = null;
       try { notifySub?.remove(); } catch { /* never registered */ }
       try { dropSub?.remove(); } catch { /* never registered */ }
       notifySub = null;
@@ -952,5 +1549,7 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   }, []);
 
   return { status, connect, disconnect, send, simulate, simulated,
-           battery, armed, highAlert, lastSeen, bleError, lastError };
+           battery, armed, highAlert, lastSeen, bleError, lastError,
+           // identity: what the band is called, and who may talk to it
+           bandName, defaultPin, submitPin, renameBand, changePin, unpairAll };
 }

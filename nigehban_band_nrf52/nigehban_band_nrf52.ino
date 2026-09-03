@@ -58,9 +58,119 @@
 
 #include <Adafruit_TinyUSB.h>   // USB CDC. Without it `Serial` fails to LINK.
 #include <bluefruit.h>
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>   // the band's own name and PIN, across reboots
 
 // ---------------------------------------------------------------- CONFIG ---
+// The FACTORY name and PIN. Neither is the band's identity any more -- both are
+// overwritten by whatever is in /nigehban.cfg on the internal flash, which the
+// app writes with {"c":"setname"} and {"c":"setpin"}. These are what a band
+// comes up with before anybody has set anything, and what a factory reset
+// (hold the button through boot) puts back.
 #define DEVICE_NAME     "Nigehban-02"
+
+// Six digits, not four, and not negotiable: BLE_GAP_PASSKEY_LEN is 6, and this
+// same string is handed to the SoftDevice as the pairing passkey. The app's
+// disarm PIN is four digits and is a DIFFERENT secret for a different job --
+// see docs/BAND_PIN_AND_NAME.md.
+//
+// CHANGE THIS BEFORE FLASHING A BAND YOU CARE ABOUT, or change it from the app
+// on first link. A published default is a default everybody knows.
+#define DEFAULT_PAIR_PIN "123456"
+
+// The PIN this repository ships with, frozen as a literal.
+//
+// It is NOT the same question as DEFAULT_PAIR_PIN, and conflating the two is a
+// bug worth naming. The app nags when the band reports `defpin`, and the thing
+// worth nagging about is "these six digits are printed in a public repository",
+// not "these six digits came from a #define". Somebody who edits the line above
+// to their own secret before flashing has done exactly the right thing, and
+// comparing against DEFAULT_PAIR_PIN would reward them with a permanent amber
+// banner telling them to do the thing they already did.
+//
+// So this stays "123456" forever. Only a band actually running the published
+// value gets nagged.
+#define PUBLISHED_PIN    "123456"
+
+// 20 characters of name. The scan response is 31 bytes, a name costs its own
+// length plus 2, and leaving headroom there is cheaper than debugging a band
+// that advertises but cannot be found.
+#define NAME_MAX_LEN    20
+#define CFG_FILE        "/nigehban.cfg"
+
+// ------------------------------------------------------------ THE GATE ---
+//
+// Two locks, because they fail in different directions and this band is worth
+// locking twice.
+//
+//   BLE pairing (passkey)   The SoftDevice will not let anybody subscribe to a
+//                           notification or write a command until the link is
+//                           encrypted with MITM protection, and getting there
+//                           means typing six digits into Android's own pairing
+//                           dialog. This is real cryptography and it protects
+//                           everything on the wire.
+//
+//   The auth handshake      Encryption proves the phone paired ONCE. It does
+//                           not prove the phone should still be here: a bond
+//                           outlives an uninstall, a resale, a stolen handset.
+//                           So the band also stays mute until the app sends
+//                           {"c":"auth","pin":"..."} over that encrypted link,
+//                           and changing the PIN then locks out every phone
+//                           still holding a bond, without anybody having to go
+//                           near Android's Bluetooth settings.
+//
+// Until a connection clears BOTH, the band sends no events, obeys no commands,
+// keeps its SOS beacon flying, and does not tell the wearer it is linked.
+// Two windows, because two very different things are being waited on.
+//
+// LINK_SETTLE_MS covers pairing: a person reading six digits off a screen and
+// typing them into Android's dialog, which is slow and must not be rushed. It
+// is here so an idle unauthenticated connection cannot sit on the band's only
+// connection slot forever, keeping it off the air and unreachable by the phone
+// that actually owns it.
+//
+// AUTH_WINDOW_MS starts later and is much tighter: it begins when the phone
+// subscribes to notifications, by which point pairing is already done and the
+// handshake is one automatic round trip. Whichever deadline is sooner wins.
+#define LINK_SETTLE_MS  60000   // connect -> authenticated, generous
+#define AUTH_WINDOW_MS  8000    // subscribed -> authenticated, strict
+#define AUTH_MAX_TRIES  3       // wrong PIN this many times and the link goes
+
+// ---- and the limit that actually costs an attacker something --------------
+//
+// AUTH_MAX_TRIES above only ends a CONNECTION. On its own it is close to
+// worthless: reconnecting is free and unlimited, so three guesses per link is
+// really unlimited guesses, and a six-digit PIN falls to a patient script.
+//
+// So failures are also counted ACROSS connections, and past a threshold the
+// band stops answering at all for a while. The delay doubles-ish each time and
+// caps, which turns 10^6 guesses from an afternoon into geological time while
+// costing an owner who fat-fingers their PIN twice absolutely nothing.
+//
+// Five free attempts before any of it starts. That is deliberately generous:
+// the person most likely to get this wrong is the owner, typing from memory,
+// and the first thing a lockout must not do is punish them.
+//
+// DELIBERATELY NOT PERSISTED. The counter lives in RAM, so a power cycle
+// clears it -- and that is not the hole it looks like. Power-cycling this band
+// means holding it, and anybody holding it can hold the button through boot and
+// factory-reset the PIN outright. A flash write per wrong guess would buy
+// nothing against an attacker who already has the better option, and would
+// spend the flash's erase budget on it.
+//
+// SAFETY NOTE, because this is a safety device: while locked out the band
+// cannot link to a phone, so a press cannot reach the family over BLE. That is
+// the price of having a lock at all, and it is bounded three ways -- five free
+// tries, a fifteen-minute ceiling, and the button-through-boot reset, which
+// works during a lockout like any other time.
+#define AUTH_LOCKOUT_AT 5       // consecutive failures before any lockout
+static const uint32_t AUTH_LOCKOUT_MS[] = { 30000, 120000, 300000, 900000 };
+
+// Hold the button while the band boots, and keep holding for this long: name,
+// PIN and every bond go back to factory. It is the way out of a forgotten PIN,
+// and the only one -- which is why it takes physical possession of the band and
+// cannot be done over the air.
+#define FACTORY_RESET_HOLD_MS 5000
 
 #define PIN_BTN         D2
 #define PIN_MOTOR       D1
@@ -321,11 +431,100 @@
 #define FALL_REFRACTORY_MS    15000
 #define IMPACT_REFRACTORY_MS  10000
 
+// Forward declaration, and it has to be THIS high up now.
+//
+// The Arduino IDE injects its auto-generated prototypes just above the first
+// thing ctags calls a function -- which, since SecureUart::begin() appeared
+// below, may be the class rather than ledWrite(). buttonTick()'s generated
+// prototype takes a `Button&`, so if the injection point moves above the
+// declaration the sketch stops compiling for a reason that has nothing to do
+// with anything anybody edited. Declaring it before the class as well costs one
+// line and makes the injection point stop mattering. The second declaration
+// further down is kept deliberately; a repeat is legal and it is where somebody
+// reading the button engine will look for it.
+struct Button;
+
+// -------------------------------------------------- THE ENCRYPTED UART ---
+//
+// Stock BLEUart leaves both characteristics wide open -- its own source carries
+// the note "TODO enable encryption when bonding is enabled" -- so anybody in
+// range can subscribe to this band's notifications and write it commands. That
+// is the hole this subclass closes.
+//
+// It has to be a subclass rather than two setPermission() calls after
+// bleuart.begin(), because permissions are read by the SoftDevice at the moment
+// a characteristic is ADDED to the attribute table. Setting them afterwards
+// changes a struct nobody looks at again. So the body below is BLEUart::begin()
+// with two lines changed, and it has to be kept in step if the core is upgraded.
+//
+// The two permissions are not symmetrical, and neither is a typo:
+//
+//   _txd is notify-only, so its own value is never read -- but the library
+//   copies read_perm onto the CCCD's WRITE permission (BLECharacteristic.cpp,
+//   `cccd_md.write_perm = _attr_meta.read_perm`). The CCCD is what a phone
+//   writes to subscribe, so read_perm here is what forces pairing at exactly
+//   the moment the app asks for notifications.
+//
+//   _rxd is write-only, and write_perm means what it says.
+class SecureUart : public BLEUart {
+public:
+  SecureUart(uint16_t depth = BLE_UART_DEFAULT_FIFO_DEPTH) : BLEUart(depth) {}
+
+  virtual err_t begin(void) {
+    _rx_fifo = new Adafruit_FIFO(1);
+    _rx_fifo->begin(_rx_fifo_depth);
+
+    VERIFY_STATUS( BLEService::begin() );
+
+    uint16_t max_mtu = Bluefruit.getMaxMtu(BLE_GAP_ROLE_PERIPH);
+
+    _txd.setProperties(CHR_PROPS_NOTIFY);
+    _txd.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_NO_ACCESS);  // -> the CCCD
+    _txd.setMaxLen( max_mtu );
+    _txd.setUserDescriptor("TXD");
+    VERIFY_STATUS( _txd.begin() );
+
+    _rxd.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
+    _rxd.setWriteCallback(BLEUart::bleuart_rxd_cb, true);
+    _rxd.setPermission(SECMODE_NO_ACCESS, SECMODE_ENC_WITH_MITM);
+    _rxd.setMaxLen( max_mtu );
+    _rxd.setUserDescriptor("RXD");
+    VERIFY_STATUS( _rxd.begin() );
+
+    return ERROR_NONE;
+  }
+};
+
 // ------------------------------------------------------------------ STATE ---
-BLEUart bleuart;                // this IS the Nordic UART Service
+SecureUart bleuart;             // this IS the Nordic UART Service
 
 bool     gConnected    = false;
 bool     gWasConnected = false;
+
+// ---- who this band is, and who may talk to it ----------------------------
+// Both are loaded from /nigehban.cfg at boot and both are changeable from the
+// app. gName is what goes out in the scan response; gPin is both the pairing
+// passkey and the answer to {"c":"auth"}.
+char     gName[NAME_MAX_LEN + 1] = DEVICE_NAME;
+char     gPin[7]                 = DEFAULT_PAIR_PIN;
+
+// Per connection, and deliberately not persisted: proving yourself once is not
+// proving yourself forever, and a band that stayed authenticated across a
+// reconnect would be authenticated to whoever connected next.
+bool     gAuthed       = false;
+bool     gWasAuthed    = false;   // was the link that just died ever a real one
+uint8_t  gAuthTries    = 0;
+uint32_t gAuthDeadline = 0;       // 0 = nothing being waited on
+
+// The across-connections half of the limit. These two deliberately survive a
+// disconnect -- that is the entire point, see AUTH_LOCKOUT_AT -- and are
+// cleared only by a correct PIN or by power.
+uint8_t  gAuthFails    = 0;       // consecutive, since the last success
+uint32_t gLockedUntil  = 0;       // millis(); 0 = not locked out
+
+// Has setup() finished putting the radio on the air. Only applyName() reads it;
+// see the comment there for what goes wrong without it.
+bool     gAdvStarted   = false;
 
 bool     gSosBeacon    = false;   // is the advertisement crying SOS right now
 uint8_t  gSosSeq       = 0;       // bumped per press, so repeats are not deduped
@@ -348,6 +547,109 @@ String   gRxLine;                 // accumulates until '\n'
 struct Button;
 
 void ledWrite(bool on) { digitalWrite(LED_BUILTIN, on ? LOW : HIGH); }
+
+// ------------------------------------------------- NAME AND PIN, ON FLASH ---
+//
+// Two lines of text in LittleFS on the nRF52840's own internal flash:
+//
+//     Ayesha's band\n
+//     481923\n
+//
+// A text file rather than a packed struct: the whole thing is under 30 bytes,
+// it wants to be readable from a serial dump when a band is misbehaving, and a
+// struct would need a version field the first time a third setting appears.
+//
+// The flash region InternalFS uses survives a sketch upload, so a band keeps its
+// name and PIN across a re-flash. It does not survive InternalFS.begin() finding
+// a corrupt filesystem, which formats -- and that is the right trade, because a
+// band that comes back with the factory PIN can be recovered and a band that
+// will not boot cannot.
+
+/** Safe to put inside our hand-rolled JSON, and to advertise? */
+bool nameLegal(const String &n) {
+  if (n.length() == 0 || n.length() > NAME_MAX_LEN) return false;
+  for (uint16_t i = 0; i < n.length(); i++) {
+    char c = n[i];
+    // Printable ASCII only, minus the two characters jsonStr() cannot survive.
+    // That parser finds a value by scanning to the next quote, so a name with
+    // one in it would truncate every line this band ever sends.
+    if (c < 0x20 || c > 0x7E || c == '"' || c == '\\') return false;
+  }
+  return true;
+}
+
+bool pinLegal(const String &p) {
+  if (p.length() != 6) return false;
+  for (uint16_t i = 0; i < 6; i++) if (p[i] < '0' || p[i] > '9') return false;
+  return true;
+}
+
+bool usingDefaultPin() { return strcmp(gPin, PUBLISHED_PIN) == 0; }
+
+void configSave() {
+  InternalFS.remove(CFG_FILE);            // LittleFS appends to an open file
+  Adafruit_LittleFS_Namespace::File f(InternalFS);
+  if (!f.open(CFG_FILE, Adafruit_LittleFS_Namespace::FILE_O_WRITE)) {
+    Serial.println("{\"t\":\"log\",\"msg\":\"cfg write failed\"}");
+    return;
+  }
+  f.write((const uint8_t *) gName, strlen(gName)); f.write((const uint8_t *) "\n", 1);
+  f.write((const uint8_t *) gPin,  strlen(gPin));  f.write((const uint8_t *) "\n", 1);
+  f.close();
+}
+
+void configLoad() {
+  Adafruit_LittleFS_Namespace::File f(InternalFS);
+  if (!f.open(CFG_FILE, Adafruit_LittleFS_Namespace::FILE_O_READ)) return;  // factory
+
+  char buf[64] = {0};
+  int n = f.read((uint8_t *) buf, sizeof(buf) - 1);
+  f.close();
+  if (n <= 0) return;
+
+  String all(buf);
+  int nl = all.indexOf('\n');
+  if (nl < 0) return;
+  String name = all.substring(0, nl);
+  String pin  = all.substring(nl + 1);
+  name.trim();
+  pin.trim();
+
+  // Each field is taken only if it is still legal. A half-corrupt file leaves
+  // the other half at factory rather than losing the band's identity outright.
+  if (nameLegal(name)) name.toCharArray(gName, sizeof(gName));
+  if (pinLegal(pin))   pin.toCharArray(gPin, sizeof(gPin));
+}
+
+/**
+ * Put gName on the air.
+ *
+ * setName() alone changes only the GAP Device Name characteristic, which a
+ * scanning phone never reads -- it reads the scan response, and that is a
+ * snapshot taken when the payload was last built. So the response is rebuilt,
+ * and if the radio is actually advertising it is bounced, because the
+ * SoftDevice takes the payload at start(). While a link is up there is nothing
+ * to bounce and restartOnDisconnect(true) puts the new bytes up on the drop.
+ */
+void applyName() {
+  Bluefruit.setName(gName);
+  Bluefruit.ScanResponse.clearData();
+  Bluefruit.ScanResponse.addName();
+
+  // gAdvStarted keeps setup() out of this. The first call comes before the
+  // interval, the timeout and the manufacturer payload have been configured,
+  // and starting the radio there would put a half-built advertisement on the
+  // air -- setup() starts it properly a few lines later.
+  if (gAdvStarted && !gConnected) {
+    Bluefruit.Advertising.stop();
+    Bluefruit.Advertising.start(0);
+  }
+}
+
+/** Hand the SoftDevice the passkey it will demand at the next pairing. */
+void applyPin() {
+  Bluefruit.Security.setPIN(gPin);
+}
 
 // ------------------------------------------------------- FEEDBACK ENGINE ---
 // Non-blocking buzz/blink pattern player. Never use delay() in loop() (F4.3).
@@ -521,7 +823,12 @@ void linkLedTick() {
   // Linked: one brief flash every 5 s. Not linked: two flashes every 2 s.
   // Dark means neither -- a flat battery or a dead band, which a steady "on
   // means fine" indicator could never have distinguished from working.
-  if (gConnected) {
+  //
+  // gAuthed, not gConnected. The question this LED answers is "is my band
+  // linked RIGHT NOW", and a radio connection that has not proved who it is
+  // cannot carry an SOS anywhere -- so counting it would be the indicator
+  // telling a comfortable lie in exactly the situation it exists to expose.
+  if (gAuthed) {
     if (step == 0) { linkLedWrite(true);  phaseAt = now + LINK_LED_FLASH_MS;      step = 1; }
     else           { linkLedWrite(false); phaseAt = now + LINK_LED_PERIOD_UP_MS;  step = 0; }
     return;
@@ -589,7 +896,17 @@ uint8_t batteryPercent(uint16_t mv) {
 }
 
 // --------------------------------------------------------------- BLE TX ---
-void send(const String &json) {
+//
+// sendRaw() is the wire. send() is the wire plus the gate, and everything above
+// this line uses send() -- so a connection that has not answered {"c":"auth"}
+// hears nothing at all: no heartbeat, no battery, no SOS, no idea whether the
+// person wearing this band is in trouble. Only the handshake itself is allowed
+// to bypass it, and only to say "who are you" and "no".
+//
+// The serial mirror stays unconditional either way. It is the bench view, it
+// costs nothing, and losing it whenever a stranger happened to be connected
+// would make this the hardest thing in the firmware to debug.
+void sendRaw(const String &json) {
   Serial.println(json);                       // always mirror to USB serial
   if (!gConnected) return;
   String line = json + "\n";
@@ -635,6 +952,11 @@ void send(const String &json) {
     if (bleuart.write(p, n)) { p += n; left -= n; }
     else delay(2);                            // pool empty -- let it drain
   }
+}
+
+void send(const String &json) {
+  if (!gAuthed) { Serial.println(json); return; }
+  sendRaw(json);
 }
 
 void sendEvent(const char *type, const String &extra = "") {
@@ -811,7 +1133,11 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
       // early with no link, so the wearer was told their "I'm fine" had gone
       // when nothing had left the wrist. The phone answers now; see below.
       sendEvent("checkin_ack", meta);
-      if (gConnected) expectOutcome(OUTCOME_ACK); else outcomeFailed();
+      // gAuthed, not gConnected: send() drops the line unless the phone has
+      // proved itself, so an unauthenticated connection is a link that cannot
+      // carry this. Waiting four seconds for an outcome nobody is coming to
+      // deliver would only delay telling the wearer it did not go.
+      if (gAuthed) expectOutcome(OUTCOME_ACK); else outcomeFailed();
       return;
     }
     // Two taps is SOS -- and so are three, four, five. A frightened person
@@ -820,7 +1146,7 @@ void onGesture(uint8_t btn, const char *gesture, uint8_t n) {
     // 4 taps for `armed` in v2; that needs its own affordance, because folding
     // it in would let an over-tapped SOS arm anti-snatch instead of calling
     // for help.
-    if (gConnected) {
+    if (gAuthed) {
       // Deliberately NO confirmation buzz here.
       //
       // This used to fire a four-pulse "sent" the instant the tap landed. The
@@ -1252,8 +1578,127 @@ int jsonInt(const String &s, const char *key, int dflt) {
   return s.substring(i).toInt();
 }
 
+// ------------------------------------------------------- THE HANDSHAKE ---
+//
+// Everything the band used to do the instant a connection came up now happens
+// here instead, because "a connection came up" and "my phone is here" stopped
+// being the same sentence the moment a PIN stood between them.
+//
+// That includes taking the SOS beacon down. An unauthenticated connection must
+// never silence a cry for help: the beacon is the path that exists precisely
+// because the app is not there, and a stranger's phone connecting -- or an
+// attacker's, deliberately -- would otherwise be enough to switch it off.
+/** Seconds left on a lockout, or 0 if there is not one. */
+uint32_t lockoutLeftS() {
+  if (gLockedUntil == 0) return 0;
+  uint32_t now = millis();
+  // Unsigned comparison, not (gLockedUntil - now) > 0, which is true forever.
+  if ((int32_t)(gLockedUntil - now) <= 0) { gLockedUntil = 0; return 0; }
+  return (gLockedUntil - now + 999) / 1000;
+}
+
+/**
+ * A wrong PIN. Count it, and decide whether the band goes quiet for a while.
+ *
+ * The escalation starts only after AUTH_LOCKOUT_AT, so the owner's first few
+ * fumbles cost nothing. After that each further failure moves one step up
+ * AUTH_LOCKOUT_MS and stops at the last entry -- fifteen minutes, forever, which
+ * is enough to make a search of 10^6 PINs meaningless without ever bricking a
+ * band somebody needs.
+ */
+void noteAuthFailure() {
+  if (gAuthFails < 255) gAuthFails++;
+  if (gAuthFails < AUTH_LOCKOUT_AT) return;
+
+  uint8_t steps = sizeof(AUTH_LOCKOUT_MS) / sizeof(AUTH_LOCKOUT_MS[0]);
+  uint8_t idx   = gAuthFails - AUTH_LOCKOUT_AT;
+  if (idx >= steps) idx = steps - 1;
+
+  gLockedUntil = millis() + AUTH_LOCKOUT_MS[idx];
+  if (gLockedUntil == 0) gLockedUntil = 1;      // millis() wrap: 0 means "none"
+
+  // Felt, not just reported. If this band is in a drawer being guessed at, the
+  // buzz is the only thing that can tell its owner across a room; and if the
+  // owner is the one guessing, it says "stop typing" better than a screen can.
+  feedback(2, 700, 300);
+  Serial.println("{\"t\":\"log\",\"msg\":\"auth locked out\",\"fails\":"
+                 + String(gAuthFails) + ",\"for_s\":"
+                 + String(AUTH_LOCKOUT_MS[idx] / 1000) + "}");
+}
+
+void authOk() {
+  gAuthed       = true;
+  gWasAuthed    = true;
+  gAuthTries    = 0;
+  gAuthDeadline = 0;
+  // The right PIN clears the whole history. A lockout is there to stop a search,
+  // and a search that has just succeeded is over.
+  gAuthFails    = 0;
+  gLockedUntil  = 0;
+
+  // The name goes back with the acknowledgement so the app can label the band
+  // without a second round trip, and so a rename done from another phone shows
+  // up on this one the next time it links.
+  sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_ok\",\"name\":\"") + gName
+          + "\",\"defpin\":" + String(usingDefaultPin() ? 1 : 0) + "}");
+
+  if (gSosBeacon) setSosBeacon(false);
+
+  feedback(1, 200, 100);
+  sendEvent("link_up");
+}
+
 void handleCommand(const String &line) {
   String c = jsonStr(line, "c");
+
+  // ---- the gate ----------------------------------------------------------
+  //
+  // One command exists before authentication and it is the one that ends it.
+  // Nothing else is answered, not even `ping`: a band that answers anything is
+  // a band that confirms it is here, and the whole point of the silence is
+  // that a device nobody can talk to is not worth standing next to.
+  if (!gAuthed) {
+    if (c != "auth") return;
+
+    // Locked out. Answered rather than ignored, and answered with the time,
+    // because "wait four minutes" and "this band is broken" need to look
+    // completely different to somebody holding a safety device. Guessing during
+    // a lockout costs nothing extra -- the counter is untouched here -- so
+    // waiting is always the winning move for an owner and never shortens
+    // anything for an attacker.
+    uint32_t wait = lockoutLeftS();
+    if (wait) {
+      sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_locked\",\"for_s\":")
+              + String(wait) + "}");
+      delay(50);                     // let it leave the radio before hanging up
+      Bluefruit.disconnect(Bluefruit.connHandle());
+      return;
+    }
+
+    if (jsonStr(line, "pin") == gPin) { authOk(); return; }
+
+    // Wrong. Say so -- the app has to be able to tell "bad PIN" from "band out
+    // of range", or it would sit retrying a link that will never come up and
+    // never ask the user for the one thing that would fix it.
+    noteAuthFailure();
+    gAuthTries++;
+    sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_bad\",\"left\":")
+            + String(AUTH_MAX_TRIES - gAuthTries) + ",\"locked_s\":"
+            + String(lockoutLeftS()) + "}");
+    if (gAuthTries >= AUTH_MAX_TRIES) {
+      Serial.println("{\"t\":\"log\",\"msg\":\"auth failed, hanging up\"}");
+      // Let the refusal actually leave the radio first. sendRaw() only queues
+      // the notification with the SoftDevice, and tearing the link down in the
+      // same breath drops it -- which would leave the app showing "lost the
+      // band" for a wrong PIN, sending somebody to look for a wristband that is
+      // right there and merely saying no. delay() yields to the scheduler on
+      // this core, which is what lets the queue drain.
+      delay(50);
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    return;
+  }
+
   if (c == "checkin_req") {                  // phone asks "are you OK?"
     gAwaitingAck = true;
     gAckDeadline = millis() + (uint32_t)jsonInt(line, "window", 60) * 1000UL;
@@ -1289,6 +1734,100 @@ void handleCommand(const String &line) {
     sendEvent("battery", "\"forced\":1");
   } else if (c == "ping") {
     sendEvent("pong");
+
+  // ---- identity: the name, the PIN, and who is still bonded ----------------
+  } else if (c == "auth") {
+    // Already through the gate. Answered anyway, and without the buzz, because
+    // the app re-runs its handshake whenever it ADOPTS a link it did not open
+    // (Android rebuilt the activity, the process came back). That is not a new
+    // link and must not feel like one -- but it does still need the name.
+    sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_ok\",\"name\":\"") + gName
+            + "\",\"defpin\":" + String(usingDefaultPin() ? 1 : 0) + "}");
+
+  } else if (c == "cfg") {
+    // The PIN is never sent back, to anyone, ever. `defpin` is the one thing
+    // the app needs to know about it: whether it is still the factory value,
+    // so it can say so on screen instead of quietly leaving a band open.
+    sendEvent("cfg", String("\"name\":\"") + gName + "\",\"defpin\":"
+              + String(usingDefaultPin() ? 1 : 0));
+
+  } else if (c == "setname") {
+    String n = jsonStr(line, "name");
+    n.trim();
+    if (!nameLegal(n)) {
+      sendEvent("name_rejected", "\"why\":\"1-" + String(NAME_MAX_LEN)
+                + " plain characters, no quotes\"");
+    } else {
+      n.toCharArray(gName, sizeof(gName));
+      configSave();
+      applyName();
+      sendEvent("name_set", String("\"name\":\"") + gName + "\"");
+      feedback(2, 90, 90);            // felt, so a rename is not a silent act
+    }
+
+  } else if (c == "setpin") {
+    String np = jsonStr(line, "pin");
+    String op = jsonStr(line, "old");
+
+    // The CURRENT PIN, typed again, before the new one is accepted.
+    //
+    // Being authenticated is not enough and never was. A link stays
+    // authenticated for as long as it stays up, so anybody who picks up an
+    // unlocked phone with a live band on it could set a new PIN, and would then
+    // own the band: the wearer's other phones stop authenticating, and the
+    // wearer does not know the number that would fix it. That is a lockout
+    // performed by a stranger with no knowledge of anything, which is exactly
+    // what a PIN is supposed to prevent.
+    //
+    // So this asks for something only the owner knows, rather than something
+    // the phone happens to be holding -- and the app is required to make the
+    // person type it rather than filling it in from the keystore, or this check
+    // would be theatre. Wrong answers count towards the same lockout as a
+    // failed auth: it is the same secret being guessed at.
+    if (!pinLegal(op) || op != gPin) {
+      noteAuthFailure();
+      sendEvent("pin_rejected", "\"why\":\"the current PIN is wrong\",\"locked_s\":"
+                + String(lockoutLeftS()));
+    } else if (!pinLegal(np)) {
+      sendEvent("pin_rejected", "\"why\":\"six digits\"");
+    } else if (np == op) {
+      sendEvent("pin_rejected", "\"why\":\"that is already the PIN\"");
+    } else {
+      // Getting the old one right is itself proof of the owner, so it clears
+      // any lockout the way a successful auth does. Otherwise somebody who
+      // fumbled their way into a fifteen-minute wait could not use the one
+      // screen that proves who they are.
+      gAuthFails   = 0;
+      gLockedUntil = 0;
+      np.toCharArray(gPin, sizeof(gPin));
+      configSave();
+      applyPin();
+      // The bonds are deliberately LEFT ALONE.
+      //
+      // A new passkey only governs the NEXT pairing; the phones already bonded
+      // keep working keys, so clearing bonds here would break the link this
+      // command arrived on and every other phone in the family with it -- and
+      // Android would then refuse to reconnect with a stale bond of its own,
+      // which takes a trip into Bluetooth settings to clear. Nobody should
+      // have to do that to change a PIN.
+      //
+      // Access is still revoked, because the second lock does it: every one of
+      // those phones now fails {"c":"auth"} and gets hung up on until somebody
+      // types the new six digits into the app. That is the whole reason for
+      // having a second lock. Use {"c":"unpair"} to drop the keys as well.
+      sendEvent("pin_set");
+      feedback(2, 90, 90);
+    }
+
+  } else if (c == "unpair") {
+    // Forget every phone that has ever paired. The heavy option, for a band
+    // being handed on or one that bonded to a handset that no longer exists.
+    // The current link goes with it -- its keys were in there too.
+    sendEvent("unpaired");
+    feedback(3, 120, 100);
+    delay(50);                       // same reason as the auth refusal above
+    Bluefruit.Periph.clearBonds();
+    Bluefruit.disconnect(Bluefruit.connHandle());
 #if HAS_IMU
   // ---- the calibration stream ----------------------------------------------
   //
@@ -1370,10 +1909,12 @@ void connect_callback(uint16_t conn_handle) {
   BLEConnection *c = Bluefruit.Connection(conn_handle);
   if (c) c->requestConnectionParameter(24, 48);
 
-  // The phone is here, so the slow channel is no longer the only one. Clearing
-  // it now also stops the same press being delivered twice -- once as a beacon
-  // wake, and once over the link that wake caused.
-  if (gSosBeacon) setSosBeacon(false);
+  // A connection is not a phone yet. Everything that used to happen here --
+  // taking the SOS beacon down, the buzz, link_up -- moved to authOk(), which
+  // is the first moment anything is actually known about who this is.
+  gAuthed       = false;
+  gAuthTries    = 0;
+  gAuthDeadline = millis() + LINK_SETTLE_MS;
 
   // The negotiated MTU, on the wire, at the one moment it is knowable. 23 means
   // lines will be chunked and this build is missing configPrphBandwidth; 247
@@ -1386,7 +1927,31 @@ void connect_callback(uint16_t conn_handle) {
 void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void) conn_handle; (void) reason;
   gConnected = false;
+  // Not persisted, and cleared here rather than at the next connect, so there
+  // is no window in which a fresh connection inherits the last one's standing.
+  gAuthed       = false;
+  gAuthTries    = 0;
+  gAuthDeadline = 0;
   // restartOnDisconnect(true) re-advertises for us.
+}
+
+/**
+ * The phone subscribed to notifications.
+ *
+ * On this firmware that is a bigger event than it sounds: TXD's CCCD needs an
+ * encrypted, MITM-protected link, so reaching this callback at all means the
+ * six digits were accepted and the pairing went through. It is also the first
+ * instant a notification has anywhere to go -- asking for the PIN from
+ * connect_callback() would write into a subscription that does not exist yet.
+ */
+void notify_callback(uint16_t conn_handle, bool enabled) {
+  (void) conn_handle;
+  if (!enabled || gAuthed) return;
+
+  uint32_t strict = millis() + AUTH_WINDOW_MS;
+  if (gAuthDeadline == 0 || strict < gAuthDeadline) gAuthDeadline = strict;
+
+  sendRaw("{\"t\":\"evt\",\"e\":\"need_auth\"}");
 }
 
 
@@ -1407,6 +1972,36 @@ void setup() {
   batteryBegin();
   gBattery = batteryPercent(batteryMilliVolts());
 
+  // ---- who this band is ---------------------------------------------------
+  InternalFS.begin();
+  configLoad();
+
+  // ---- the way out of a forgotten PIN -------------------------------------
+  //
+  // Held through boot and kept held. It has to be a gesture no wrist can make
+  // by accident and no radio can make at all: the band must be in somebody's
+  // hand, connected to nothing, for five seconds. Anything reachable over the
+  // air would be a lock with its own key taped to it.
+  //
+  // delay() is fine here and nowhere else in this file -- loop() has not
+  // started, there is no pattern to play and no link to service.
+  bool wipe = false;
+  if (digitalRead(PIN_BTN) == LOW) {
+    uint32_t held = millis();
+    while (digitalRead(PIN_BTN) == LOW && millis() - held < FACTORY_RESET_HOLD_MS) {
+      ledWrite(((millis() / 150) & 1) != 0);      // fast blink: keep holding
+      delay(10);
+    }
+    wipe = (digitalRead(PIN_BTN) == LOW);
+    ledWrite(false);
+  }
+  if (wipe) {
+    InternalFS.format();
+    snprintf(gName, sizeof(gName), "%s", DEVICE_NAME);
+    snprintf(gPin,  sizeof(gPin),  "%s", DEFAULT_PAIR_PIN);
+    Serial.println("{\"t\":\"log\",\"msg\":\"factory reset: name and PIN back to default\"}");
+  }
+
   // MUST come before begin() -- it sizes the SoftDevice's connection config,
   // which is fixed once the stack is up.
   //
@@ -1423,28 +2018,47 @@ void setup() {
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
 
   Bluefruit.begin();
-  Bluefruit.setName(DEVICE_NAME);
   Bluefruit.setTxPower(4);
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
 
+  // The passkey Android will ask for. It must be set before anything can pair,
+  // and it is re-set from here on every boot because the SoftDevice does not
+  // remember it -- gPin does, on flash.
+  applyPin();
+  if (wipe) Bluefruit.Periph.clearBonds();     // a reset forgets phones too
+
   bleuart.begin();
+  // Fired when the phone subscribes, which on this build means pairing already
+  // succeeded. That is where the band asks for the PIN.
+  bleuart.setNotifyCallback(notify_callback);
 
   // The name goes in the scan response: the 128-bit NUS UUID costs 18 of the
-  // advertising packet's 31 bytes and DEVICE_NAME will not fit alongside it.
-  Bluefruit.ScanResponse.addName();
+  // advertising packet's 31 bytes and a name will not fit alongside it.
+  // applyName() sets the GAP name and builds the response together, so the two
+  // can never disagree about what this band is called.
+  applyName();
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);   // 20 ms fast / 152.5 ms slow
   Bluefruit.Advertising.setFastTimeout(30);
   buildAdvertising();
   Bluefruit.Advertising.start(0);               // 0 = advertise forever
+  gAdvStarted = true;                           // renames may bounce it now
 
 #if HAS_IMU
   imuBegin();
 #endif
 
   feedback(2, 120, 100);
-  Serial.println("{\"t\":\"log\",\"msg\":\"Nigehban band up, advertising\"}");
+  Serial.println(String("{\"t\":\"log\",\"msg\":\"Nigehban band up, advertising\",\"name\":\"")
+                 + gName + "\",\"defpin\":" + String(usingDefaultPin() ? 1 : 0) + "}");
+  // Printed once, on the bench, over USB -- never over the radio. This is how
+  // you find out what a band's PIN is when you are holding it and have
+  // forgotten, without having to reset it.
+  if (usingDefaultPin()) {
+    Serial.println("{\"t\":\"log\",\"msg\":\"PIN is the one published in the repo "
+                   "(123456) -- change it from the app\"}");
+  }
 }
 
 // -------------------------------------------------------------- LOOP ---
@@ -1488,12 +2102,29 @@ void loop() {
     gRxLine = "";
   }
 
+  // The PIN never came, or never came right. Hang up and go back to
+  // advertising, because the band's one connection slot is occupied by
+  // something that cannot help the person wearing it -- and while it is
+  // occupied, the phone that can is locked out.
+  if (gConnected && !gAuthed && gAuthDeadline != 0 && now > gAuthDeadline) {
+    gAuthDeadline = 0;
+    Serial.println("{\"t\":\"log\",\"msg\":\"auth window expired, hanging up\"}");
+    Bluefruit.disconnect(Bluefruit.connHandle());
+  }
+
   // connection edges
   if (gConnected != gWasConnected) {
     gWasConnected = gConnected;
     if (gConnected) {
-      feedback(1, 200, 100);
-      sendEvent("link_up");
+      // Nothing is announced and nothing is felt. The wearer is not linked to
+      // anything yet -- see authOk(), which owns the buzz and the link_up now.
+      Serial.println("{\"t\":\"log\",\"msg\":\"connected, awaiting auth\"}");
+    } else if (!gWasAuthed) {
+      // A connection that never proved itself, now gone. The wearer was never
+      // linked, so there is nothing to tell them about it going away -- and
+      // buzzing here would let anybody in range make this band twitch on their
+      // wrist just by connecting to it and walking off.
+      Serial.println("{\"t\":\"log\",\"msg\":\"unauthenticated link gone\"}");
     } else if (gOutcomeDueAt != 0) {
       // The link died while we were waiting to hear whether the press got out.
       // It did not, and there is no longer anything that could tell us
@@ -1512,6 +2143,10 @@ void loop() {
       feedback(2, 80, 80);
       Serial.println("{\"t\":\"log\",\"msg\":\"link down, advertising again\"}");
     }
+    // Consumed, not cleared in the callback: this edge is the only reader, and
+    // clearing it in disconnect_callback() would race loop() and turn every
+    // real link-down buzz into silence.
+    if (!gConnected) gWasAuthed = false;
   }
 
   // The SOS flag comes down on its own after SOS_BEACON_MS.

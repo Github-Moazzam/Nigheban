@@ -1,5 +1,6 @@
 {
-  "device_name": "Nigehban-01",
+  "device_name": "",
+  "band_pin": "123456",
   "user_name": "Ali",
   "checkin_interval_s": 120,
   "checkin_window_s": 45,

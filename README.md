@@ -162,6 +162,20 @@ eas build -p android --profile development
 Install the resulting APK on the ward's phone. The app detects which environment
 it is in and switches on its own.
 
+> **The band is locked.** It pairs with a six-digit passkey and then asks for
+> the same six digits again over the encrypted link before it will say anything
+> at all. A freshly flashed band uses the factory PIN in `DEFAULT_PAIR_PIN` at
+> the top of the sketch — change it there before flashing, or from the app on
+> first link. The wearer can also rename the band, and the new name goes out in
+> the advertisement, so Android and nRF Connect follow it too.
+> [docs/BAND_PIN_AND_NAME.md](docs/BAND_PIN_AND_NAME.md) has the protocol, the
+> two-lock reasoning, and the button-through-boot way out of a forgotten PIN.
+
+> **Upgrading a band from older firmware: forget it in Android's Bluetooth
+> settings first.** The old build needed no pairing and this one does; a phone
+> reconnecting with a stale bond fails encryption, and no app can clear an
+> Android bond for you.
+
 > The band accepts one BLE connection at a time. Close `nigehban_hub.py` before
 > the phone will find it. The same applies to nRF Connect, and to the app's own
 > previous run — a connected band is not advertising, so nothing else can see
@@ -341,6 +355,15 @@ never in the repo.
 `config.json` ships with placeholder contacts and empty API keys. If you fill in
 real phone numbers or a Telegram/CallMeBot/DashScope key, take it out of version
 control first.
+
+**The band will not talk to a phone that cannot prove itself.** Its UART
+characteristics require an encrypted, MITM-protected link, so connecting means
+pairing with a six-digit passkey — and then the firmware asks for the same six
+digits again over that link before it sends a single event or obeys a single
+command. The second lock is what makes changing the PIN revoke a phone that is
+already bonded, which the first cannot do on its own. Full reasoning, and an
+honest note on what legacy passkey pairing does not protect against, in
+[docs/BAND_PIN_AND_NAME.md](docs/BAND_PIN_AND_NAME.md).
 
 **Pairing takes two people.** Adding someone needs both of you to act: you make
 a pairing code that lives ten minutes and works once, or you ask by their

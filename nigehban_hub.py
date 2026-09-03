@@ -49,6 +49,15 @@ try:
 except ImportError:
     requests = None
 
+# Replies to the identity commands. They ride the same wire as an SOS and must
+# not reach the risk engine -- see docs/BAND_PIN_AND_NAME.md.
+IDENTITY_EVENTS = {
+    "need_auth", "auth_ok", "auth_bad",
+    "name_set", "name_rejected",
+    "pin_set", "pin_rejected",
+    "cfg", "unpaired",
+}
+
 NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # we write here
 NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # we subscribe here
@@ -63,7 +72,16 @@ BRIDGE     = None   # set in amain(); the phones' WebSocket server
 # ----------------------------------------------------------------- config ---
 @dataclass
 class Config:
-    device_name: str = "Nigehban-01"
+    # A LABEL, not a filter. The band's name is whatever its owner set it to,
+    # so matching on it stopped being possible -- the scan below looks for the
+    # Nordic UART Service UUID instead, which no other device in the room
+    # advertises. Set `device_name` only if two bands are in range and you need
+    # to say which; leave it empty to take the first one found.
+    device_name: str = ""
+    # The band's six-digit PIN. It pairs with this AND then asks for it again
+    # over the encrypted link -- see docs/BAND_PIN_AND_NAME.md. Empty means the
+    # firmware default, which is what a freshly flashed band is running.
+    band_pin: str = "123456"
     user_name: str = "Ali"
 
     checkin_interval_s: int = 120        # demo value; real default 30-60 min
@@ -453,11 +471,23 @@ class BleLink:
         asyncio.create_task(ticker(guardian))
         asyncio.create_task(keyboard(guardian, self.write))
 
+        want_name = (self.cfg.device_name or "").strip()
+
+        def matches(d, ad):
+            # The service UUID is the identity: it is in the advertising packet
+            # and the band cannot change it. The name is in the scan response,
+            # is user-settable, and is only consulted when the config names a
+            # specific band because more than one is in range.
+            uuids = [u.lower() for u in (ad.service_uuids or [])]
+            if NUS_SERVICE.lower() not in uuids:
+                return False
+            return (not want_name) or (d.name or "") == want_name
+
         while True:
-            log("ble", f"scanning for '{self.cfg.device_name}' ...")
+            log("ble", "scanning for a Nigehban band"
+                       + (f" named '{want_name}'" if want_name else "") + " ...")
             try:
-                dev = await BleakScanner.find_device_by_filter(
-                    lambda d, ad: (d.name or "") == self.cfg.device_name, timeout=15)
+                dev = await BleakScanner.find_device_by_filter(matches, timeout=15)
             except Exception as e:
                 # Adapter switched off or unplugged mid-run. Deliberately do NOT call
                 # on_link(False) here -- the disconnect path already started the grace
@@ -478,7 +508,18 @@ class BleLink:
             try:
                 async with BleakClient(dev, disconnected_callback=on_disconnect) as client:
                     self.client = client
-                    await guardian.on_link(True)
+
+                    # The band's characteristics need an encrypted, MITM-protected
+                    # link. On Windows and BlueZ the OS pairs on first access and
+                    # prompts for the passkey through its own UI; asking explicitly
+                    # first just makes the prompt happen at a predictable moment.
+                    # Failure is not fatal -- an already-bonded adapter raises here
+                    # on some backends, and start_notify below is the real test.
+                    try:
+                        await client.pair()
+                    except Exception as e:
+                        log("ble", f"pair() said {e.__class__.__name__}: "
+                                   "continuing (already bonded is normal)")
 
                     def handler(_, data: bytearray):
                         self.buf += data.decode(errors="ignore")
@@ -491,10 +532,33 @@ class BleLink:
                                 msg = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            if msg.get("t") == "evt":
-                                loop.create_task(guardian.on_event(msg))
+                            if msg.get("t") != "evt":
+                                continue
+                            # The identity handshake is a conversation with the
+                            # band, not something that happened to the wearer.
+                            # Journalling an auth_ok as a band event and letting
+                            # the risk engine see it would be noise at best.
+                            ev = msg.get("e", "")
+                            if ev in IDENTITY_EVENTS:
+                                log("ble", f"{ev} "
+                                    + json.dumps({k: v for k, v in msg.items()
+                                                  if k in ("name", "defpin", "why", "left")}))
+                                if ev == "auth_bad":
+                                    log("ble", "the band refused this PIN -- set "
+                                               "`band_pin` in config.json")
+                                continue
+                            loop.create_task(guardian.on_event(msg))
 
                     await client.start_notify(NUS_TX, handler)
+
+                    # Lock 2. Until this lands the band sends nothing and obeys
+                    # nothing, so on_link(True) waits for it -- announcing a live
+                    # band before it has let us in would start the guardian's
+                    # clock on a link that is about to be hung up.
+                    pin = (self.cfg.band_pin or "").strip()
+                    await self.write({"c": "auth", "pin": pin})
+                    await guardian.on_link(True)
+
                     while client.is_connected:
                         await asyncio.sleep(1)
             except Exception as e:
