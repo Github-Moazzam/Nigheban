@@ -25,6 +25,13 @@ BUG-010 was reported after that pass and is open. It is the reason the pass
 above could read green on BUG-002 while the band still fails to come back on
 its own: the device testing was done with the screen on.
 
+**BUG-011 was fixed on `watch-lost-fix` (PR #34, 2 Sep 2026)** — and not by the
+one-line `UPDATE` its entry planned. The whole watchdog was rewritten from a
+reading into a transition, with the rule lifted into its own module and two
+migrations behind it. Worth reading the entry for that reason rather than the
+usual one: the planned fix would have closed the reported symptom and left the
+class of defect underneath it in place.
+
 BUG-017 was fixed on `fix/stop-push-after-signout`. Its server half is verified
 against the real database — the handset provably stops being a delivery target,
 and provably becomes one again on the next sign-in. Its app half has not been
@@ -39,9 +46,10 @@ back the moment the feature does. The decision, the cost and the order things
 have to be done in to turn it back on are in
 [BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md).
 
-Two things not to misread from that. **BUG-011 is not stale** — its cause is
-server-side, the switch only removed the reported reproduction, and it should
-still be fixed. And **BUG-010 gets worse, not better**: its severity note used
+Two things not to misread from that. **BUG-011 was not stale** — its cause was
+server-side, the switch only removed the reported reproduction, and it has
+since been fixed on its own merits (see the entry). And **BUG-010 gets worse,
+not better**: its severity note used
 to soften itself by pointing at the beacon as the emergency path's floor, and
 that floor is gone.
 
@@ -49,7 +57,7 @@ that floor is gone.
 
 ## Summary
 
-**18 filed — 8 fixed, 1 partial, 9 open.** Three of the open ones (012, 013,
+**19 filed — 9 fixed, 1 partial, 9 open.** Three of the open ones (012, 013,
 014) and half of a fourth (018) are **stale**: still in the code, no longer
 reachable, because the feature that reached them was switched off. Titles only;
 the entry below each row carries the symptom, the cause and the reasoning.
@@ -66,7 +74,7 @@ the entry below each row carries the symptom, the cause and the reasoning.
 | 008 | Responders are lost if the app was closed when they answered | Medium | ✅ Fixed — **not device-verified** |
 | 009 | One SOS produces 2–3 notifications while the app is open | Medium | ✅ Fixed · device-verified — `presentAlarm` finding still open |
 | 010 | The band only reconnects while the screen is on | High — **raised**, see entry | ⬜ Open |
-| 011 | Every SOS from a killed app also raises a false `watch_lost` | High | ⬜ Open — repro removed, cause not |
+| 011 | Every SOS from a killed app also raises a false `watch_lost` | High | ✅ Fixed on `watch-lost-fix` · device-verified |
 | 012 | Any band's SOS beacon fires on every Nigehban phone in range | Critical | 💤 Stale — beacon wake switched off |
 | 013 | A stranger's press silently discards your own band's SOS | Critical | 💤 Stale — beacon wake switched off |
 | 014 | A band reboot can discard the next real press | High | 💤 Stale — beacon wake switched off |
@@ -74,6 +82,7 @@ the entry below each row carries the symptom, the cause and the reasoning.
 | 016 | Advertising fields fail silently when they no longer fit | Low now, High on the next field | ⬜ Open · latent |
 | 017 | Sign-out leaves the handset receiving the old account's alerts | High | ✅ Fixed — **untested in the app** |
 | 018 | Beacon wake opens the app for an SOS — and other apps on one phone | Low · one handset | 💤 Stale in the beacon · ⬜ open in `nigehban-alarm` |
+| 019 | The band reports a hard impact and the phone silently discards it | High | ⬜ Open |
 
 **Key:** ✅ fixed · 🟨 partially fixed · ⬜ open · 🟦 deferred by decision ·
 💤 **stale** — the defect is still in the code, but the feature that reached it
@@ -100,6 +109,13 @@ side is now proven against the real database; its app side has not been run.
 alarm module appears to be missing or throwing on the test device, which is
 why the fallback notification was posting at all.
 
+**011** is the counter-example, and a useful one: it is fixed, covered by
+`tests/test_watch_lost_transition.py`, **and** watched on a phone. What it
+changed is *when a family is woken up*, where both directions of being wrong
+are expensive and neither shows up in the UI of the phone that causes it — so
+the unit tests were never going to be enough on their own, and were not treated
+as though they were.
+
 The open list splits into three groups. The beacon cluster — **012**, **013**,
 **014**, **016** — is one branch, `fix/beacon-identity-and-dedup`, and two of
 those are Critical; three of the four are now stale, and that branch has become
@@ -107,15 +123,16 @@ the *precondition for turning the feature back on* rather than a fix to
 schedule. The background-timer cluster — **010** then **015** — is strictly
 ordered, because 015 cannot work until 010 has replaced the JS timer, and it is
 now the only thing standing between a wearer and a dead band on an OEM that
-kills the app. The rest — **003**, **004**, **011** — stand alone. **018** is
+kills the app. The rest — **003** and **004** — stand alone. **018** is
 half stale and half live, and the live half is in a different module.
 
 **What to do next, given the switch-off.** BUG-010 is first, and by some
 distance: it was already the highest-value item, and removing the beacon took
-away the one thing that made its severity note read tolerably. BUG-011 is next
-and is cheap — one line in one `UPDATE`, on the server, entirely independent of
-any of this. The beacon cluster comes back when, and only when, somebody is
-ready to reflash every band in the field.
+away the one thing that made its severity note read tolerably. The cheap
+server-side item that used to sit behind it — BUG-011 — is done and verified on
+a phone, so nothing stands between here and BUG-010 at all. The beacon cluster
+comes back when, and only when, somebody is ready to reflash every band in the
+field.
 
 *(File order note: BUG-010 was written up after BUG-016 and physically sits at
 the end of the file, ahead of BUG-017 and BUG-018. The numbering above is
@@ -608,13 +625,21 @@ tidiness is the wrong direction on a safety device.
 
 ## BUG-011 — Every SOS from a killed app also raises a false `watch_lost`
 
-**Status:** OPEN — **still open, and deliberately not marked stale.** The beacon
-wake being switched off on 1 Sep 2026
-([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)) removed the *reproduction*
-below, because an SOS can no longer be raised from a killed app at all. It
-removed nothing of the cause. See "Why this is not stale" at the end.
+**Status:** FIXED on `watch-lost-fix` (PR #34, 2 Sep 2026) — **device-verified.**
+Not by the one-line `UPDATE` planned below: the watchdog was rewritten from a
+reading into a transition, and the arming path now stamps liveness as part of
+that. See "Fix" at the end.
+
+*(It was deliberately never marked stale. The beacon wake being switched off on
+1 Sep 2026 ([BAND_WAKE_DISABLED.md](BAND_WAKE_DISABLED.md)) removed the
+reproduction below — an SOS could no longer be raised from a killed app at all
+— and removed nothing of the cause. "Why this was not stale" at the end is the
+reasoning that kept it on the list, and it is what turned out to be right.)*
 **Severity:** High — a contradictory alert lands on the family beside a real emergency
-**Area:** [server/nigehban_server.py](../server/nigehban_server.py)
+**Area:** [server/nigehban_server.py](../server/nigehban_server.py) ·
+[server/watch_lost.py](../server/watch_lost.py) ·
+[006_watch_lost_transition.sql](../server/migrations/006_watch_lost_transition.sql) ·
+[007_watch_lost_grace.sql](../server/migrations/007_watch_lost_grace.sql)
 
 ### Symptom
 
@@ -678,20 +703,60 @@ server declines to count as proof.
 `watch_lost` appears. A clean run is not evidence the bug is gone, and this is
 why it must be closed at the server rather than by reordering the client.
 
-### Planned fix
+### Fix — what actually landed
 
-Branch `fix/false-watch-lost-on-sos-wake`. Stamp liveness in the same statement
-that arms the mode:
+Branch `watch-lost-fix` (PR #34), not the `fix/false-watch-lost-on-sos-wake`
+planned here. The one-line `UPDATE` below is in the tree — it is the third of
+three parts — but on its own it would have closed this reproduction and left
+the class of defect underneath it running.
 
-```python
-c.execute("UPDATE watch_state SET mode='sos', last_beat=%s, lost_notified=FALSE "
-          "WHERE user_id=%s", (now, u["id"]))
-```
+**1. The rule stopped being a query.** It lives in
+[server/watch_lost.py](../server/watch_lost.py) as a pure module now, and it
+says: page the family only on the **transition** out of a state worth
+protecting — the phone had a live link to a *physical* band, an alert was
+running, and *then* the link went away. The sweeper used to select rows whose
+columns happened to look bad at the moment it ran, which is a different
+question. That is the sentence that closes this bug generally: a row can arrive
+in the bad-looking state without anything having happened, and an SOS pressed
+after a quiet afternoon is exactly that.
 
-Worth settling at the same time whether *any* authenticated `/alert` should
-refresh `last_beat`. It is as strong a liveness signal as a heartbeat — the
-phone demonstrably reached the server — and that holds even for a queued alert
-flushed late, where the event is old but the connection is current.
+**2. The row records what was witnessed, not what is true now**
+([migration 006](../server/migrations/006_watch_lost_transition.sql)). `mode`
+is server-owned and mutated by `/alert` and `/watch/high_alert` long after the
+last beat, so reading it at sweep time answered *"is she armed now"* rather
+than *"was she armed when she went quiet"*. The beat now writes down
+`beat_armed` and `beat_band_link`, and the loss is judged against those.
+
+**3. Arming stamps liveness** —
+[nigehban_server.py:1370-1391](../server/nigehban_server.py#L1370-L1391),
+through `WL.on_arm`. `last_beat` moves to now, `lost_notified` and the flap
+window are cleared, and the witnessed band link is inherited **only** if the
+last beat is recent enough to still be believed. So an alert raised after the
+link was already gone cannot resurrect it.
+
+**And a drop now starts a clock rather than an alert**
+([migration 007](../server/migrations/007_watch_lost_grace.sql)). `link_lost_at`
+is when the band went away; the sweeper pages 120 s later, and a heartbeat
+reporting the band back clears the column and the whole thing is forgotten. In
+the row rather than in a timer, so restarting the server cannot silently cancel
+a countdown somebody's safety is resting on. This is not part of BUG-011 — it
+answers the flap that fixing 011 exposed — but it ships in the same change and
+is why the alert is now two minutes late by design.
+
+### Verification
+
+[tests/test_watch_lost_transition.py](../tests/test_watch_lost_transition.py)
+covers the rule at L0, and it was then run on phones — which is the pass that
+counts here, because a rule deciding when to wake a family cannot be proved by
+its own unit tests.
+
+### Still open from this entry
+
+**Whether *any* authenticated `/alert` should refresh `last_beat`.** The stamp
+is scoped to `b.kind == "sos"`. Every other kind reaches the server, proves the
+phone is alive, and refreshes nothing. That is as strong a liveness signal as a
+heartbeat, and it holds even for a queued alert flushed late, where the event is
+old but the connection is current.
 
 ### Rejected
 
@@ -1688,3 +1753,169 @@ work that closes it.
   sides, and outcome 3 above fixes both with one piece of work.
 - **BUG-012** is a foreign band waking this phone. Here it is this phone's own
   band, doing exactly what it was told to do.
+
+---
+
+## BUG-019 — A pedestrian struck by a car raises nothing, because the impact alert requires the *wearer* to have been travelling
+
+**Status:** OPEN
+**Severity:** High — it excludes one of the accidents this product most exists
+for, and the band's IMU is now the *only* fall and accident detector left
+**Area:** [nigehban-app/App.js](../nigehban-app/App.js) ·
+[nigehban-app/src/motion.js](../nigehban-app/src/motion.js) ·
+[nigehban-app/src/screens/Band.js](../nigehban-app/src/screens/Band.js)
+
+### Symptom
+
+Reported from the bench, 3 Sep 2026. Push the band into a wall with force. The
+Arduino IDE's serial monitor shows the impact. **The phone shows nothing** — no
+check-in, no countdown, no notification, nothing on any screen, and nothing in
+any log the tester can reach.
+
+The bench is how it was found. The case it stands for is the one that matters:
+**a person standing still on a footpath, hit by a car.** There is an impact.
+There is no fall — they may never leave their feet, and they never free-fell.
+And there is no speed, because *they* were not the one moving.
+
+### Cause — the gate asks the wrong question
+
+`classifyImpact` ([motion.js:436-439](../nigehban-app/src/motion.js#L436-L439))
+is two lines:
+
+```js
+export function classifyImpact(ev, ctx = speedContext()) {
+  if (!ctx.wasTravelling) return 'ignore';
+  return 'accident';
+}
+```
+
+`wasTravelling` means **this phone's GPS** saw `VEHICLE_KMH` (25 km/h) inside
+the last twenty seconds, so the test is *"was the wearer travelling"* and the
+question it is standing in for is *"was this an accident"*. Those come apart
+in exactly the case above. A pedestrian is struck at 50 km/h by something that
+is not carrying the phone; the phone's own history says 0 km/h, and
+[App.js:750-754](../nigehban-app/App.js#L750-L754) returns before anything
+happens.
+
+The gate was written for the rider thrown off a bike, and for that it is
+correct. It was never widened to the person who was hit rather than the person
+who was moving, and nothing in the code says the case was considered — there is
+no `'fall'` return from this function and no second path anywhere. So the
+product currently holds the position that an accident requires its victim to
+have been in a vehicle, which nobody chose.
+
+**Compounding it: the discard is completely silent.** Nothing is notified,
+logged, counted, or shown on the Band screen to say an impact was received at
+all. From outside the app these are indistinguishable:
+
+- the event arrived and the gate ignored it — *working as designed*;
+- the event never left the band over BLE — *a broken transport*;
+- the notify subscription is dead — *a broken link*;
+- the IMU is not running — *broken hardware*.
+
+The reporter above could not tell which of those four they were looking at, and
+neither can the code. This is the failure class [§7 of
+FEATURE_STATUS.md](FEATURE_STATUS.md) opens by naming: *the failure was
+invisible from the UI, and something downstream had a good reason not to
+complain.*
+
+**Why it matters more than it did last week.** The phone's own accelerometer
+detector was switched off on 2 Sep 2026 (PR #33), so the band's IMU is the only
+detector left. A tester who cannot arrange to be in a moving vehicle now has no
+way to see fall or accident detection do anything at all, and will reasonably
+conclude it is broken.
+
+### The decision — taken 3 Sep 2026
+
+**An impact is an accident on its own. Speed is not a precondition for asking.**
+
+The reasoning, so it does not have to be rebuilt: being hit while standing
+still is an accident, and requiring the victim to have been moving is asking
+about the wrong party. The band's fall machine does not cover it either — its
+"it was hit" route (Route B in the `.ino`) needs the wrist to end at a changed
+resting angle and stay there, which somebody who is struck and stays on their
+feet does not do.
+
+**Speed stays in the product, in the two places it is actually informative:**
+
+- it *lowers* the bar, because an 8 g spike at 60 km/h is an accident and the
+  same spike at a desk is furniture;
+- it writes the sentence the family reads, through `describeImpact`
+  ([motion.js:446-464](../nigehban-app/src/motion.js#L446-L464)) — *"impact of
+  about 19 g while travelling at 54 km/h, and the vehicle stopped dead"*.
+
+What it stops being is the thing that decides whether anybody is asked at all.
+
+### What this costs, and what has to pay for it
+
+The gate is the only reason this feature is not a false-alarm generator today.
+The band reports **every** spike over its threshold — a hand put down hard on a
+table clears 8 g — and the entire justification for it sending them freely is
+that the phone throws most of them away
+([App.js:744-749](../nigehban-app/App.js#L744-L749) says so in as many words).
+Remove the gate with nothing in its place and a slammed door pages five
+relatives.
+
+So the no-speed path needs its own bar, and the material for one is **already
+in the event and currently unused**. The band sends three fields with every
+impact ([the `.ino`'s `IS_SETTLING` case](../nigehban_band_nrf52/nigehban_band_nrf52.ino#L1549)):
+
+| Field | What it is | Why it separates a car from a table |
+|---|---|---|
+| `peak_g` | the highest g of the episode | a vehicle impact is 20 g and saturates the part; furniture is 8–12 |
+| `still` | % of the settle window the arm was still, 0–100 | a person who has been hit stops moving normally; a hand slammed on a desk carries straight on |
+| `rot` | peak rotation, °/s | ≥ 300 °/s is a body being turned, not a wrist being moved |
+
+Only `peak_g` and `rot` are read today, and only to write the note. Nothing
+reads `still` at all.
+
+### Before writing any code — confirm the transport, not just the theory
+
+Everything above is read from the source. Whether the `impact` line actually
+reaches the phone from a bench hit has **not been separately observed** — the
+report only shows the serial monitor and a silent app, which is also what a
+dead BLE notify subscription looks like.
+
+The Band screen already has the rig to tell the two apart. **ARM CRASH TEST**
+([Band.js:111-121](../nigehban-app/src/screens/Band.js#L111-L121)) writes a run
+of vehicle-speed samples into the history, which satisfies `wasTravelling` and
+makes the *existing* gate pass. Tap it, then push the band into the wall inside
+twenty seconds:
+
+- a check-in opens → the transport and today's gate both work, and this entry
+  is exactly what it says — the gate's question is wrong, not broken;
+- nothing happens → the transport itself is broken, which is a different and
+  worse bug and should be filed separately before this one is touched.
+
+### Fix
+
+**1. A second verdict that does not consult speed.** `classifyImpact` gains an
+`'accident'` return for a high-`peak_g` spike with stillness behind it,
+independent of `wasTravelling`. Two bars, not one: the existing low bar when
+the phone was travelling, and a stricter one when it was not. Everything
+downstream already works — `openIncidentCheckin('accident', ev)` asks on the
+wrist, shows the countdown, and escalates through the sweeper if it goes
+unanswered. No new path, no server change.
+
+**2. `describeImpact` must stop implying a vehicle** when there was no speed
+behind the reading. A family member reading *"a hard impact"* with no further
+claim is being told the truth; one reading an invented speed is not.
+
+**3. Make every discard visible**, gate and all — worth doing regardless of 1,
+and it is what would have told the reporter which of the four possibilities
+they were looking at. One row on the Band screen: the last impact received, its
+`peak_g`, and the verdict with its reason.
+
+**Blocked on numbers, not on structure.** The thresholds in 1 must come from
+the capture set, not from a guess — [Blocker
+#6](FEATURE_STATUS.md#6-blockers-ranked), and the false-positive half of it is
+the half that decides this. The structure can land first with deliberately
+conservative values; a bar set too high fails quietly in the direction this
+entry is already complaining about, so it needs the capture before it can be
+called done.
+
+### Not to be confused with
+
+The phone's detector being switched off (PR #33). That is a deliberate change
+and it is why this is now visible; it is not the cause. The band was always the
+only thing reporting `impact`.
