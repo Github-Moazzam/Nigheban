@@ -108,7 +108,7 @@ export default function SosLive({
               Alert saved on this device
             </Text>
             <Text style={[T.meta, { color: U.dim }]}>
-              It will be sent to your family the moment signal returns. Stay where help can reach you.
+              It sends the moment signal returns.
             </Text>
           </View>
         </View>
@@ -124,7 +124,7 @@ export default function SosLive({
             </Text>
           </View>
           <Text style={[T.meta, { color: U.dim }]}>
-            Active Nigehban users within 800m can be asked to come to your aid.
+            Nigehban users within 800 m can be asked to help.
           </Text>
           <View style={{ flexDirection: 'row', gap: S.sm, marginTop: S.xs }}>
             <Pressable
@@ -203,7 +203,7 @@ export default function SosLive({
           <View style={s.noResponseCard}>
             <Icon name="wifi-off" size={18} color={U.amber} />
             <Text style={[T.meta, { color: U.dim, flex: 1 }]}>
-              Your family will be alerted as soon as your phone finds signal. The alert is safe and saved on your device.
+              Saved on this device. Your family is alerted as soon as you have signal.
             </Text>
           </View>
         ) : elapsed >= 20 ? (
@@ -214,7 +214,8 @@ export default function SosLive({
                 No one has confirmed yet
               </Text>
               <Text style={[T.meta, { color: U.dim }]}>
-                Your family's phones are ringing with emergency sirens. If you are in immediate danger, please contact local emergency services (15 / 1122).
+                Sirens are ringing on your family's phones. In immediate danger,
+                call 15 or 1122.
               </Text>
             </View>
           </View>
@@ -226,7 +227,7 @@ export default function SosLive({
                 Alerting emergency network…
               </Text>
               <Text style={[T.meta, { color: U.dim }]}>
-                High-priority siren alarms are ringing on your family's devices.
+                Sirens are ringing on your family's phones.
               </Text>
             </View>
           </View>
@@ -276,9 +277,8 @@ export default function SosLive({
 
       {onMinimise ? (
         <Text style={[T.meta, s.foot]}>
-          Standing down is the only thing that ends this. Going back to the app
-          does not: the alert keeps running, your family keeps being told, and a
-          red bar at the top of every screen brings you straight back here.
+          Only standing down ends this. Going back to the app keeps it running —
+          the red bar brings you straight back.
         </Text>
       ) : null}
     </ScrollView>
