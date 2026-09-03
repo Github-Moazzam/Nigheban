@@ -197,6 +197,11 @@ export function useVirtualBand(onLine, active = true) {
   const [imu, setImu]             = useState(Accelerometer ? 'starting' : 'unavailable');
   const [fallStage, setFallStage] = useState('idle');
   const [log, setLog]             = useState([]);     // newest first, capped
+  // What this stand-in calls itself. "This phone" rather than a Nigehban-NN
+  // serial, because a name that looked like a band's would be read as one on
+  // the family screen -- and the one thing this radio must never do is pass
+  // for hardware that is not there.
+  const [name, setName]           = useState('This phone');
 
   const seq         = useRef(0);
   const bootMs      = useRef(now());
@@ -206,6 +211,7 @@ export function useVirtualBand(onLine, active = true) {
   const highAlertRef = useRef(false);
   const gestures  = useRef(DEFAULT_GESTURES);   // swap this from settings later
   const batRef   = useRef(100);
+  const nameRef  = useRef('This phone');
   const lineRef  = useRef(onLine);
   lineRef.current = onLine;
 
@@ -450,6 +456,38 @@ export function useVirtualBand(onLine, active = true) {
         emit('battery', { forced: 1 });
         break;
       case 'ping':  emit('pong'); break;
+
+      // ---- identity, so both radios answer the same questions --------------
+      //
+      // The whole premise of this file is that the app cannot tell which band
+      // replied, and the Band screen now asks every band what it is called. A
+      // phone standing in for hardware has no BLE name of its own to change and
+      // no PIN worth having -- nothing is being protected from anybody when the
+      // band IS the phone -- so `setname` is honoured as a label and `auth` is
+      // answered yes. Answering rather than ignoring is the point: silence here
+      // would leave the console waiting on a handshake that never comes.
+      case 'auth':
+        emit('auth_ok', { name: nameRef.current, defpin: 0 });
+        break;
+      case 'cfg':
+        emit('cfg', { name: nameRef.current, defpin: 0 });
+        break;
+      case 'setname': {
+        const n = (cmd.name || '').trim();
+        if (!n || n.length > 20) { emit('name_rejected', { why: '1-20 characters' }); break; }
+        nameRef.current = n;
+        setName(n);
+        feedback(2, 90, 90);
+        emit('name_set', { name: n });
+        break;
+      }
+      // No PIN on this radio, and pretending otherwise would be worse than
+      // saying so: a "PIN" the phone checks against itself protects nothing,
+      // and a tester who set one here would believe their band was locked.
+      case 'setpin':
+        emit('pin_rejected', { why: 'this phone is the band -- no PIN to set' });
+        break;
+
       default: break;
     }
     return true;
@@ -701,6 +739,7 @@ export function useVirtualBand(onLine, active = true) {
     onPressIn, onPressOut,
     // everything else
     deliver, trigger, emit,
+    name,
     clearLog: () => setLog([]),
     imuAvailable: !!Accelerometer,
     batteryAvailable: !!Battery,

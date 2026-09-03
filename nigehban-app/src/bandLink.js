@@ -22,6 +22,15 @@ export const MODES = {
   BLE: 'ble',           // a real band over Bluetooth
 };
 
+// Replies to {"c":"auth"}, {"c":"setname"}, {"c":"setpin"} and {"c":"cfg"}.
+// They travel on the same wire as an SOS and must not be routed like one.
+const IDENTITY_EVENTS = new Set([
+  'need_auth', 'auth_ok', 'auth_bad',
+  'name_set', 'name_rejected',
+  'pin_set', 'pin_rejected',
+  'cfg', 'unpaired',
+]);
+
 export function useBandLink(onEvent) {
   // Virtual is the default because it is the mode that works today. The
   // preference is persisted, so a tester who switches to BLE stays there.
@@ -73,13 +82,19 @@ export function useBandLink(onEvent) {
     if (msg.e === 'high_alert_on') setVHighAlert(true);
     if (msg.e === 'high_alert_off') setVHighAlert(false);
     if (msg.e === 'hb') return;             // heartbeat is status, not an event
+    // The identity handshake is a conversation with the band, not something
+    // that happened to the wearer. `band.js` swallows these on the BLE side for
+    // the same reason: passing them on would put an auth_ok through the alert
+    // router, which has no idea what one is.
+    if (IDENTITY_EVENTS.has(msg.e)) return;
     cb.current?.(msg);
   }, []);
 
   const virtual = useVirtualBand(onLine, virtualActive);
 
   if (!virtualActive) {
-    return { ...ble, mode, chooseMode, modeLoaded, virtual, bleAvailable: !ble.simulated };
+    return { ...ble, mode, chooseMode, modeLoaded, virtual,
+             bleAvailable: !ble.simulated, canSetPin: true };
   }
 
   return {
@@ -103,5 +118,18 @@ export function useBandLink(onEvent) {
     send: async (obj) => virtual.deliver({ t: 'cmd', ...obj }),
     /** Kept for callers that fire a conclusion rather than a gesture. */
     simulate: (e, extra = {}) => virtual.trigger(e, extra),
+
+    // --- identity, so the Band screen needs no branching either -------------
+    // Renaming works here because it is a real thing to test. A PIN does not:
+    // this radio IS the phone, so there is nobody to keep out, and offering a
+    // control that appears to lock something and locks nothing would be worse
+    // than not offering it. The screen reads `canSetPin` and hides it.
+    bandName: virtual.name,
+    defaultPin: false,
+    canSetPin: false,
+    renameBand: async (name) => virtual.deliver({ t: 'cmd', c: 'setname', name }),
+    submitPin: async () => false,
+    changePin: async () => false,
+    unpairAll: async () => false,
   };
 }

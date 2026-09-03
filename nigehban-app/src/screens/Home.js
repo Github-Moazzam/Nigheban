@@ -25,6 +25,16 @@ const BAND_LABEL = {
   'location-off': 'Location off',
   'no-service': 'Band needs re-pairing',
   'no-notify': 'Band not responding',
+  // The states the band's PIN introduced. All three mean the radio is fine and
+  // a person has to do something, so none of them may read as a fault -- "Band
+  // not found" would send somebody looking for a wristband that is six inches
+  // away and asking to be let in.
+  pairing: 'Pairing with the band',
+  authenticating: 'Unlocking the band',
+  'needs-pin': 'Band needs its PIN',
+  'bad-pin': 'Wrong band PIN',
+  'pair-failed': 'Band refused this phone',
+  'old-firmware': 'Band needs re-flashing',
 };
 
 /**
@@ -101,10 +111,13 @@ export default function Home({
     : band.status === 'virtual' || band.simulated ? C.amber
     // Waiting out Android's scan throttle is a pause, not a fault -- the link
     // comes back on its own -- so it must not read like a band that is gone.
-    : band.status === 'throttled' ? C.amber
+    : band.status === 'throttled' || band.status === 'authenticating'
+      || band.status === 'pairing' ? C.amber
     : band.status === 'disconnected' || band.status === 'no-permission'
       || band.status === 'not-found' || band.status === 'bt-stuck'
-      || band.status === 'bluetooth-off' || band.status === 'location-off' ? C.red
+      || band.status === 'bluetooth-off' || band.status === 'location-off'
+      || band.status === 'needs-pin' || band.status === 'bad-pin'
+      || band.status === 'pair-failed' || band.status === 'old-firmware' ? C.red
     : C.dim;
 
   const batt = ctx.battery;
@@ -259,7 +272,9 @@ export default function Home({
              honest busy signal here -- not the promise `connect` returns. */
           <Button title="CONNECT TO BAND" filled icon="bluetooth"
                   loading={bandBusy === 'connect' || band.status === 'scanning'
-                           || band.status === 'connecting'}
+                           || band.status === 'connecting'
+                           || band.status === 'pairing'
+                           || band.status === 'authenticating'}
                   onPress={() => runBand('connect', band.connect)} />
         )}
       </Card>

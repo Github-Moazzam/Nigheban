@@ -3,8 +3,9 @@ import {
   Platform, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { MODES } from '../bandLink';
+import BandPinEntry from '../components/BandPinEntry';
 import { C, MONO, S, T, fmtAgo } from '../theme';
-import { Banner, Button, Card, Chip, Divider, Icon, ProgressBar, Stat, Txt } from '../ui';
+import { Banner, Button, Card, Chip, Divider, Field, Icon, ProgressBar, Stat, Txt } from '../ui';
 import { HOLD_1_MS } from '../virtualBand';
 import { VEHICLE_KMH, noteSpeed, speedWatchStatus } from '../motion';
 
@@ -330,28 +331,63 @@ export default function Band({ band, serverOnline }) {
         </>
       ) : (
         <Card>
-          <Txt variant="h2">Bluetooth</Txt>
-          <Stat label="Link" icon="bluetooth" value={band.status} />
+          <View style={s.row}>
+            <Txt variant="h2">Bluetooth</Txt>
+            {band.bandName
+              ? <Chip text={band.bandName} tone={C.dim} icon="watch" />
+              : null}
+          </View>
+          <Stat label="Link" icon="bluetooth" value={band.status}
+                sub={LINK_NOTE[band.status] || null}
+                tone={band.status === 'connected' ? C.green
+                      : NEEDS_USER.has(band.status) ? C.amber : C.text} />
           {/* "Connected" alone has been lying: the link comes up and the data
               path fails separately. Whatever the radio actually said belongs
               on screen, not swallowed in a catch. */}
           {band.lastError ? <Text style={s.note}>{band.lastError}</Text> : null}
+
+          {/* The band is asking who this is. Nothing else on this card
+              matters until it is answered, so it goes above everything. */}
+          {NEEDS_USER.has(band.status) ? (
+            <BandPinEntry
+              wrong={band.status === 'bad-pin'}
+              onSubmit={(pin) => band.submitPin(pin)} />
+          ) : null}
+
           {band.status === 'connected' ? (
-            <View style={s.btnRow}>
-              <View style={s.cell}>
-                <Button title="BUZZ" icon="bell" tone={C.dim}
-                        onPress={() => band.send({ c: 'buzz', n: 2 })} />
+            <>
+              <BandName current={band.bandName} onRename={band.renameBand} />
+              <View style={s.btnRow}>
+                <View style={s.cell}>
+                  <Button title="BUZZ" icon="bell" tone={C.dim}
+                          onPress={() => band.send({ c: 'buzz', n: 2 })} />
+                </View>
+                <View style={s.cell}>
+                  <Button title="DISCONNECT" icon="x" tone={C.dim} onPress={band.disconnect} />
+                </View>
               </View>
-              <View style={s.cell}>
-                <Button title="DISCONNECT" icon="x" tone={C.dim} onPress={band.disconnect} />
-              </View>
-            </View>
-          ) : (
+              {/* Unconfirmed, unlike the wearer's own Setup screen. This is a
+                  console: the person on it meant to press the button. The
+                  consequence still has to be stated, because it is new and it
+                  is not what DISCONNECT used to do. */}
+              <Text style={s.note}>
+                Disconnecting is deliberate, so it also forgets this band&apos;s PIN —
+                linking again asks for the six digits. A band that simply goes out
+                of range does not: that comes back on its own.
+              </Text>
+              {band.canSetPin ? (
+                <BandPin isDefault={band.defaultPin} onChange={band.changePin}
+                         onUnpair={band.unpairAll} />
+              ) : null}
+            </>
+          ) : NEEDS_USER.has(band.status) ? null : (
             /* The scan runs for seconds after the press returns, so the link
                state -- not the promise -- is what this button waits on. */
             <Button title={band.status === 'connecting' ? 'CONNECTING' : 'SCAN FOR THE BAND'}
                     filled icon="search"
-                    loading={band.status === 'scanning' || band.status === 'connecting'}
+                    loading={band.status === 'scanning' || band.status === 'connecting'
+                             || band.status === 'pairing'
+                             || band.status === 'authenticating'}
                     onPress={band.connect} />
           )}
           {band.bleError ? (
@@ -362,6 +398,185 @@ export default function Band({ band, serverOnline }) {
         </Card>
       )}
     </ScrollView>
+  );
+}
+
+/**
+ * The link states a person can do something about, and what to say about them.
+ *
+ * `band.status` is a machine word and is still shown as one -- this is a
+ * diagnostic console and the raw value is the thing worth having on a bug
+ * report. The sub-line is for the states where the raw value is not enough,
+ * which is every state the PIN introduced: "authenticating" and "needs-pin"
+ * both look like a fault otherwise, and neither is one.
+ */
+// `pair-failed` is deliberately NOT in here. It is the one blocked state a PIN
+// field cannot help with: the passkey dialog belongs to Android, and a bond it
+// is holding that the band has forgotten is cleared in Android's own Bluetooth
+// settings. Offering six digits there would be offering the wrong fix, and the
+// SCAN button -- which is what shows instead -- is at least the right one once
+// the bond has been cleared.
+const NEEDS_USER = new Set(['needs-pin', 'bad-pin']);
+
+const LINK_NOTE = {
+  authenticating: 'paired — proving this phone to the band',
+  'needs-pin': 'the band wants its six-digit PIN',
+  'bad-pin': 'the band did not accept those six digits',
+  'pair-failed': 'Android and the band disagree about pairing',
+  'old-firmware': 'this band predates the PIN lock — re-flash it',
+  pairing: 'Android is pairing — answer its PIN prompt',
+  connected: 'paired, authenticated, receiving',
+};
+
+/**
+ * Renaming the band.
+ *
+ * Worth being clear on screen about what this changes, because it is not what
+ * a "device name" usually means in an app: it is written into the nRF52's own
+ * flash and goes out in the advertisement, so Android's Bluetooth list and
+ * every other phone in the family follow it.
+ */
+function BandName({ current, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(current || '');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { if (!editing) setDraft(current || ''); }, [current, editing]);
+
+  const n = draft.trim();
+  const ok = n.length >= 1 && n.length <= 20 && !/["\\]/.test(n) && n !== current;
+
+  if (!editing) {
+    return (
+      <View style={s.row}>
+        <Stat label="Band name" icon="watch" value={current || '—'} />
+        <Pressable onPress={() => setEditing(true)} hitSlop={8}
+                   accessibilityRole="button" accessibilityLabel="Rename the band">
+          <Text style={[T.label, { color: C.green }]}>RENAME</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ gap: S.sm }}>
+      <Field
+        label="Band name"
+        value={draft}
+        onChangeText={setDraft}
+        placeholder="e.g. Ayesha's band"
+        maxLength={20}
+        autoCapitalize="sentences"
+        hint="Stored on the band itself, so Android and every other phone in the family see it too."
+      />
+      <View style={s.btnRow}>
+        <View style={s.cell}>
+          <Button title="SAVE" filled icon="check" disabled={!ok || busy} loading={busy}
+                  onPress={async () => {
+                    setBusy(true);
+                    try {
+                      // The band's own `name_set` is what updates the label.
+                      // Closing on the strength of the write alone would show
+                      // a rename the band may have refused.
+                      if (await onRename(n)) setEditing(false);
+                    } finally { setBusy(false); }
+                  }} />
+        </View>
+        <View style={s.cell}>
+          <Button title="CANCEL" tone={C.dim} onPress={() => setEditing(false)} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * Changing the band's PIN.
+ *
+ * Collapsed until asked for, because it is the rarest control on this screen
+ * and the most alarming to press by accident. The banner above it is not
+ * decoration: a band still on the factory PIN is a band that anybody who has
+ * read this repository can pair with, and that is worth saying out loud rather
+ * than leaving to a settings screen nobody opens.
+ */
+function BandPin({ isDefault, onChange, onUnpair }) {
+  const [editing, setEditing] = useState(false);
+  const [pin, setPin] = useState('');
+  const [again, setAgain] = useState('');
+  const [busy, setBusy] = useState(false);
+  // Two presses, not a dialog. This drops the band's pairing keys and takes the
+  // link down with them, and the recovery runs through Android's own settings
+  // -- too destructive for a single tap on a console screen, not important
+  // enough to earn a modal.
+  const [armUnpair, setArmUnpair] = useState(false);
+
+  const ok = /^\d{6}$/.test(pin) && pin === again;
+
+  return (
+    <View style={{ gap: S.sm }}>
+      {isDefault ? (
+        <Banner tone={C.amber} icon="alert-triangle" title="This band is on its factory PIN">
+          Anyone who knows the default can pair with it. Change it once and every
+          other phone in the family will be asked for the new one.
+        </Banner>
+      ) : null}
+
+      {!editing ? (
+        <View style={s.row}>
+          <Pressable onPress={() => setEditing(true)} hitSlop={8}
+                     accessibilityRole="button" accessibilityLabel="Change the band PIN">
+            <Text style={[T.label, { color: isDefault ? C.amber : C.dim }]}>
+              CHANGE THE BAND PIN
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              if (!armUnpair) { setArmUnpair(true); return; }
+              setArmUnpair(false);
+              onUnpair?.();
+            }}
+            hitSlop={8} accessibilityRole="button"
+            accessibilityLabel={armUnpair
+              ? 'Confirm: make the band forget every paired phone'
+              : 'Make the band forget every paired phone'}
+          >
+            <Text style={[T.label, { color: armUnpair ? C.red : C.faint }]}>
+              {armUnpair ? 'SURE? THIS DROPS THE LINK' : 'FORGET PAIRED PHONES'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : (
+        <>
+          <Field label="New band PIN" value={pin} secureTextEntry
+                 keyboardType="number-pad" maxLength={6} placeholder="six digits"
+                 onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))} />
+          <Field label="Once more" value={again} secureTextEntry
+                 keyboardType="number-pad" maxLength={6} placeholder="six digits"
+                 onChangeText={(t) => setAgain(t.replace(/\D/g, '').slice(0, 6))}
+                 error={again && pin !== again ? 'Those do not match.' : null}
+                 hint={'Every phone linked to this band, including this one, is '
+                       + 'asked for the new PIN. Forget it and the only way back '
+                       + 'is holding the band\u2019s button down while it reboots.'} />
+          <View style={s.btnRow}>
+            <View style={s.cell}>
+              <Button title="SET IT" filled icon="lock" disabled={!ok || busy} loading={busy}
+                      onPress={async () => {
+                        setBusy(true);
+                        try {
+                          if (await onChange(pin)) {
+                            setEditing(false); setPin(''); setAgain('');
+                          }
+                        } finally { setBusy(false); }
+                      }} />
+            </View>
+            <View style={s.cell}>
+              <Button title="CANCEL" tone={C.dim}
+                      onPress={() => { setEditing(false); setPin(''); setAgain(''); }} />
+            </View>
+          </View>
+        </>
+      )}
+    </View>
   );
 }
 
