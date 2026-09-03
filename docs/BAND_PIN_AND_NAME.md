@@ -67,6 +67,44 @@ Until it does, the firmware sends no events, obeys no commands, keeps its SOS
 beacon flying and does not flash the link LED. Wrong PIN three times, or no PIN
 inside the window, and it hangs up.
 
+#### The limit that actually costs an attacker something
+
+`AUTH_MAX_TRIES` only ends a *connection*, and on its own that is close to
+worthless: reconnecting is free and unlimited, so three guesses per link is
+really unlimited guesses and a six-digit PIN falls to a patient script.
+
+So failures are also counted **across** connections, and past a threshold the
+band stops answering:
+
+| consecutive failures | what happens |
+|---|---|
+| 1–4 | nothing but a refusal |
+| 5 | 30 s of silence |
+| 6 | 2 min |
+| 7 | 5 min |
+| 8 and beyond | 15 min, indefinitely |
+
+Five free attempts before any of it starts, deliberately: the person most likely
+to get this wrong is the owner typing from memory, and the first thing a lockout
+must not do is punish them. A correct PIN clears the counter outright, and so
+does a correct *old* PIN on the change-PIN screen — otherwise somebody who
+fumbled into a fifteen-minute wait could not reach the one screen that proves
+who they are. Guessing *during* a lockout costs nothing extra, so waiting is
+always the winning move for an owner and never shortens anything for an attacker.
+
+**The counter is deliberately not persisted.** It lives in RAM, so a power cycle
+clears it — and that is not the hole it looks like. Power-cycling this band means
+holding it, and anybody holding it can hold the button through boot and factory
+reset the PIN outright. A flash write per wrong guess would buy nothing against
+an attacker who already has the better option, and would spend the flash's erase
+budget doing it.
+
+> **Safety cost, stated plainly.** While locked out the band cannot link to a
+> phone, so a press cannot reach the family over BLE. That is the price of
+> having a lock at all. It is bounded three ways — five free tries, a
+> fifteen-minute ceiling, and the factory reset, which works during a lockout
+> like any other time.
+
 The handshake is what makes **changing the PIN mean something**. A new passkey
 only governs the *next* pairing, so phones already bonded would sail straight
 through lock 1 forever. They now fail lock 2 instead, and are locked out the
@@ -118,6 +156,9 @@ something":
 - `bad-pin` — the band refused these six digits
 - `pair-failed` — Android and the band disagree about pairing (see below)
 - `old-firmware` — the band never asked for a PIN and ignored the handshake
+- `locked-out` — too many wrong PINs; the band has stopped listening for a
+  while. Distinct from `bad-pin` because the answer is different: waiting fixes
+  this and typing does not.
 
 ### The first operation always fails, and that is normal
 
@@ -189,14 +230,28 @@ scan response, and it is what the OS-level scan filter matches.
 
 ## Changing the PIN
 
-`{"c":"setpin","pin":"481923"}` — six digits, because `BLE_GAP_PASSKEY_LEN` is
-6 and this same string is handed to the SoftDevice as the pairing passkey.
+`{"c":"setpin","old":"123456","pin":"481923"}` — six digits, because
+`BLE_GAP_PASSKEY_LEN` is 6 and this same string is handed to the SoftDevice as
+the pairing passkey.
 
-The app saves it locally **before** sending it. That order is deliberate: a band
-that has taken a new PIN and a phone that has forgotten it is the one
-combination with no way back except the physical reset. The opposite order fails
-safely — the phone holds a PIN the band rejects, says so, and the old one can be
-typed back in.
+**The current PIN must be supplied, and the app must make a person type it.**
+Being authenticated is not enough and never was: a link stays authenticated for
+as long as it stays up, so anybody who picked up an unlocked phone with a live
+band on it could set a new PIN and own the band — the wearer's other phones stop
+authenticating, and the wearer does not know the number that would fix it. That
+is a lockout performed by a stranger with no knowledge of anything, which is
+precisely what a PIN is supposed to prevent. Pre-filling the field from the
+keystore would make the check theatre, so neither screen does it. Wrong answers
+count towards the same lockout as a failed `auth` — it is the same secret being
+guessed at.
+
+The app stores the new PIN only once the band has **confirmed** it, in the
+`pin_set` branch. The old order — save first, then ask — was safe while the band
+accepted every `setpin` and stopped being safe the moment it could refuse one:
+mistyping the current PIN would have left the phone holding a PIN the band never
+agreed to, and the next reconnect failing against it. If the confirmation is lost
+in flight instead, the band has the new PIN and the phone the old one, which
+surfaces as an ordinary `bad-pin` prompt somebody can answer.
 
 Bonds are deliberately **not** cleared. Clearing them would break the link the
 command arrived on, and Android would then be holding a bond the band has
@@ -261,18 +316,47 @@ phones** (`{"c":"unpair"}`), which is a recovery tool rather than a setting.
 
 ---
 
-## The way out
+## The way out — a legitimately forgotten PIN
+
+Two routes, in the order to try them.
+
+### 1. Ask a phone that still has it
+
+Any phone still linked to the band is holding the six digits in its keystore.
+**Setup → DEVICE → Band PIN → Change it → "I have forgotten it"** shows them,
+behind the four-digit **disarm PIN** — the gate this app already uses for "prove
+you are the owner of this phone".
+
+That gate is the right strength, not a compromise. Revealing the band PIN to
+somebody already holding this unlocked, signed-in phone gives away nothing they
+could not already do: the band is linked and obeys them. What it saves is the
+alternative below, which costs a factory reset and re-pairing every phone in the
+family. If the phone has no band PIN stored, the dialog says so and points at
+the reset rather than pretending.
+
+### 2. The band itself
 
 Hold the band's button while it boots and keep holding for five seconds. Name,
 PIN and every bond go back to factory, and the LED blinks fast while you hold so
-you can tell it is counting.
+you can tell it is counting. Then **forget the band in Android's Bluetooth
+settings** on every phone, because their bonds are now stale.
 
 It has to be physical. A reset reachable over the air is a lock with its own key
-taped to it.
+taped to it. It also works during a lockout, which is what stops a lockout ever
+being permanent.
 
-The band also prints its name and whether it is still on the factory PIN over
-USB serial at boot — never over the radio — so a band in your hand can always be
-identified without resetting it.
+### What the band will not do
+
+It prints its **name**, and whether it is still on the published factory PIN,
+over USB serial at boot — never over the radio. It does **not** print the PIN
+itself, and that is deliberate rather than an oversight.
+
+Reading a PIN over USB and holding the button through boot both need physical
+possession, so they look equivalent. They are not. A factory reset is *loud* —
+the name is gone and every phone has to re-pair, so the owner finds out. Reading
+the PIN is silent: an attacker with sixty seconds and a cable would walk away
+with permanent, undetectable access to a band its owner still believes is
+locked. The noisy recovery is the one worth having.
 
 ---
 

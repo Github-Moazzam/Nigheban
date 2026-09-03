@@ -38,6 +38,7 @@ const BAND_LABEL = {
   pairing: 'Pairing…', authenticating: 'Unlocking…',
   'needs-pin': 'Needs its PIN', 'bad-pin': 'Wrong PIN',
   'pair-failed': 'Band refused this phone', 'old-firmware': 'Needs re-flashing',
+  'locked-out': 'Locked — too many PINs',
 };
 
 /**
@@ -76,6 +77,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
   // screen somewhere nobody expected it to go.
   const [editing, setEditing] = useState(null);
   const [confirmDrop, setConfirmDrop] = useState(false);
+  // The forgotten-PIN path: 'ask' while the disarm gate is up, then the six
+  // digits themselves once it has been passed. Never held in state before that.
+  const [recover, setRecover] = useState(null);
   const virtual = band?.status === 'virtual';
   const phoneBatt = usePhoneBattery();
 
@@ -300,8 +304,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               {editing === 'pin' ? (
                 <PinEditor
                   onCancel={() => setEditing(null)}
-                  onSave={async (np) => {
-                    const okDone = await band?.changePin?.(np);
+                  onForgot={() => setRecover('ask')}
+                  onSave={async (op, np) => {
+                    const okDone = await band?.changePin?.(op, np);
                     if (okDone) setEditing(null);
                     return okDone;
                   }}
@@ -601,6 +606,53 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         onCancel={() => setSheet(false)}
         onDone={() => { setSheet(false); refreshPin(); }}
       />
+
+      {/* ---- a forgotten band PIN ---------------------------------------
+          This phone is still linked, so it is still holding the six digits in
+          the keystore. Showing them to whoever is holding the handset would be
+          careless, so the disarm PIN stands in front -- the gate this app
+          already uses for "prove you are the owner of this phone".
+          It gives away nothing an attacker with this unlocked, signed-in phone
+          could not already do: the band is linked and obeys it. What it saves
+          is the alternative, which is a factory reset and re-pairing every
+          phone in the family. */}
+      <PinSheet
+        visible={recover === 'ask'}
+        mode={pinSet ? 'verify' : 'set'}
+        title={pinSet ? 'Enter your PIN to see the band PIN' : 'Choose a PIN first'}
+        body={pinSet
+          ? 'This is your four-digit app PIN, not the band’s six.'
+          : 'You have no app PIN yet, and it is what protects the band’s. '
+            + 'Choose one now and the band PIN will be shown.'}
+        wrongNote="Wrong PIN."
+        lockedNote="Too many attempts. The band PIN stays hidden."
+        onCancel={() => setRecover(null)}
+        onDone={async () => {
+          await refreshPin();
+          const stored = await band?.revealPin?.();
+          setRecover(stored || 'none');
+        }}
+      />
+
+      <Dialog
+        visible={!!recover && recover !== 'ask'}
+        tone={recover === 'none' ? U.amber : U.mint}
+        icon={recover === 'none' ? 'alert-circle' : 'key'}
+        title={recover === 'none' ? 'This phone does not have it' : 'The band PIN'}
+        body={recover === 'none'
+          ? 'This phone has no band PIN stored, so there is nothing to show. '
+            + 'Try a family phone that is still linked to the band. If none is, '
+            + 'the band itself is the way back — hold its button down while it '
+            + 'restarts, keep holding for five seconds, and its name and PIN go '
+            + 'back to factory. Then forget the band in Android’s Bluetooth '
+            + 'settings before linking again.'
+          : recover}
+        note={recover === 'none'
+          ? undefined
+          : 'Write it somewhere safe. Any other phone you link to this band will be asked for it.'}
+        actions={[{ label: 'Done', icon: 'check', onPress: () => setRecover(null) }]}
+        onClose={() => setRecover(null)}
+      />
     </>
   );
 }
@@ -682,20 +734,42 @@ function NameEditor({ current, onCancel, onSave }) {
  * links. That is the feature, not a side effect -- it is how a phone is
  * revoked without anybody touching Android's Bluetooth settings.
  */
-function PinEditor({ onCancel, onSave }) {
+function PinEditor({ onCancel, onSave, onForgot }) {
+  const [current, setCurrent] = useState('');
   const [pin, setPin] = useState('');
   const [again, setAgain] = useState('');
   const [busy, setBusy] = useState(false);
-  const ok = /^\d{6}$/.test(pin) && pin === again;
+  const ok = /^\d{6}$/.test(current) && /^\d{6}$/.test(pin) && pin === again;
 
   return (
     <View style={p.panel}>
+      {/* Typed, never filled in from the keystore.
+          The band checks this, and the check is only worth anything if a PERSON
+          supplied the answer. Pre-filling it would mean anybody holding this
+          phone unlocked could change the PIN and lock the real owner out of
+          their own band -- which is the exact thing a PIN is for. */}
+      <TextInput
+        value={current}
+        onChangeText={(t) => setCurrent(t.replace(/\D/g, '').slice(0, 6))}
+        placeholder="current PIN"
+        placeholderTextColor={U.faint}
+        keyboardType="number-pad" maxLength={6} secureTextEntry autoFocus
+        accessibilityLabel="Current band PIN"
+        style={p.input}
+      />
+      <Pressable onPress={onForgot} hitSlop={8} accessibilityRole="button"
+                 accessibilityLabel="I have forgotten the band PIN">
+        <Text style={[T.meta, { color: U.mint }]}>I have forgotten it</Text>
+      </Pressable>
+
+      <View style={p.rule} />
+
       <TextInput
         value={pin}
         onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))}
         placeholder="new PIN"
         placeholderTextColor={U.faint}
-        keyboardType="number-pad" maxLength={6} secureTextEntry autoFocus
+        keyboardType="number-pad" maxLength={6} secureTextEntry
         accessibilityLabel="New band PIN, six digits"
         style={p.input}
       />
@@ -720,7 +794,7 @@ function PinEditor({ onCancel, onSave }) {
                   busy={busy} disabled={!ok || busy}
                   onPress={async () => {
                     setBusy(true);
-                    try { await onSave?.(pin); } finally { setBusy(false); }
+                    try { await onSave?.(current, pin); } finally { setBusy(false); }
                   }} />
         </View>
         <View style={{ flex: 1 }}>
@@ -765,6 +839,7 @@ function BandPinAsk({ wrong, onSubmit }) {
 
 const p = StyleSheet.create({
   panel: { gap: S.md, paddingHorizontal: S.lg, paddingBottom: S.lg, paddingTop: S.sm },
+  rule: { height: 1, backgroundColor: U.line, marginVertical: 2 },
   row: { flexDirection: 'row', gap: S.md },
   text: {
     backgroundColor: U.raised,

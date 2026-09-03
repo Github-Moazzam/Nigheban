@@ -27,7 +27,7 @@ export const MODES = {
 const IDENTITY_EVENTS = new Set([
   'need_auth', 'auth_ok', 'auth_bad',
   'name_set', 'name_rejected',
-  'pin_set', 'pin_rejected',
+  'pin_set', 'pin_rejected', 'auth_locked',
   'cfg', 'unpaired',
 ]);
 
@@ -130,6 +130,7 @@ export function useBandLink(onEvent) {
     renameBand: async (name) => virtual.deliver({ t: 'cmd', c: 'setname', name }),
     submitPin: async () => false,
     changePin: async () => false,
+    revealPin: async () => null,
     unpairAll: async () => false,
   };
 }

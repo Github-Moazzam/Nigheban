@@ -35,6 +35,7 @@ const BAND_LABEL = {
   'bad-pin': 'Wrong band PIN',
   'pair-failed': 'Band refused this phone',
   'old-firmware': 'Band needs re-flashing',
+  'locked-out': 'Band locked — too many PINs',
 };
 
 /**
@@ -117,7 +118,8 @@ export default function Home({
       || band.status === 'not-found' || band.status === 'bt-stuck'
       || band.status === 'bluetooth-off' || band.status === 'location-off'
       || band.status === 'needs-pin' || band.status === 'bad-pin'
-      || band.status === 'pair-failed' || band.status === 'old-firmware' ? C.red
+      || band.status === 'pair-failed' || band.status === 'old-firmware'
+      || band.status === 'locked-out' ? C.red
     : C.dim;
 
   const batt = ctx.battery;

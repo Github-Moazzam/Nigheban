@@ -424,6 +424,7 @@ const LINK_NOTE = {
   'bad-pin': 'the band did not accept those six digits',
   'pair-failed': 'Android and the band disagree about pairing',
   'old-firmware': 'this band predates the PIN lock — re-flash it',
+  'locked-out': 'too many wrong PINs — it has stopped listening',
   pairing: 'Android is pairing — answer its PIN prompt',
   connected: 'paired, authenticated, receiving',
 };
@@ -509,8 +510,12 @@ function BandPin({ isDefault, onChange, onUnpair }) {
   // -- too destructive for a single tap on a console screen, not important
   // enough to earn a modal.
   const [armUnpair, setArmUnpair] = useState(false);
+  // Typed, never filled in from the keystore. The band checks it, and that
+  // check only means something if a person supplied the answer -- otherwise
+  // anybody holding this phone could change the PIN and lock the owner out.
+  const [current, setCurrent] = useState('');
 
-  const ok = /^\d{6}$/.test(pin) && pin === again;
+  const ok = /^\d{6}$/.test(current) && /^\d{6}$/.test(pin) && pin === again;
 
   return (
     <View style={{ gap: S.sm }}>
@@ -547,6 +552,10 @@ function BandPin({ isDefault, onChange, onUnpair }) {
         </View>
       ) : (
         <>
+          <Field label="Current band PIN" value={current} secureTextEntry
+                 keyboardType="number-pad" maxLength={6} placeholder="six digits"
+                 onChangeText={(t) => setCurrent(t.replace(/\D/g, '').slice(0, 6))}
+                 hint="Typed, not remembered — this is what proves it is your band." />
           <Field label="New band PIN" value={pin} secureTextEntry
                  keyboardType="number-pad" maxLength={6} placeholder="six digits"
                  onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))} />
@@ -563,15 +572,17 @@ function BandPin({ isDefault, onChange, onUnpair }) {
                       onPress={async () => {
                         setBusy(true);
                         try {
-                          if (await onChange(pin)) {
-                            setEditing(false); setPin(''); setAgain('');
+                          if (await onChange(current, pin)) {
+                            setEditing(false); setCurrent(''); setPin(''); setAgain('');
                           }
                         } finally { setBusy(false); }
                       }} />
             </View>
             <View style={s.cell}>
               <Button title="CANCEL" tone={C.dim}
-                      onPress={() => { setEditing(false); setPin(''); setAgain(''); }} />
+                      onPress={() => {
+                        setEditing(false); setCurrent(''); setPin(''); setAgain('');
+                      }} />
             </View>
           </View>
         </>

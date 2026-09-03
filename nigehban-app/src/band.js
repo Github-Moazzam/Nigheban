@@ -191,6 +191,10 @@ let pinBlocked = false;
 // confused reports perfectly good hardware as needing a re-flash. See the
 // unauthenticated-event branch in handleLine().
 let authTried = false;
+// A new PIN that has been sent to the band and not yet acknowledged. It is
+// written to the keystore by the `pin_set` branch and nowhere else, so a PIN the
+// band refused is never the one this phone tries to reconnect with.
+let pendingPin = null;
 
 function bleManager() {
   if (!manager && BleManager) manager = new BleManager();
@@ -607,14 +611,32 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         goLive(msg);
         return;
 
+      case 'auth_locked':
+        // Not a wrong PIN -- the band has stopped listening for a while after
+        // too many. Distinguished from bad-pin because the answer is different:
+        // waiting fixes this, and typing does not.
+        authed = false;
+        pinBlocked = true;
+        setLastError(
+          'Too many wrong PINs. The band has stopped accepting them for '
+          + (msg.for_s > 90 ? Math.ceil(msg.for_s / 60) + ' minutes'
+                            : (msg.for_s || 30) + ' seconds')
+          + '. Waiting is the only thing that clears it — a correct PIN after '
+          + 'that does, immediately.');
+        setStatus('locked-out');
+        return;
+
       case 'auth_bad':
         // Not retryable, and saying so is the point -- otherwise the band
         // reads as "out of range" and the user has no idea the six digits are
         // the problem. The band hangs up after three of these on its own.
         authed = false;
         pinBlocked = true;
-        setLastError('The band did not accept this PIN.');
-        setStatus('bad-pin');
+        setLastError(msg.locked_s
+          ? 'Wrong PIN. Too many now — the band has stopped accepting them for '
+            + msg.locked_s + 's.'
+          : 'The band did not accept this PIN.');
+        setStatus(msg.locked_s ? 'locked-out' : 'bad-pin');
         return;
 
       case 'name_set':
@@ -628,17 +650,30 @@ export function useBand(onEvent, { autoLink = false } = {}) {
         return;
 
       case 'pin_set':
-        // The new PIN is already in the keystore -- changePin() put it there
-        // before sending, because a band that accepts it and a phone that has
-        // forgotten it is the one combination with no way back except the
-        // button-through-boot reset.
+        // The band agreed, so now -- and only now -- this phone remembers it.
+        if (pendingPin) {
+          setBandPin(pendingPin).catch(() => {
+            // The keystore refused. The band has moved on regardless, so say so
+            // loudly: the next reconnect will ask, and the person needs to know
+            // the number they just chose is the answer.
+            setLastError('The band took the new PIN but this phone could not '
+                         + 'save it. Write it down -- you will be asked for it '
+                         + 'the next time the band reconnects.');
+          });
+          pendingPin = null;
+        }
         setDefaultPin(false);
         setLastError(null);
         return;
 
       case 'pin_rejected':
+        pendingPin = null;
         setLastError('The band would not take that PIN'
-                     + (msg.why ? ' (' + msg.why + ').' : '.'));
+                     + (msg.why ? ' (' + msg.why + ').' : '.')
+                     + (msg.locked_s
+                        ? ' Too many wrong answers -- it has stopped listening for '
+                          + msg.locked_s + 's.'
+                        : ''));
         return;
 
       case 'cfg':
@@ -1347,25 +1382,46 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   /**
    * Change the six digits, on the band and on this phone.
    *
-   * Saved locally FIRST and deliberately. If the band takes the new PIN and
-   * this phone has kept the old one, the next reconnect fails authentication
-   * against a band nobody can talk to any more -- recoverable only by holding
-   * the button through a reboot. The opposite order fails safe: the phone has
-   * a PIN the band rejects, the user is told, and they type the old one back.
+   * `oldPin` is the current one, and the caller must have made a person TYPE
+   * it. Filling it in from the keystore would turn the band's check into
+   * theatre -- the whole point is to require something the owner knows rather
+   * than something the phone in somebody's hand happens to be holding.
+   *
+   * The new PIN is stored only once the band has confirmed it, in the `pin_set`
+   * branch of handleLine(). The old order -- save first, then ask -- was safe
+   * while the band accepted every setpin, and stopped being safe the moment it
+   * could refuse one: mistyping the current PIN would have left this phone
+   * holding a PIN the band had never agreed to, and the next reconnect failing
+   * against it. If the confirmation is lost in flight instead, the band has the
+   * new PIN and this phone the old one, which surfaces as an ordinary bad-pin
+   * prompt the person can answer.
    *
    * Other phones in the family keep their pairing but stop authenticating, so
-   * each of them needs the new PIN typed in once. That is the intended
-   * behaviour and the reason this is worth having: it revokes a phone without
-   * anybody having to go near Android's Bluetooth settings.
+   * each needs the new PIN typed in once. That is the intended behaviour and
+   * the reason this is worth having: it revokes a phone without anybody going
+   * near Android's Bluetooth settings.
    */
-  const changePin = useCallback(async (pin) => {
-    if (!pinLegal(pin)) {
-      setLastError('The band PIN is six digits.');
+  const changePin = useCallback(async (oldPin, pin) => {
+    if (!pinLegal(oldPin) || !pinLegal(pin)) {
+      setLastError('A band PIN is six digits.');
       return false;
     }
-    await setBandPin(pin);
-    return send({ c: 'setpin', pin });
+    pendingPin = pin;
+    const ok = await send({ c: 'setpin', old: oldPin, pin });
+    if (!ok) pendingPin = null;
+    return ok;
   }, [send]);
+
+  /**
+   * The PIN this phone has stored, for a person who has forgotten it.
+   *
+   * Gated by the caller behind the disarm PIN, which is the existing "prove you
+   * are the owner of this phone" gate. It reveals nothing an attacker holding
+   * this unlocked, signed-in phone could not already do -- the band is linked
+   * and obeys it -- and it is the difference between a forgotten PIN costing a
+   * few taps and costing a factory reset plus re-pairing every phone.
+   */
+  const revealPin = useCallback(() => getBandPin(), []);
 
   /**
    * Make the band forget every phone that has ever paired with it.
@@ -1433,5 +1489,6 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   return { status, connect, disconnect, send, simulate, simulated,
            battery, armed, highAlert, lastSeen, bleError, lastError,
            // identity: what the band is called, and who may talk to it
-           bandName, defaultPin, submitPin, renameBand, changePin, unpairAll };
+           bandName, defaultPin, submitPin, renameBand, changePin, revealPin,
+           unpairAll };
 }

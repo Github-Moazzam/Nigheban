@@ -136,6 +136,36 @@
 #define AUTH_WINDOW_MS  8000    // subscribed -> authenticated, strict
 #define AUTH_MAX_TRIES  3       // wrong PIN this many times and the link goes
 
+// ---- and the limit that actually costs an attacker something --------------
+//
+// AUTH_MAX_TRIES above only ends a CONNECTION. On its own it is close to
+// worthless: reconnecting is free and unlimited, so three guesses per link is
+// really unlimited guesses, and a six-digit PIN falls to a patient script.
+//
+// So failures are also counted ACROSS connections, and past a threshold the
+// band stops answering at all for a while. The delay doubles-ish each time and
+// caps, which turns 10^6 guesses from an afternoon into geological time while
+// costing an owner who fat-fingers their PIN twice absolutely nothing.
+//
+// Five free attempts before any of it starts. That is deliberately generous:
+// the person most likely to get this wrong is the owner, typing from memory,
+// and the first thing a lockout must not do is punish them.
+//
+// DELIBERATELY NOT PERSISTED. The counter lives in RAM, so a power cycle
+// clears it -- and that is not the hole it looks like. Power-cycling this band
+// means holding it, and anybody holding it can hold the button through boot and
+// factory-reset the PIN outright. A flash write per wrong guess would buy
+// nothing against an attacker who already has the better option, and would
+// spend the flash's erase budget on it.
+//
+// SAFETY NOTE, because this is a safety device: while locked out the band
+// cannot link to a phone, so a press cannot reach the family over BLE. That is
+// the price of having a lock at all, and it is bounded three ways -- five free
+// tries, a fifteen-minute ceiling, and the button-through-boot reset, which
+// works during a lockout like any other time.
+#define AUTH_LOCKOUT_AT 5       // consecutive failures before any lockout
+static const uint32_t AUTH_LOCKOUT_MS[] = { 30000, 120000, 300000, 900000 };
+
 // Hold the button while the band boots, and keep holding for this long: name,
 // PIN and every bond go back to factory. It is the way out of a forgotten PIN,
 // and the only one -- which is why it takes physical possession of the band and
@@ -485,6 +515,12 @@ bool     gAuthed       = false;
 bool     gWasAuthed    = false;   // was the link that just died ever a real one
 uint8_t  gAuthTries    = 0;
 uint32_t gAuthDeadline = 0;       // 0 = nothing being waited on
+
+// The across-connections half of the limit. These two deliberately survive a
+// disconnect -- that is the entire point, see AUTH_LOCKOUT_AT -- and are
+// cleared only by a correct PIN or by power.
+uint8_t  gAuthFails    = 0;       // consecutive, since the last success
+uint32_t gLockedUntil  = 0;       // millis(); 0 = not locked out
 
 // Has setup() finished putting the radio on the air. Only applyName() reads it;
 // see the comment there for what goes wrong without it.
@@ -1552,11 +1588,53 @@ int jsonInt(const String &s, const char *key, int dflt) {
 // never silence a cry for help: the beacon is the path that exists precisely
 // because the app is not there, and a stranger's phone connecting -- or an
 // attacker's, deliberately -- would otherwise be enough to switch it off.
+/** Seconds left on a lockout, or 0 if there is not one. */
+uint32_t lockoutLeftS() {
+  if (gLockedUntil == 0) return 0;
+  uint32_t now = millis();
+  // Unsigned comparison, not (gLockedUntil - now) > 0, which is true forever.
+  if ((int32_t)(gLockedUntil - now) <= 0) { gLockedUntil = 0; return 0; }
+  return (gLockedUntil - now + 999) / 1000;
+}
+
+/**
+ * A wrong PIN. Count it, and decide whether the band goes quiet for a while.
+ *
+ * The escalation starts only after AUTH_LOCKOUT_AT, so the owner's first few
+ * fumbles cost nothing. After that each further failure moves one step up
+ * AUTH_LOCKOUT_MS and stops at the last entry -- fifteen minutes, forever, which
+ * is enough to make a search of 10^6 PINs meaningless without ever bricking a
+ * band somebody needs.
+ */
+void noteAuthFailure() {
+  if (gAuthFails < 255) gAuthFails++;
+  if (gAuthFails < AUTH_LOCKOUT_AT) return;
+
+  uint8_t steps = sizeof(AUTH_LOCKOUT_MS) / sizeof(AUTH_LOCKOUT_MS[0]);
+  uint8_t idx   = gAuthFails - AUTH_LOCKOUT_AT;
+  if (idx >= steps) idx = steps - 1;
+
+  gLockedUntil = millis() + AUTH_LOCKOUT_MS[idx];
+  if (gLockedUntil == 0) gLockedUntil = 1;      // millis() wrap: 0 means "none"
+
+  // Felt, not just reported. If this band is in a drawer being guessed at, the
+  // buzz is the only thing that can tell its owner across a room; and if the
+  // owner is the one guessing, it says "stop typing" better than a screen can.
+  feedback(2, 700, 300);
+  Serial.println("{\"t\":\"log\",\"msg\":\"auth locked out\",\"fails\":"
+                 + String(gAuthFails) + ",\"for_s\":"
+                 + String(AUTH_LOCKOUT_MS[idx] / 1000) + "}");
+}
+
 void authOk() {
   gAuthed       = true;
   gWasAuthed    = true;
   gAuthTries    = 0;
   gAuthDeadline = 0;
+  // The right PIN clears the whole history. A lockout is there to stop a search,
+  // and a search that has just succeeded is over.
+  gAuthFails    = 0;
+  gLockedUntil  = 0;
 
   // The name goes back with the acknowledgement so the app can label the band
   // without a second round trip, and so a rename done from another phone shows
@@ -1582,14 +1660,31 @@ void handleCommand(const String &line) {
   if (!gAuthed) {
     if (c != "auth") return;
 
+    // Locked out. Answered rather than ignored, and answered with the time,
+    // because "wait four minutes" and "this band is broken" need to look
+    // completely different to somebody holding a safety device. Guessing during
+    // a lockout costs nothing extra -- the counter is untouched here -- so
+    // waiting is always the winning move for an owner and never shortens
+    // anything for an attacker.
+    uint32_t wait = lockoutLeftS();
+    if (wait) {
+      sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_locked\",\"for_s\":")
+              + String(wait) + "}");
+      delay(50);                     // let it leave the radio before hanging up
+      Bluefruit.disconnect(Bluefruit.connHandle());
+      return;
+    }
+
     if (jsonStr(line, "pin") == gPin) { authOk(); return; }
 
     // Wrong. Say so -- the app has to be able to tell "bad PIN" from "band out
     // of range", or it would sit retrying a link that will never come up and
     // never ask the user for the one thing that would fix it.
+    noteAuthFailure();
     gAuthTries++;
     sendRaw(String("{\"t\":\"evt\",\"e\":\"auth_bad\",\"left\":")
-            + String(AUTH_MAX_TRIES - gAuthTries) + "}");
+            + String(AUTH_MAX_TRIES - gAuthTries) + ",\"locked_s\":"
+            + String(lockoutLeftS()) + "}");
     if (gAuthTries >= AUTH_MAX_TRIES) {
       Serial.println("{\"t\":\"log\",\"msg\":\"auth failed, hanging up\"}");
       // Let the refusal actually leave the radio first. sendRaw() only queues
@@ -1672,9 +1767,38 @@ void handleCommand(const String &line) {
 
   } else if (c == "setpin") {
     String np = jsonStr(line, "pin");
-    if (!pinLegal(np)) {
+    String op = jsonStr(line, "old");
+
+    // The CURRENT PIN, typed again, before the new one is accepted.
+    //
+    // Being authenticated is not enough and never was. A link stays
+    // authenticated for as long as it stays up, so anybody who picks up an
+    // unlocked phone with a live band on it could set a new PIN, and would then
+    // own the band: the wearer's other phones stop authenticating, and the
+    // wearer does not know the number that would fix it. That is a lockout
+    // performed by a stranger with no knowledge of anything, which is exactly
+    // what a PIN is supposed to prevent.
+    //
+    // So this asks for something only the owner knows, rather than something
+    // the phone happens to be holding -- and the app is required to make the
+    // person type it rather than filling it in from the keystore, or this check
+    // would be theatre. Wrong answers count towards the same lockout as a
+    // failed auth: it is the same secret being guessed at.
+    if (!pinLegal(op) || op != gPin) {
+      noteAuthFailure();
+      sendEvent("pin_rejected", "\"why\":\"the current PIN is wrong\",\"locked_s\":"
+                + String(lockoutLeftS()));
+    } else if (!pinLegal(np)) {
       sendEvent("pin_rejected", "\"why\":\"six digits\"");
+    } else if (np == op) {
+      sendEvent("pin_rejected", "\"why\":\"that is already the PIN\"");
     } else {
+      // Getting the old one right is itself proof of the owner, so it clears
+      // any lockout the way a successful auth does. Otherwise somebody who
+      // fumbled their way into a fifteen-minute wait could not use the one
+      // screen that proves who they are.
+      gAuthFails   = 0;
+      gLockedUntil = 0;
       np.toCharArray(gPin, sizeof(gPin));
       configSave();
       applyPin();
