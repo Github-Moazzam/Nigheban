@@ -135,8 +135,7 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                         </Text>
                       </View>
                       <Text style={[T.meta, { color: U.dim }]}>
-                        Accept only if you know who this is. You will each see the
-                        other's alerts.
+                        Accept only if you know them. You will each see the other's alerts.
                       </Text>
                       <View style={s.inviteBtns}>
                         <Pressable
@@ -277,15 +276,13 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
           tone={U.mint}
           icon="user-check"
           title={`${linked?.name || 'They'} is now in your family`}
-          body={linked?.how === 'accepted'
-            ? 'You said yes, so the link is live in both directions from this moment.'
-            : 'That code was theirs, and the link is live in both directions from this moment.'}
+          body="The link is live in both directions."
           points={[
-            `An SOS from ${linked?.name || 'them'} reaches this phone — even with the app closed.`,
+            `An SOS from ${linked?.name || 'them'} reaches this phone, even closed.`,
             'Yours reaches them the same way.',
-            'Either of you can ask the other for a check-in at any time.',
+            'Either of you can ask for a check-in.',
           ]}
-          note="Either of you can undo this later. Nobody is told when you do."
+          note="Either of you can undo this later."
           onClose={finish}
           actions={[{ label: 'Done', icon: 'check', filled: true, onPress: finish }]}
         />
@@ -296,10 +293,8 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
           tone={U.amber}
           icon="send"
           title="Request sent"
-          body={'If that code belongs to somebody, they have been asked. Nothing is '
-            + 'shared in either direction until they accept.'}
-          note={'We cannot tell you whether the code was real — answering that would '
-            + 'let anybody find out who has an account by guessing.'}
+          body="If that code belongs to somebody, they have been asked."
+          note="Nothing is shared until they accept, and we cannot confirm whether the code exists."
           onClose={() => setAsked(false)}
           actions={[
             { label: 'Done', icon: 'check', filled: true,
@@ -314,8 +309,7 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
           tone={U.red}
           icon="user-x"
           title={`Say no to ${declining?.from?.name || 'them'}?`}
-          body={'They are not told, and they will not be able to ask you again from '
-            + 'this code.'}
+          body="They are not told, and cannot ask again from this code."
           onClose={() => setDeclining(null)}
           actions={[
             { label: 'Say no', icon: 'user-x', filled: true, tone: U.red,

@@ -144,7 +144,7 @@ export default function DisarmPad({ fall, onCancel, onEscalate, onExpire }) {
         <View style={s.bandHint}>
           <Icon name="watch" size={15} color={U.dim} />
           <Text style={[T.meta, { color: U.dim, flexShrink: 1 }]}>
-            Press your band button once to say you are fine
+            Or press your band button once
           </Text>
         </View>
 
@@ -168,7 +168,7 @@ export default function DisarmPad({ fall, onCancel, onEscalate, onExpire }) {
         </View>
 
         <Text style={[T.meta, s.why]}>
-          Held for a moment, not tapped — so a pocket cannot answer for you.
+          Held, not tapped — so a pocket cannot answer for you.
         </Text>
 
         <Pressable

@@ -130,9 +130,7 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
         <View style={s.header}>
           <View style={{ gap: 2 }}>
             <Txt variant="h1" color={U.text}>Alerts</Txt>
-            <Text style={[T.meta, { color: U.faint }]}>
-              Everything raised, in the order it happened
-            </Text>
+            <Text style={[T.meta, { color: U.faint }]}>Newest first</Text>
           </View>
 
           <View style={s.segment}>
@@ -176,8 +174,8 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
           </Txt>
           <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
             {scope === 'incoming'
-              ? 'That is the good outcome. Anything they raise appears here the moment it happens.'
-              : 'Your own alerts, check-ins and near misses are kept here, so you can see what the band actually did.'}
+              ? 'That is the good outcome. Anything they raise lands here.'
+              : 'Your own alerts, check-ins and near misses are kept here.'}
           </Text>
         </View>
       )}
