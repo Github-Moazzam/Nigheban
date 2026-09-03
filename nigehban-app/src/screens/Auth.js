@@ -1,20 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import {
-  call, discoverServers, loadServerUrl, normaliseUrl, probe,
-  saveServerUrl, saveSession, serverFromDevHost,
-} from '../api';
+import { call, saveSession, SERVER_URL } from '../api';
 import { S, T } from '../theme';
 import { Icon, Txt } from '../ui';
 import { RU, U } from './user/kit';
 
 /**
- * The first screen, and the only one that asks for anything before it earns
- * trust. Three fields, one of which the app usually fills in by itself, and a
- * sentence at the bottom saying exactly where the data goes.
+ * The first screen. Username and password to sign in, or username, password and
+ * name to create an account. The server address is hardcoded to
+ * nigheban.duckdns.org — no setup needed.
  *
  * It is dressed in the user theme rather than the console one on purpose: this
  * is the first thing anybody sees, admin included, and the product it should
@@ -22,83 +19,29 @@ import { RU, U } from './user/kit';
  * mint as the only saturated colour. Nothing here knows the role yet; that is
  * decided by the server, one request after the last tap on this screen.
  */
-export default function Auth({ initialUrl, onDone }) {
+export default function Auth({ onDone }) {
   const [mode, setMode] = useState('login');
-  const [url, setUrl] = useState(initialUrl || '');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [resolved, setResolved] = useState(null);
   const [showPw, setShowPw] = useState(false);
-
-  // Work out the server address without asking. Cheapest source first: the dev
-  // host the bundle came from, then whatever worked last time. Only if both
-  // miss does anyone see an empty box.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (initialUrl) return;
-      const fromHost = serverFromDevHost();
-      const saved = await loadServerUrl();
-      for (const [candidate, how] of [[fromHost, 'dev server'], [saved, 'last used']]) {
-        if (!candidate || cancelled) continue;
-        if (await probe(candidate)) {
-          if (cancelled) return;
-          setUrl(candidate);
-          setResolved(how);
-          return;
-        }
-      }
-      if (!cancelled && (fromHost || saved)) setUrl(fromHost || saved);
-    })();
-    return () => { cancelled = true; };
-  }, [initialUrl]);
-
-  // Typing an IP on a phone is the worst part of a local-network app, so offer
-  // to sweep the subnet instead. One hit is the common case; if a teammate is
-  // also running a server we show both rather than guessing.
-  const findServer = async () => {
-    setScanning(true); setErr(null); setProgress(0);
-    try {
-      const hits = await discoverServers(setProgress);
-      if (hits.length === 0) {
-        setErr('No server found on this Wi-Fi. Is it running, and is the laptop on '
-             + 'the same network? A firewall may also be blocking it.');
-      } else if (hits.length === 1) {
-        setUrl(hits[0]);
-      } else {
-        setUrl(hits[0]);
-        setErr(`Found ${hits.length}: ${hits.join(', ')} — using the first.`);
-      }
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setScanning(false);
-    }
-  };
 
   const submit = async () => {
     setErr(null);
-    const clean = normaliseUrl(url);
-    if (!clean) { setErr('Enter the server address shown in the laptop terminal.'); return; }
     setBusy(true);
     try {
       const body = mode === 'login'
         ? { username, password }
         : { username, password, name };
-      const r = await call({ url: clean }, mode === 'login' ? '/login' : '/register',
+      const r = await call({ url: SERVER_URL }, mode === 'login' ? '/login' : '/register',
                            { method: 'POST', body });
       if (!r || !r.token) {
-        throw new Error('That address answered, but not like the Nigehban server. '
-                      + 'Check the port — the server is on 8000, Metro is on 8081.');
+        throw new Error('The server answered, but something went wrong. Please try again.');
       }
-      const session = { url: clean, token: r.token, user_id: r.user_id, name: r.name, role: r.role || 'user' };
+      const session = { url: SERVER_URL, token: r.token, user_id: r.user_id, name: r.name, role: r.role || 'user' };
       await saveSession(session);
-      await saveServerUrl(clean);
       onDone(session);
     } catch (e) {
       setErr(e.message);
@@ -143,42 +86,6 @@ export default function Auth({ initialUrl, onDone }) {
             })}
           </View>
 
-          <View style={{ gap: S.sm }}>
-            <Field
-              label="Server address" value={url} onChangeText={setUrl}
-              placeholder="abc123.ngrok-free.app"
-              autoCapitalize="none" autoCorrect={false} keyboardType="url"
-              hint={resolved
-                ? undefined
-                : 'Paste the address the laptop printed. A tunnel URL works from '
-                  + 'anywhere, mobile data included.'}
-            />
-            {resolved ? (
-              <View style={s.found}>
-                <Icon name="check" size={12} color={U.mint} />
-                <Text style={[T.label, { color: U.mint }]}>
-                  {`FOUND FROM THE ${resolved.toUpperCase()}`}
-                </Text>
-              </View>
-            ) : null}
-
-            {scanning ? (
-              <View style={s.scanRow}>
-                <ActivityIndicator color={U.mint} size="small" />
-                <Text style={[T.meta, { color: U.dim }]}>
-                  Searching this Wi-Fi… {Math.round(progress * 100)}%
-                </Text>
-              </View>
-            ) : (
-              <Button
-                icon="search" title="Find my laptop on this Wi-Fi"
-                sub="only works on the same network" onPress={findServer}
-              />
-            )}
-          </View>
-
-          <View style={s.line} />
-
           {register ? (
             <Field label="Your name" value={name} onChangeText={setName}
                    placeholder="Ali" autoCapitalize="words"
@@ -220,9 +127,7 @@ export default function Auth({ initialUrl, onDone }) {
         </View>
 
         <Text style={s.footer}>
-          Your account, your family list and every alert live on the server you point
-          this at. During testing that is a laptop reachable through a tunnel; nothing
-          is stored anywhere else.
+          Your data is securely stored on the Nigehban server.
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -309,15 +214,8 @@ const s = StyleSheet.create({
     minHeight: 52,
   },
 
-  found: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
-    backgroundColor: U.mintSoft, borderRadius: RU.pill,
-    paddingHorizontal: S.md, paddingVertical: 6,
-  },
-  scanRow: { flexDirection: 'row', alignItems: 'center', gap: S.sm, paddingVertical: S.md },
-  pwToggle: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 },
 
-  line: { height: StyleSheet.hairlineWidth, backgroundColor: U.line },
+  pwToggle: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 },
 
   err: {
     flexDirection: 'row', alignItems: 'flex-start', gap: S.sm,

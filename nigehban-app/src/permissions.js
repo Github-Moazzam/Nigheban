@@ -158,20 +158,17 @@ export function ladderRows(perm) {
   const rows = [
     {
       key: 'notif', icon: 'bell', title: 'Alerts that make a sound',
-      why: 'Without this, an SOS from your family arrives silently — which is the '
-         + 'same as not arriving.',
+      why: 'Without it, a family SOS arrives silently.',
       granted: perm.notif, action: 'ALLOW NOTIFICATIONS',
     },
     {
       key: 'loc', icon: 'map-pin', title: 'Your location',
-      why: 'Attached to every alert you raise, so your family gets a map pin '
-         + 'rather than a guess.',
+      why: 'So your alerts carry a map pin, not a guess.',
       granted: perm.loc, action: 'ALLOW LOCATION',
     },
     {
       key: 'bg', icon: 'navigation', title: 'Location while the app is closed',
-      why: 'This is what keeps the watch running in your pocket. Choose "Allow all '
-         + 'the time" on the screen Android shows next.',
+      why: 'Choose "Allow all the time" on the next screen.',
       granted: perm.bg, action: 'ALLOW IN BACKGROUND',
       blocked: perm.loc === false,
     },
@@ -180,9 +177,7 @@ export function ladderRows(perm) {
   if (perm.fsi !== null && perm.fsi !== undefined) {
     rows.push({
       key: 'fsi', icon: 'phone-incoming', title: 'Take over the screen, like a call',
-      why: 'A family emergency should ring through a locked phone instead of '
-         + 'waiting in the notification tray. Android calls this "full screen '
-         + 'notifications" and it has to be switched on by hand.',
+      why: 'So an emergency rings through a locked phone.',
       granted: perm.fsi, action: 'ALLOW FULL-SCREEN ALERTS',
     });
   }

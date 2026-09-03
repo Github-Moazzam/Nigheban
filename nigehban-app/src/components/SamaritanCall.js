@@ -75,8 +75,7 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
         {revealed ? (
           <>
             <Banner tone={C.green} icon="user-check" title="You said you are going">
-              Their name and exact location are below. They have been told you are
-              on the way, and so has their family.
+              They and their family know you are coming.
             </Banner>
 
             <View style={s.detail}>
@@ -103,9 +102,8 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
         ) : (
           <>
             <Text style={[T.body, { color: C.dim }]}>
-              You are being asked because you are close, not because you know them.
-              Nothing identifies the person until you say you are going — and if you
-              say yes, they will see your name.
+              You are being asked because you are close by. Nobody is named until
+              you say you are going — and then they see your name too.
             </Text>
 
             <View style={s.detail}>

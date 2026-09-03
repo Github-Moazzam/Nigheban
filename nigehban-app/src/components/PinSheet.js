@@ -128,8 +128,7 @@ export default function PinSheet({
           <Txt variant="h1" style={{ textAlign: 'center' }}>{heading}</Txt>
           <Text style={[T.meta, s.body]}>
             {body || (mode === 'set'
-              ? 'Arming High Alert never asks for this. Only switching it off does, '
-                + 'so nobody can silence your watch by taking your phone.'
+              ? 'Arming never asks for it. Only switching High Alert off does.'
               : 'High Alert stays on until this is right.')}
           </Text>
 

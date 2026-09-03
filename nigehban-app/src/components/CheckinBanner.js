@@ -61,9 +61,8 @@ export default function CheckinBanner({ checkin, onAck, style }) {
 
       <Text style={[T.meta, { color: C.dim }]}>
         {left === 0
-          ? 'The deadline has passed. The server is telling your family now.'
-          : 'The deadline lives on the server, so answering here is what closes it — '
-            + 'not this app staying open.'}
+          ? 'Time is up — your family is being told.'
+          : 'Answer here and it closes, even if you shut the app.'}
       </Text>
 
       <Button title="I AM FINE" filled tone={C.green} icon="check"

@@ -28,6 +28,35 @@ from server.services.family import family_of
 log = get_logger(__name__)
 
 
+# What a push says a kind IS. Without this the shade got the column name with
+# its underscore taken out -- "WATCH LOST - Ayesha", which reads as a lost
+# gadget rather than as a person who has gone quiet, and "GOING DARK - Ayesha",
+# which reads as nothing at all. The words here are the app's own headings, so
+# the notification and the screen it opens agree.
+PUSH_TITLE = {
+    "sos": "{name} needs help",
+    "snatch": "{name}'s band was torn off",
+    "accident": "Road accident — {name}",
+    "fall": "{name} may have fallen",
+    "checkin_missed": "{name} did not answer a check-in",
+    "watch_lost": "{name}'s watch went quiet while armed",
+    "going_dark": "{name}'s phone is about to die",
+    "low_battery": "{name}'s phone battery is low",
+    "band_battery": "{name}'s band battery is low",
+}
+
+# And what to do about it. An emergency gets the urgent wording; the quiet
+# kinds get the fact, because "tap immediately" over a low battery is how a
+# family learns to ignore the ones that matter.
+PUSH_BODY = {
+    "checkin_missed": "Open Nigehban to see where they were.",
+    "watch_lost": "Their phone stopped reporting. Open Nigehban to see where they were.",
+    "going_dark": "Open Nigehban to see where they were.",
+    "low_battery": "Open Nigehban for details.",
+    "band_battery": "Open Nigehban for details.",
+}
+
+
 def nearby_strangers(uid, lat, lon, now=None):
     """Fresh presence within the radius, minus the person and their family.
 
@@ -205,9 +234,9 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
 async def _deliver_out_of_band(payload, row, uid, name, kind, sev, lat, lon, targets):
     """The slow half of emit_alert, with nobody waiting on it."""
     # Send Remote System Push Notification via Expo Push Service API for closed/killed apps
-    push_title = (f"EMERGENCY SOS - {name}" if sev >= 5
-                  else f"{kind.replace('_', ' ').upper()} - {name}")
-    push_body = "Tap immediately to open Nigehban for location and emergency details."
+    push_title = PUSH_TITLE.get(kind, "{name} — " + kind.replace("_", " ")).format(name=name)
+    push_body = PUSH_BODY.get(
+        kind, "Tap immediately to open Nigehban for location and emergency details.")
     await send_expo_push_notifications(targets, push_title, push_body,
                                        {"alert_id": row["id"], "severity": sev})
 
