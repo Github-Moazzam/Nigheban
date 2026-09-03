@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { PermissionsAndroid, Platform } from 'react-native';
+import { AppState, PermissionsAndroid, Platform } from 'react-native';
 import {
   clearBandPin, getBandName, getBandPin, nameLegal, pinLegal, rememberBandName,
   setBandPin,
@@ -196,8 +196,19 @@ let authTried = false;
 // band refused is never the one this phone tries to reconnect with.
 let pendingPin = null;
 
+let stateSub = null;
+
 function bleManager() {
-  if (!manager && BleManager) manager = new BleManager();
+  if (!manager && BleManager) {
+    manager = new BleManager();
+    stateSub = manager.onStateChange((state) => {
+      if (state === 'PoweredOn' && wantsLink && connectFn) {
+        // Wakes the JS thread from the native event so we don't wait for a frozen timer
+        resetBackoff();
+        connectFn();
+      }
+    }, true);
+  }
   return manager;
 }
 
@@ -216,12 +227,31 @@ function retrySoon(ms) {
   // see the flag's own comment.
   if (pinBlocked) return;
   clearTimeout(retryTimer);
+  
+  if (ms === 'now') {
+    // Explicit request to bypass the timer (e.g. from a background event where 
+    // setTimeout would freeze, but we know it's safe to immediately request a connection).
+    retryTimer = null;
+    Promise.resolve().then(() => connectFn?.());
+    return;
+  }
+  
   const wait = ms == null ? retryDelay : ms;
   // A caller-supplied wait is a fact about the radio, not a failure count, so
   // it must not push the backoff up on top of itself.
   if (ms == null) retryDelay = Math.min(retryDelay * 2, retryCap);
   retryTimer = setTimeout(() => { retryTimer = null; connectFn?.(); }, wait);
 }
+
+// If the app goes to the background while waiting for a retry, the JS timer will freeze.
+// Cancel the wait and fire immediately so the native BLE stack can take over with autoConnect.
+AppState.addEventListener('change', (state) => {
+  if (state !== 'active' && retryTimer && connectFn) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    connectFn();
+  }
+});
 
 /** A link came up, or the user let go: the next failure starts short again. */
 function resetBackoff() {
@@ -817,7 +847,11 @@ export function useBand(onEvent, {
       // it is answered.
       if (!pinBlocked) {
         setStatus('disconnected');
-        retrySoon();
+        if (AppState.currentState !== 'active') {
+          retrySoon('now'); // Bypass frozen JS timer so Android autoConnect registers immediately
+        } else {
+          retrySoon();
+        }
       }
     });
 
@@ -1091,8 +1125,12 @@ export function useBand(onEvent, {
       connecting = true;
       setStatus('connecting');
       try {
-        // No requestMTU here on purpose -- see the scan path below.
-        let c = await mgr.connectToDevice(knownId, { timeout: DIRECT_TIMEOUT_MS });
+        // Use autoConnect without a timeout when the app is in the background. JS timers freeze,
+        // so we push the wait into the native Android BLE stack which can wait indefinitely.
+        // In the foreground, use the timeout so it falls back to scanning for faster UI feedback.
+        const isBg = AppState.currentState !== 'active';
+        const opts = isBg ? { autoConnect: true } : { timeout: DIRECT_TIMEOUT_MS };
+        let c = await mgr.connectToDevice(knownId, opts);
         c = await c.discoverAllServicesAndCharacteristics();
         await finishLink(c);
         return;

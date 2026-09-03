@@ -23,7 +23,11 @@ the app force-stopped and the screen off, has been seen to show it.
 
 BUG-010 was reported after that pass and is open. It is the reason the pass
 above could read green on BUG-002 while the band still fails to come back on
-its own: the device testing was done with the screen on.
+its own: the device testing was done with the screen on. **It was re-tested on
+two phones on 3 Sep 2026 and they disagree** — the Samsung fails in every state
+except app-in-front-and-screen-on, the Vivo reconnects in all of them while its
+process is alive. The entry carries the table and what it does and does not
+change; the short version is that this fix must not be verified on the Vivo.
 
 **BUG-011 was fixed on `watch-lost-fix` (PR #34, 2 Sep 2026)** — and not by the
 one-line `UPDATE` its entry planned. The whole watchdog was rewritten from a
@@ -1038,8 +1042,16 @@ different failures at different layers:
 | Recovers on | screen on / app to foreground | nothing |
 
 BUG-010 is a timer that never fires. This is a phone with nothing left to fire
-it. A Samsung shows BUG-010; a Vivo shows both, because it kills the process
-outright.
+it.
+
+*(That line used to end "a Samsung shows BUG-010; a Vivo shows both, because it
+kills the process outright." The 3 Sep 2026 pass on two phones says otherwise —
+see the device table in BUG-010. The Samsung shows BUG-010 in every state,
+swiped included, with its foreground-service notification visible throughout.
+The Vivo shows **only this bug**: while its process lives it reconnects fine,
+screen off and backgrounded, and it fails only once Funtouch has killed it. So
+the Vivo is the clean reproduction of BUG-015 and no longer a reproduction of
+BUG-010 at all — which also means a fix for BUG-010 cannot be verified on it.)*
 
 ### Planned fix
 
@@ -1184,6 +1196,81 @@ built on them — `59fc02d` moved the link and the retry loop to module scope
 (see [BRANCH_NOTES_ble-close-app-bug.md](BRANCH_NOTES_ble-close-app-bug.md) §2)
 and that work is correct and still necessary. It fixed **where the retry timer
 lives**. It did not, and could not, fix **whether the timer ever fires**.
+
+### Two phones, and they disagree — 3 Sep 2026
+
+The three cases above are the Samsung (Android 14). The same walk-out-and-back
+test was then run on a Vivo (Android 8), and **it does not reproduce this bug at
+all** as long as its process is alive:
+
+| | app in front, screen on | app in front, screen off | app in Recents, screen on | app in Recents, screen off | swiped out of Recents |
+|---|---|---|---|---|---|
+| **Samsung (A14)** | reconnects | **no** | **no** | **no** | **no** — process still alive |
+| **Vivo (A8)** | reconnects | reconnects | reconnects | reconnects | n/a — Funtouch `kill -9`s it (BUG-015) |
+
+**The Samsung row is the cause below, cell by cell.** The only state that
+recovers is the one where the Activity is *resumed*; every other state fails,
+and each one recovers the instant the Activity comes back — power button if the
+app is already in front, opening it from Recents otherwise. The new cell is
+**backgrounded with the screen on**, which the original three cases never
+covered: it fails too. That separates "the screen is off" from "the Activity is
+paused" and confirms it is the second one that matters, which is what the
+`onHostPause` explanation actually claims.
+
+The Samsung's swiped column is BUG-010 and not BUG-015, and the reporter
+confirms it directly: **the "running in the background" notification stays in
+the shade the whole time**, swiped or not. So the foreground service is up, the
+process is alive, the module-scope retry loop from `59fc02d` exists — and the
+band still does not come back. Nothing here is missing. The timer is there and
+nothing reads it. (This is also the second-hand evidence made first-hand: BUG-005
+and BUG-006 inferred a live process on this phone from an SOS getting out with
+the app swiped away; the service notification says so outright.)
+
+On the Vivo a swipe kills the process outright, so that column is BUG-015 and
+this entry cannot speak to it.
+
+**The Vivo row is the part that needs explaining.** Its Activity is paused in
+exactly the same way, so on the reasoning below its timers should be frozen too,
+and the band should stay dark. It comes back anyway. The leading candidate is
+already documented one section down, in "Why the foreground service does not
+save it": each background location tick registers a headless task, which is the
+one condition under which `JavaTimerManager` keeps servicing timers while
+paused.
+
+Note what that hypothesis is *not* allowed to say, now that the service
+notification is confirmed on the Samsung: the difference cannot be "the Vivo has
+a foreground service and the Samsung does not". Both do. It has to be whether
+that service's location task actually **ticks** — an Android 8 Vivo delivering
+its updates on schedule, against a One UI Samsung that defers them in Doze or
+has put the app to sleep. Same service, same code, different scheduler. If that
+is right, the Vivo is not passing; it is being carried by a mechanism this entry
+already argues cannot be relied upon.
+
+Three cheap checks would settle it, and none needs new code:
+
+- **Time the Vivo's reconnect.** Seconds means something else is driving it and
+  this analysis is incomplete. Tens of seconds, up to a minute or more, is the
+  60 s location tick and confirms the above.
+- **Disarm the background watch on the Vivo and repeat.** If the reconnect stops
+  happening, the headless window is the whole answer.
+- **On the Samsung, check the location task is running at all** — the permission
+  set to *Allow all the time*, the app not in One UI's sleeping-apps list, and
+  battery optimisation off for it. If it is ticking on the Samsung too and the
+  band still does not come back, the headless-window hypothesis is wrong and the
+  difference is somewhere else.
+
+**A new failure path that breaks the Vivo too:** The reporter just provided a test that fails on the Vivo as well. If the app is in Recents, and instead of walking out of range, the user **turns the phone's Bluetooth off and back on**, the Vivo does not reconnect. 
+
+This happens because the app has no `BleManager.onStateChange` listener to wake it when the radio comes back. It relies entirely on the `retrySoon()` polling loop. When Bluetooth goes off, the polling loop sees `PoweredOff` and backs off to once a minute. Because the app is paused, the JS timer is frozen. Even if the headless location task wakes the timer once a minute, it's just a poll. If the radio state changing doesn't actively wake the JS thread, the adapter toggle goes unnoticed, proving the app is fundamentally blind to state changes and relies completely on the (frozen) retry timer.
+
+**What this does not change: the fix.** A reconnect must still never be
+scheduled on a JS timer. The Vivo is the accident, not the baseline — it works
+by way of a window that opens at best once a minute, closes as soon as the
+task's promise settles, and is the first thing Doze takes away.
+
+**What it does change: how this gets verified.** Do not test the fix for this
+bug on the Vivo. It reads green there today, with the bug fully present in the
+code, which is precisely the kind of pass this file exists to stop being trusted.
 
 ### Cause
 
@@ -1919,3 +2006,25 @@ called done.
 The phone's detector being switched off (PR #33). That is a deliberate change
 and it is why this is now visible; it is not the cause. The band was always the
 only thing reporting `impact`.
+
+---
+
+## BUG-018 — App Security PIN can be bypassed/reset without the old PIN (MVP Shortcut)
+
+**Status:** DEFERRED (Intentional for MVP)
+**Severity:** Low for prototype, Critical for production
+**Area:** `UserSettings.js` · `PinSheet.js` · `security.js`
+
+### Symptom
+The App Security PIN (the 4-digit PIN protecting the phone app) can be reset or removed without knowing the current PIN. Going to Settings → Security PIN opens the sheet in `set` mode, which blindly overwrites the PIN. Tapping "Remove PIN" removes it entirely in a single tap. Furthermore, doing this clears any active lockout timers. 
+
+### Cause & Intent
+This is **deliberately left this way for the prototype/MVP phase** to easily demonstrate features and prevent getting permanently locked out during testing. 
+
+In a production environment, anyone holding the unlocked phone could bypass High Alert disarm, remove family members, drop an SOS, and reveal the band PIN simply by resetting the app PIN without knowing the old one. 
+
+### Planned fix (Future)
+When moving out of the MVP stage, this must be secured:
+1. `mode="set"` must require the user to successfully enter the *current* PIN before allowing a new one to be set.
+2. "Remove PIN" must require the current PIN.
+3. Resetting a PIN should not clear active lockout timers unless the old PIN was successfully provided.
