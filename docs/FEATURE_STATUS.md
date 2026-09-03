@@ -41,6 +41,20 @@ evidence of anything. **[BUG_LIST.md](BUG_LIST.md) is the live defect record**
   Full reasoning, protocol and the honest limits of legacy passkey pairing:
   [BAND_PIN_AND_NAME.md](BAND_PIN_AND_NAME.md).
 
+- **`watch_lost` stopped crying wolf** (2 Sep, `watch-lost-fix`, PR #34). It
+  used to be a query — the sweeper selected rows whose columns happened to look
+  bad at the moment it ran, which pages a family for a state that was never
+  entered. It is now a rule about a **transition**, in its own module
+  ([watch_lost.py](../server/watch_lost.py)): the family is told only when a
+  live link to a physical band and a running alert were both true and *then*
+  the link went away. The row records what was witnessed at the beat rather
+  than what is true at sweep time (migration 006), and a drop starts a
+  120-second clock instead of an alert, so a sleeve or a microwave costs
+  nothing (migration 007). This closed **BUG-011**.
+
+- **Phone fall detection was switched off** (2 Sep, PR #33) — see the note
+  below §3.6 before testing anything that involves dropping a handset.
+
 - **The offline SOS queue** — the item §5 called "highest-value on this list".
   Local-first dispatch, unsent alerts persisted, flushed on reconnect, and
   delivery state rendered honestly. §3.3's caveat and Blocker #3 are corrected
@@ -70,13 +84,14 @@ evidence of anything. **[BUG_LIST.md](BUG_LIST.md) is the live defect record**
   the wearer, and the responder list is restored when the app reopens. The push
   is the part still needing a phone: force-stopped app, screen off.
 
-**New problems found since, all open.** These were found by using the thing, and
-most of them were invisible from the UI:
+**New problems found since.** These were found by using the thing, and most of
+them were invisible from the UI. All still open except BUG-011, fixed and
+device-verified on `watch-lost-fix` (PR #34, 2 Sep):
 
 | # | What | Severity |
 |---|---|---|
 | BUG-010 | The band only reconnects while the screen is on — `retrySoon` is a `setTimeout`, and Android stops those when the activity is not visible | High |
-| BUG-011 | Every SOS from a killed app also raises a false `watch_lost`, so a contradictory alert lands beside a real emergency | High |
+| BUG-011 | Every SOS from a killed app also raises a false `watch_lost`, so a contradictory alert lands beside a real emergency | High — ✅ **fixed 2 Sep** |
 | BUG-012 | Any band's SOS beacon fires on **every** Nigehban phone in range — an emergency raised on the wrong account, to the wrong family | Critical — 💤 stale |
 | BUG-013 | A stranger's press silently discards your own band's SOS | Critical — 💤 stale |
 | BUG-014 | A band reboot can discard the next real press | High — 💤 stale |
@@ -154,7 +169,7 @@ the pre-`3d5efb9` behaviour restored on purpose.
 
 | # | Feature | Done | Missing |
 |---|---|---|---|
-| 20 | **Fall & accident detection** | `HAS_IMU 1`: both state machines on the band and on the phone, `impact` gated on GPS speed, the question routed through `/checkin/self` so the sweeper escalates with the app dead, `near_miss` written and told to nobody | **Thresholds are still the literature's starting values** — the drop tests and the false-positive set in [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) have not been run on the band yet. Wake-on-motion is deferred, so the IMU costs 0.4–0.5 mA of the 200–400 µA idle budget |
+| 20 | **Fall & accident detection** | `HAS_IMU 1`: both state machines **on the band** — the phone's copy was switched off 2 Sep 2026, see §3.6 — `impact` gated on GPS speed, the question routed through `/checkin/self` so the sweeper escalates with the app dead, `near_miss` written and told to nobody | **Thresholds are still the literature's starting values** — the drop tests and the false-positive set in [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) have not been run on the band yet. Wake-on-motion is deferred, so the IMU costs 0.4–0.5 mA of the 200–400 µA idle budget |
 | 21 | **Android background survival** | Foreground service, BLE reconnect loop, scan timeout, battery-optimisation prompt, OEM deep links | **N2.3** boot receiver · **N2.4** WorkManager watchdog. A rebooted phone does not come back on its own |
 
 ### ☐ Not built (7)
@@ -458,11 +473,14 @@ precisely so it cannot be timed by somebody watching.
 
 ### 3.6 Fall detection ◑
 
-**Status:** **phone side works, band side does not exist.**
+**Status:** **the band detects falls; the phone no longer does.** This is the
+reverse of what this section said until 2 Sep 2026, and it is a deliberate
+change rather than a regression — read the row below before writing a test that
+drops a handset.
 
 | | State |
 |---|---|
-| Phone accelerometer state machine at 104 Hz | ✅ [`virtualBand.js`](../nigehban-app/src/virtualBand.js) |
+| Phone accelerometer state machine at 104 Hz | ❌ **switched off 2 Sep 2026** (PR #33). The sensor loop in [`virtualBand.js`](../nigehban-app/src/virtualBand.js#L569) is commented out and `imu` reports `disabled`; the phone's **impact** reporter is inside the same block and is off with it. Nothing was deleted, so turning it back on is uncommenting one `useEffect`. The manual **FORCE FALL** trigger is outside the block and still works |
 | 30 s (sev 4) / 15 s (sev 5) countdown, vibrating through the last five seconds | ✅ [`FallCountdown.js`](../nigehban-app/src/components/FallCountdown.js) |
 | "I'm fine" writes a `near_miss` the server records and tells nobody | ✅ |
 | Hold-to-cancel on the end-user shell, plus one press on the band | ✅ [`DisarmPad.js`](../nigehban-app/src/screens/user/DisarmPad.js) — **the PIN was removed from this screen on 2 Sep 2026.** Asking somebody who has just hit the ground to recall a passcode in 45 s was buying a false alarm, and the band's single tap already walked past the gate. A 1.5 s hold answers the real threat (a pocket) without a memory test. The PIN still gates High Alert disarm, family removal and the SOS drop, where there is an adversary. See [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) |
@@ -471,12 +489,21 @@ precisely so it cannot be timed by somebody watching.
 | **Escalation survives the app being killed** | ✅ `POST /checkin/self` → `checkins` row → the sweeper raises `fall`/`accident` |
 | **Threshold calibration** | ❌ still the starting values. `{"c":"imucal","on":1}` streams the CSV; the protocol is in [FALL_AND_ACCIDENT.md](FALL_AND_ACCIDENT.md) |
 
-**Test (L2):** BAND tab → **FORCE FALL**, or actually drop the phone onto a
-cushion. The countdown appears; cancelling writes a `near_miss` that the family
-never sees.
+**Test (L2):** BAND tab → **FORCE FALL**. The countdown appears; cancelling
+writes a `near_miss` that the family never sees. This still proves the whole
+chain *after* detection — countdown, cancel, escalation, `near_miss` — which is
+most of what L2 was ever testing here.
 
-**Test that must also pass (matrix #18):** slide a phone off a sofa and get
-**no** alert. A bag falling off a chair must not page a mother at 2 a.m.
+> **Dropping the phone onto a cushion no longer does anything**, and that is
+> the expected result as of 2 Sep 2026. Detection itself has moved to **L4**:
+> the only thing that can now start a fall is the band's own IMU over BLE, so
+> a threshold cannot be exercised without hardware on a wrist.
+
+**Matrix #18 — "a phone slides off a sofa raises no alert" — is now true by
+construction rather than by tuning**, because nothing on the phone is
+listening. Do not read it as a pass: it proves the detector is off, not that it
+is good. The equivalent test on the band is unrun, and it is the one that
+matters — a bag falling off a chair must not page a mother at 2 a.m.
 
 **Blocked by:** [Blocker #6](#6-blockers-ranked).
 
@@ -803,15 +830,22 @@ own**, on the **release** APK, against the **cloud**. None of that has happened.
 | 15 | High Alert buzz at 5–10 min; miss → alert | ✅ | L2 |
 | 16 | High Alert disarm without PIN → refused | ✅ | L1/L2 |
 | 17 | Fall: drop the band from 1.5 m | ◐ | Code is live; the drop tests themselves are unrun. [Protocol](FALL_AND_ACCIDENT.md) |
-| 18 | Fall: phone slides off a sofa → **no** alert | ◐ | Never measured against real CSV |
+| 18 | Fall: phone slides off a sofa → **no** alert | — | **Moot since 2 Sep** — phone detection is switched off, so this passes because nothing is listening. The band equivalent replaces it and is unrun |
 | 18b | Hard impact at 40 km/h → accident check-in → family told if unanswered | ◐ | Bench path testable via FAKE SPEED + FORCE CRASH; in-vehicle tests unrun |
 | 19 | Kill the service from OEM settings → family amber in 3 min | ✅ | L2 |
 | 20 | Good Samaritan on a severity-5 alert | ✅ | L0 |
 
-**Tally: 11 pass · 5 unverified · 4 fail · (row 18 counted as unverified).**
+**Tally: 11 pass · 4 unverified · 4 fail · 1 moot.**
 Row 12 moved from unverified to fail on 1 Sep — it was written, then run.
 That is the tally doing its job: a box only leaves ◐ by being tested, and it can
 leave in either direction.
+
+Row 18 left it in a third direction on 2 Sep, and that is worth a line of its
+own: the feature under it was switched off, so the row now passes for a reason
+that has nothing to do with the thing it was written to measure. Counting it as
+a pass would be the most flattering possible reading of a detector that is not
+running. It is counted as moot instead, and the band-side test that replaces it
+is unrun.
 
 ---
 
