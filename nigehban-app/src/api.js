@@ -325,6 +325,33 @@ export async function updateUserSettings(session, patch) {
   });
 }
 
+/**
+ * Remember this account's band PIN, so a forgotten one is recoverable.
+ *
+ * Called whenever the band has ACCEPTED a PIN -- never on a guess. Best effort
+ * on purpose: the band is already using it and the phone has already stored it,
+ * so a failure here costs the recovery path and nothing else, and must not turn
+ * a successful PIN change into an error on screen.
+ */
+export async function saveBandPin(session, pin) {
+  return call(session, '/me/band-pin', {
+    method: 'PUT',
+    body: { band_pin: pin },
+  });
+}
+
+/**
+ * Get it back. The caller must put the four-digit app PIN in front of this.
+ *
+ * Needs a network, which is the trade: the phone forgets the band PIN when
+ * somebody presses Disconnect -- deliberately -- so the account is the only
+ * copy left at exactly the moment it is wanted.
+ */
+export async function fetchBandPin(session) {
+  const r = await call(session, '/me/band-pin');
+  return r?.band_pin || null;
+}
+
 /** Explicitly allow or deny Good Samaritan emergency broadcast. */
 export async function optinSamaritan(session, alertId, action) {
   return call(session, `/alert/${alertId}/samaritan-optin`, {

@@ -3,7 +3,7 @@ import {
   ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text,
   TextInput, View,
 } from 'react-native';
-import { updateUserSettings } from '../../api';
+import { fetchBandPin, updateUserSettings } from '../../api';
 import { MODES } from '../../bandLink';
 
 import PinSheet from '../../components/PinSheet';
@@ -56,6 +56,9 @@ const BAND_LABEL = {
  * stuck with a band that was six inches away and merely asking to be let in.
  */
 const NEEDS_PIN = new Set(['needs-pin', 'bad-pin']);
+
+/** The recovery dialog's three non-answers; anything else is the PIN itself. */
+const RECOVER_TONE = { offline: U.amber, none: U.amber, loading: U.mint };
 
 /**
  * Setup for the end user: what is working, what is not, and the two things
@@ -629,28 +632,50 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         onCancel={() => setRecover(null)}
         onDone={async () => {
           await refreshPin();
-          const stored = await band?.revealPin?.();
-          setRecover(stored || 'none');
+          setRecover('loading');
+          // The ACCOUNT, not the keystore. The phone deliberately forgets the
+          // band PIN when somebody presses Disconnect, so the local copy is
+          // gone in exactly the situation this screen exists for. The account's
+          // copy is written every time the band accepts a PIN, and a PIN change
+          // is refused without a network so the two cannot drift apart.
+          try {
+            const stored = await fetchBandPin(session);
+            setRecover(stored || 'none');
+          } catch {
+            setRecover('offline');
+          }
         }}
       />
 
       <Dialog
         visible={!!recover && recover !== 'ask'}
-        tone={recover === 'none' ? U.amber : U.mint}
-        icon={recover === 'none' ? 'alert-circle' : 'key'}
-        title={recover === 'none' ? 'This phone does not have it' : 'The band PIN'}
-        body={recover === 'none'
-          ? 'This phone has no band PIN stored, so there is nothing to show. '
-            + 'Try a family phone that is still linked to the band. If none is, '
-            + 'the band itself is the way back — hold its button down while it '
-            + 'restarts, keep holding for five seconds, and its name and PIN go '
-            + 'back to factory. Then forget the band in Android’s Bluetooth '
-            + 'settings before linking again.'
-          : recover}
-        note={recover === 'none'
+        loading={recover === 'loading'}
+        loadingLabel="Asking your account…"
+        tone={RECOVER_TONE[recover] || U.mint}
+        icon={recover === 'offline' ? 'wifi-off'
+              : recover === 'none' ? 'alert-circle' : 'key'}
+        title={recover === 'offline' ? 'No connection'
+               : recover === 'none' ? 'Your account does not have it'
+               : 'Your band PIN'}
+        body={recover === 'offline'
+          ? 'Your band PIN is kept on your account, not on this phone — the '
+            + 'phone forgets it whenever you disconnect the band. Getting it '
+            + 'back needs an internet connection. Try again when you have signal.'
+          : recover === 'none'
+            ? 'No band PIN has ever been saved to your account, so there is '
+              + 'nothing to give you. The band itself is the way back — hold '
+              + 'its button down while it restarts, keep holding for five '
+              + 'seconds, and its name and PIN go back to factory. Then forget '
+              + 'the band in Android’s Bluetooth settings before linking again.'
+            : recover}
+        note={recover === 'offline' || recover === 'none' || recover === 'loading'
           ? undefined
-          : 'Write it somewhere safe. Any other phone you link to this band will be asked for it.'}
-        actions={[{ label: 'Done', icon: 'check', onPress: () => setRecover(null) }]}
+          : 'Write it somewhere safe. If the band refuses it, it was changed on '
+            + 'another phone that had no signal at the time — reset the band '
+            + 'with its own button.'}
+        actions={recover === 'loading' ? [] : [
+          { label: 'Done', icon: 'check', onPress: () => setRecover(null) },
+        ]}
         onClose={() => setRecover(null)}
       />
     </>

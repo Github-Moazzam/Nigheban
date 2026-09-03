@@ -477,7 +477,9 @@ async function locationServicesOff() {
  * Only then will the hook re-link on its own; in virtual mode a remembered
  * band must not pull the phone back onto a scan nobody asked for.
  */
-export function useBand(onEvent, { autoLink = false } = {}) {
+export function useBand(onEvent, {
+  autoLink = false, escrowPin, escrowReachable,
+} = {}) {
   const [status, setStatus] = useState(
     BleManager ? (linked ? 'connecting' : 'idle') : 'simulated');
   const [battery, setBattery] = useState(null);
@@ -509,6 +511,16 @@ export function useBand(onEvent, { autoLink = false } = {}) {
 
   const cb = useRef(onEvent);
   cb.current = onEvent;
+
+  // Called with a PIN the BAND has accepted -- never with a guess. This file
+  // deliberately knows nothing about accounts or servers; it reports the one
+  // fact it is in a position to know, and App.js decides that fact is worth
+  // keeping against the account. Refs because they are called from module-scope
+  // listeners that outlive any particular render.
+  const pinCb = useRef(escrowPin);
+  pinCb.current = escrowPin;
+  const reachCb = useRef(escrowReachable);
+  reachCb.current = escrowReachable;
 
   // Everything the link needs to keep itself up -- the standing instruction,
   // the retry, the scan guard, the data watchdog, the partial line -- now
@@ -554,6 +566,17 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   const goLive = useCallback((msg) => {
     authed = true;
     pinBlocked = false;
+
+    // The band said yes to whatever this phone sent, so this is a PIN known to
+    // work -- the only kind worth remembering anywhere. It also quietly covers
+    // the factory reset: a wiped band answers to the factory PIN, the phone is
+    // told that PIN, it authenticates with it, and the escrowed copy follows
+    // the band back to factory without anybody doing anything.
+    // Best effort, and safe to be: this writes a PIN that is known to WORK, so
+    // the worst a failure leaves behind is an account with no copy -- which is
+    // recoverable. Writing a copy that is WRONG is the dangerous direction, and
+    // only a PIN change can do that; see changePin().
+    getBandPin().then((pin) => { if (pin) pinCb.current?.(pin); }).catch(() => {});
 
     // The band's own name wins over anything cached. It may have been renamed
     // from another phone in the family since this one last looked.
@@ -652,18 +675,41 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       case 'pin_set':
         // The band agreed, so now -- and only now -- this phone remembers it.
         if (pendingPin) {
-          setBandPin(pendingPin).catch(() => {
-            // The keystore refused. The band has moved on regardless, so say so
-            // loudly: the next reconnect will ask, and the person needs to know
-            // the number they just chose is the answer.
+          const accepted = pendingPin;
+          pendingPin = null;
+          setDefaultPin(false);
+          setLastError(null);
+
+          // The band has moved on. Both copies now have to catch up, and
+          // neither failing is allowed to be quiet -- whichever one misses, the
+          // person is the fallback and has to be told the number.
+          setBandPin(accepted).catch(() => {
             setLastError('The band took the new PIN but this phone could not '
-                         + 'save it. Write it down -- you will be asked for it '
+                         + 'save it. Write it down — you will be asked for it '
                          + 'the next time the band reconnects.');
           });
-          pendingPin = null;
+
+          // The reachability check in changePin() ran seconds ago, so this
+          // should not fail. If it does, the account is now holding the OLD
+          // PIN against a band that has stopped accepting it -- the one
+          // divergence that matters -- so it is reported in full rather than
+          // swallowed, with the digits, because at this point the person is
+          // the only reliable copy left.
+          Promise.resolve(pinCb.current?.(accepted))
+            .then((saved) => {
+              if (saved === false) throw new Error('escrow refused');
+            })
+            .catch(() => {
+              setLastError('The band took the new PIN, but it could not be '
+                           + 'saved to your account — so "I have forgotten it" '
+                           + 'would give you the OLD one. Write ' + accepted
+                           + ' down now, and set the PIN again when you have '
+                           + 'signal to fix the copy on your account.');
+            });
+        } else {
+          setDefaultPin(false);
+          setLastError(null);
         }
-        setDefaultPin(false);
-        setLastError(null);
         return;
 
       case 'pin_rejected':
@@ -1406,22 +1452,38 @@ export function useBand(onEvent, { autoLink = false } = {}) {
       setLastError('A band PIN is six digits.');
       return false;
     }
+
+    // ---- the network is a PRECONDITION, not a nicety ---------------------
+    //
+    // The account holds a copy of this PIN so a forgotten one can be recovered,
+    // and the one thing that copy must never be is WRONG. Missing is survivable
+    // -- the wearer falls back to the band's own button. Wrong is not: it hands
+    // somebody six digits with total confidence, they type them, the band
+    // refuses, and they have spent attempts against a lockout while believing
+    // they hold the answer.
+    //
+    // Changing the PIN offline is exactly how that happens. The band would take
+    // the new one and the account would go on holding the old one, with nothing
+    // anywhere aware they had diverged. So the server is checked BEFORE the
+    // band is touched, and a phone with no signal is told to wait.
+    //
+    // Checked rather than written, and in that order deliberately. Writing the
+    // new PIN first would put an unconfirmed value in the account, and a band
+    // that then refused the change -- wrong current PIN, most likely -- would
+    // leave the same divergence pointing the other way.
+    if (reachCb.current && !(await reachCb.current())) {
+      setLastError('Changing the band PIN needs an internet connection, so the '
+                   + 'new one can be saved to your account. Without that, a PIN '
+                   + 'you forget later could not be recovered. Try again when '
+                   + 'you have signal.');
+      return false;
+    }
+
     pendingPin = pin;
     const ok = await send({ c: 'setpin', old: oldPin, pin });
     if (!ok) pendingPin = null;
     return ok;
   }, [send]);
-
-  /**
-   * The PIN this phone has stored, for a person who has forgotten it.
-   *
-   * Gated by the caller behind the disarm PIN, which is the existing "prove you
-   * are the owner of this phone" gate. It reveals nothing an attacker holding
-   * this unlocked, signed-in phone could not already do -- the band is linked
-   * and obeys it -- and it is the difference between a forgotten PIN costing a
-   * few taps and costing a factory reset plus re-pairing every phone.
-   */
-  const revealPin = useCallback(() => getBandPin(), []);
 
   /**
    * Make the band forget every phone that has ever paired with it.
@@ -1489,6 +1551,5 @@ export function useBand(onEvent, { autoLink = false } = {}) {
   return { status, connect, disconnect, send, simulate, simulated,
            battery, armed, highAlert, lastSeen, bleError, lastError,
            // identity: what the band is called, and who may talk to it
-           bandName, defaultPin, submitPin, renameBand, changePin, revealPin,
-           unpairAll };
+           bandName, defaultPin, submitPin, renameBand, changePin, unpairAll };
 }

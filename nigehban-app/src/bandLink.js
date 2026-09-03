@@ -31,7 +31,7 @@ const IDENTITY_EVENTS = new Set([
   'cfg', 'unpaired',
 ]);
 
-export function useBandLink(onEvent) {
+export function useBandLink(onEvent, { escrowPin, escrowReachable } = {}) {
   // Virtual is the default because it is the mode that works today. The
   // preference is persisted, so a tester who switches to BLE stays there.
   const [mode, setMode] = useState(MODES.VIRTUAL);
@@ -65,7 +65,11 @@ export function useBandLink(onEvent) {
   // after the app is closed and reopened. It has to wait for the stored mode:
   // BLE is not the default, so before the read lands every launch would look
   // like virtual mode and the auto-relink would never fire.
-  const ble = useBand(onEvent, { autoLink: modeLoaded && !virtualActive });
+  const ble = useBand(onEvent, {
+    autoLink: modeLoaded && !virtualActive,
+    escrowPin,
+    escrowReachable,
+  });
 
   // The virtual band hands us the same newline JSON the BLE characteristic
   // carries, so it goes through the same parse and the same state updates.
@@ -130,7 +134,6 @@ export function useBandLink(onEvent) {
     renameBand: async (name) => virtual.deliver({ t: 'cmd', c: 'setname', name }),
     submitPin: async () => false,
     changePin: async () => false,
-    revealPin: async () => null,
     unpairAll: async () => false,
   };
 }

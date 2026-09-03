@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator, Modal, Pressable, StyleSheet, Text, Vibration, View,
 } from 'react-native';
-import { setPin, verifyPin } from '../security';
+import { pinLockoutLeft, setPin, verifyPin } from '../security';
 import { C, R, S, T } from '../theme';
 import { Icon, Txt } from '../ui';
 
@@ -33,7 +33,13 @@ export default function PinSheet({
   const [entry, setEntry] = useState('');
   const [first, setFirst] = useState(null);      // 'set' mode: the first pass
   const [error, setError] = useState(null);
-  const [tries, setTries] = useState(0);
+  // Milliseconds the gate is shut for, counted down while the sheet is open.
+  //
+  // This used to be a local `tries` counter that reset every time the sheet
+  // closed -- three guesses, close, three more, forever, against four digits.
+  // The count now lives in security.js and survives, so this is only the
+  // display of somebody else's decision.
+  const [lockedFor, setLockedFor] = useState(0);
   // The PIN lives in the keystore, and reading it is not instant on every
   // phone. Without this the fourth dot fills and the sheet simply sits there,
   // which on the screen that stands between somebody and disarming an alarm
@@ -42,11 +48,29 @@ export default function PinSheet({
 
   useEffect(() => {
     if (!visible) {
-      setEntry(''); setFirst(null); setError(null); setTries(0); setChecking(false);
+      setEntry(''); setFirst(null); setError(null); setChecking(false);
+      return;
     }
+    // Opening the sheet does not clear a lockout -- it reports one. Ask on the
+    // way in, or a shut gate would look open until the first wrong guess.
+    let dead = false;
+    pinLockoutLeft().then((ms) => { if (!dead) setLockedFor(ms); }).catch(() => {});
+    // eslint-disable-next-line consistent-return
+    return () => { dead = true; };
   }, [visible]);
 
-  const locked = tries >= 3;
+  // Tick it down so the wait is visibly finite. A locked keypad with no number
+  // on it is indistinguishable from a broken one, and this sheet stands between
+  // somebody and switching off their own alarm.
+  useEffect(() => {
+    if (!visible || lockedFor <= 0) return undefined;
+    const id = setInterval(() => {
+      setLockedFor((ms) => (ms <= 1000 ? 0 : ms - 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [visible, lockedFor]);
+
+  const locked = lockedFor > 0;
 
   const commit = async (pin) => {
     if (mode === 'set') {
@@ -61,13 +85,16 @@ export default function PinSheet({
       return;
     }
 
-    if (await verifyPin(pin)) { onDone?.(pin); return; }
+    const { ok, lockedFor: shut } = await verifyPin(pin);
+    if (ok) { onDone?.(pin); return; }
     Vibration.vibrate(60);
-    setTries((n) => n + 1);
     setEntry('');
-    setError(tries >= 2
-      ? (lockedNote || 'Too many attempts. High Alert stays on.')
-      : wrongNote);
+    if (shut > 0) {
+      setLockedFor(shut);
+      setError(lockedNote || 'Too many attempts. High Alert stays on.');
+      return;
+    }
+    setError(wrongNote);
   };
 
   const press = (k) => {
@@ -118,6 +145,16 @@ export default function PinSheet({
               <ActivityIndicator size="small" color={C.green} />
               <Text style={[T.meta, { color: C.dim }]}>
                 {mode === 'set' ? 'Saving…' : 'Checking…'}
+              </Text>
+            </View>
+          ) : locked ? (
+            <View style={s.errRow}>
+              <Icon name="clock" size={14} color={C.red} />
+              <Text style={[T.meta, { color: C.red }]}>
+                {(error ? error + ' ' : '')}
+                {`Try again in ${lockedFor >= 60000
+                  ? `${Math.ceil(lockedFor / 60000)} min`
+                  : `${Math.ceil(lockedFor / 1000)}s`}.`}
               </Text>
             </View>
           ) : error ? (

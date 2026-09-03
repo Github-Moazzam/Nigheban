@@ -583,6 +583,10 @@ class SettingsIn(BaseModel):
     samaritan_enabled: Optional[bool] = None
 
 
+class BandPinIn(BaseModel):
+    band_pin: str
+
+
 
 # ---------------------------------------------------------------- app ---
 from contextlib import asynccontextmanager
@@ -724,6 +728,65 @@ def update_settings(b: SettingsIn, u=Depends(me)):
                       (b.samaritan_enabled, u["id"]))
             c.commit()
     return {"ok": True, "samaritan_enabled": b.samaritan_enabled}
+
+
+# ---- the band PIN, held against the account ----------------------------
+#
+# Escrow for a six-digit wristband PIN, so a wearer who has forgotten it is not
+# reduced to a factory reset -- which also wipes the band's name and forces
+# every phone in the family to pair again.
+#
+# It exists because of a rule elsewhere that is correct and stays: pressing
+# Disconnect makes the phone forget the PIN. That is what makes Disconnect a
+# real answer to "somebody else has my phone", and it is also precisely what
+# removes the local copy in the one situation somebody needs it back.
+#
+# READ server/migrations/009_band_pin_escrow.sql BEFORE TRUSTING THIS. The
+# column is plaintext and has to be -- the entire purpose is to hand it back to
+# a person, so it cannot be hashed. Anybody who can read the table, or sign in
+# as the user, gets the PIN. This is an accepted interim position with the
+# trade understood, not a finished design; the migration lists what replaces it.
+#
+# Three rules hold here regardless:
+#
+#   1. `band_pin` is never added to /me or /login. It leaves the server through
+#      exactly one endpoint, the one below whose whole job is to return it.
+#   2. Reads are rate limited per account. A stolen session should not be able
+#      to walk anything, and this is the only endpoint that hands back a secret
+#      it did not receive in the request.
+#   3. It is never logged.
+
+
+@app.put("/me/band-pin")
+def put_band_pin(b: BandPinIn, u=Depends(me)):
+    """Remember this account's band PIN. Called whenever the band accepts one."""
+    pin = (b.band_pin or "").strip()
+    if not (len(pin) == 6 and pin.isdigit()):
+        raise HTTPException(400, "a band PIN is six digits")
+    with closing(db()) as c:
+        c.execute("UPDATE users SET band_pin=%s WHERE id=%s", (pin, u["id"]))
+        c.commit()
+    # Deliberately does not echo the PIN back. The caller already has it, and a
+    # value that is never in a response is a value that is never in a log.
+    return {"ok": True}
+
+
+@app.get("/me/band-pin")
+def get_band_pin(req: Request, u=Depends(me)):
+    """Hand the PIN back to its owner. The app gates this behind its own PIN."""
+    # Generous enough that a person retrying past a flaky tunnel is fine, tight
+    # enough that a stolen token cannot be used to farm this quietly.
+    LIMIT.check("band_pin_read", u["id"], 10, 3600,
+                "too many attempts - wait a while")
+    LIMIT.check("band_pin_read_ip", client_ip(req), 30, 3600,
+                "too many attempts - wait a while")
+    with closing(db()) as c:
+        row = c.execute("SELECT band_pin FROM users WHERE id=%s",
+                        (u["id"],)).fetchone()
+    pin = (row or {}).get("band_pin") if row else None
+    # `null` rather than a 404: "this account never stored one" is an ordinary
+    # answer with its own screen behind it, not an error.
+    return {"band_pin": pin}
 
 
 

@@ -320,19 +320,45 @@ phones** (`{"c":"unpair"}`), which is a recovery tool rather than a setting.
 
 Two routes, in the order to try them.
 
-### 1. Ask a phone that still has it
+### 1. Ask your account
 
-Any phone still linked to the band is holding the six digits in its keystore.
-**Setup → DEVICE → Band PIN → Change it → "I have forgotten it"** shows them,
-behind the four-digit **disarm PIN** — the gate this app already uses for "prove
-you are the owner of this phone".
+**Setup → DEVICE → Band PIN → Change it → "I have forgotten it"**, behind the
+four-digit **disarm PIN**. It needs a network.
 
-That gate is the right strength, not a compromise. Revealing the band PIN to
-somebody already holding this unlocked, signed-in phone gives away nothing they
-could not already do: the band is linked and obeys them. What it saves is the
-alternative below, which costs a factory reset and re-pairing every phone in the
-family. If the phone has no band PIN stored, the dialog says so and points at
-the reset rather than pretending.
+It reads the **account**, not the phone's keystore, and that is the whole point.
+The obvious design — show what this phone has stored — is useless in the
+situation that actually produces a forgotten PIN: pressing Disconnect wipes the
+local copy, deliberately, so by the time somebody wants it back the phone no
+longer has it. The account does.
+
+The account's copy is written whenever the band **accepts** a PIN — on every
+successful `auth_ok`, and on every confirmed `setpin`. Never on a guess.
+
+That `auth_ok` write also handles the factory reset for free, with nothing
+watching for it: a wiped band answers to the factory PIN, the wearer types it,
+the band accepts it, and the account's copy follows the band back to factory on
+its own.
+
+#### Why changing the PIN needs a network
+
+`changePin()` checks the server is reachable **before** it touches the band, and
+refuses if it is not.
+
+Without that guard, a PIN changed offline would leave the account holding the
+old one, with nothing anywhere aware the two had diverged — and an account
+confidently handing back a PIN the band has stopped accepting is *worse* than an
+account holding none. The wearer types it with total confidence, the band
+refuses, and they have spent attempts against a lockout believing they had the
+answer. Missing is survivable; wrong is not.
+
+The check is a read, and it runs before the write, both deliberately. Writing
+the new PIN to the account first would leave an unconfirmed value there, and a
+band that then refused the change — a mistyped current PIN, most likely — would
+produce the same divergence pointing the other way.
+
+If the account write still fails in the seconds after the band accepted, the app
+says so in full and puts the digits on screen, because at that point the person
+is the only reliable copy left.
 
 ### 2. The band itself
 
@@ -344,6 +370,25 @@ settings** on every phone, because their bonds are now stale.
 It has to be physical. A reset reachable over the air is a lock with its own key
 taped to it. It also works during a lockout, which is what stops a lockout ever
 being permanent.
+
+### What the band will not do — and what the account does
+
+The account holding a copy is a **deliberate, temporary trade**, not a finished
+design, and it is worth being blunt about what it costs. The column is
+plaintext and has to be: the entire purpose is handing it back to a person, so
+it cannot be hashed. Anybody who reads that table reads every band PIN in it,
+and anybody who can sign in as the wearer can fetch theirs over the API.
+
+It is taken with the trade understood: on the way to a first deployment, a
+wearer permanently locked out of their own safety device is the likelier and
+worse failure. `server/migrations/009_band_pin_escrow.sql` carries the full
+reasoning and what replaces it — encryption at rest under a key the server does
+not hold, logged and rate-limited reads that the wearer is told about, and
+re-keying on recovery.
+
+Three rules hold today regardless: `band_pin` is never added to `/me` or
+`/login`, it leaves the server through exactly one endpoint whose whole job is
+to return it, and it is never logged.
 
 ### What the band will not do
 
