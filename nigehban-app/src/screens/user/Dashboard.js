@@ -242,8 +242,7 @@ export default function Dashboard({
         <View style={s.notice}>
           <Icon name="battery" size={14} color={U.red} />
           <Text style={[T.meta, { color: U.dim, flex: 1 }]}>
-            Battery critical — your family has been told where you were. Charge it,
-            or tell someone where you are going while you still can.
+            Battery critical — your family has been told where you were.
           </Text>
         </View>
       ) : ctx.battery?.low ? (
@@ -251,7 +250,6 @@ export default function Dashboard({
           <Icon name="battery" size={14} color={U.amber} />
           <Text style={[T.meta, { color: U.dim, flex: 1 }]}>
             Battery at {Math.round(ctx.battery.level)}% — your family has been warned.
-            Below 5% the watch stops being able to help.
           </Text>
         </View>
       ) : null}
@@ -272,8 +270,7 @@ export default function Dashboard({
         >
           <Icon name="phone-incoming" size={16} color={U.amber} />
           <Text style={[T.bodyMed, { color: U.amber, flex: 1 }]}>
-            Emergencies cannot ring through a locked screen yet — allow full-screen
-            alerts
+            Allow full-screen alerts, so emergencies ring through a locked screen
           </Text>
           <Icon name="chevron-right" size={16} color={U.amber} />
         </Pressable>
@@ -467,14 +464,13 @@ export default function Dashboard({
         title={`Remove ${dropping?.name || 'them'}?`}
         loading={dropStage === 'working'}
         loadingLabel={`Removing ${dropping?.name || 'them'}…`}
-        body={'This cuts the link both ways and takes effect straight away. Your '
-          + 'PIN is asked for next.'}
+        body="This cuts the link both ways. Your PIN is asked for next."
         points={[
-          `Your SOS will stop reaching ${dropping?.name || 'them'}.`,
-          'Theirs will stop reaching you.',
-          'Neither of you can ask the other for a check-in.',
+          `Your SOS stops reaching ${dropping?.name || 'them'}.`,
+          'Theirs stops reaching you.',
+          'Neither of you can ask for a check-in.',
         ]}
-        note={'They are not told. You can add each other again later with a code.'}
+        note="They are not told. You can add each other again later."
         onClose={endDrop}
         actions={[
           { label: 'Remove', icon: 'user-minus', filled: true, tone: U.red,
@@ -488,7 +484,7 @@ export default function Dashboard({
         tone={U.mint}
         icon="check"
         title={dropping?.name ? `${dropping.name} has been removed` : 'They have been removed'}
-        body={'You are no longer watching each other. Nothing else on this phone has changed.'}
+        body="You are no longer watching each other."
         onClose={endDrop}
         actions={[{ label: 'Done', icon: 'check', filled: true, onPress: endDrop }]}
       />
@@ -499,8 +495,7 @@ export default function Dashboard({
         icon="alert-circle"
         title="Nothing was removed"
         body={dropErr || 'The server did not answer.'}
-        note={'Nothing changed. You are both still on the other person’s list, '
-          + 'and alerts still reach you as they did before.'}
+        note="You are both still on each other’s list, and alerts still reach you."
         onClose={endDrop}
         actions={[
           { label: 'Try again', icon: 'rotate-ccw', filled: true, tone: U.amber,
@@ -519,11 +514,8 @@ export default function Dashboard({
           ? 'Choose a PIN first'
           : `Enter your PIN to remove ${dropping?.name || 'them'}`}
         body={dropStage === 'set'
-          ? 'Removing family is one of the two things this app asks four digits '
-            + 'for. The other is switching High Alert off. Nobody holding your '
-            + 'phone should be able to do either.'
-          : 'The same PIN that switches High Alert off. Removing someone stops '
-            + 'their alerts reaching you, so it is asked for here too.'}
+          ? 'Four digits, asked for here and when High Alert is switched off.'
+          : 'The same PIN that switches High Alert off.'}
         lockedNote="Too many attempts. Nobody has been removed."
         onCancel={endDrop}
         onDone={doDrop}
@@ -534,10 +526,10 @@ export default function Dashboard({
         icon="alert-octagon"
         tone={U.red}
         title="Send Emergency SOS"
-        body="Choose who you want to broadcast this emergency alert to:"
+        body="Who should this reach?"
         points={[
-          'Alert Family & Nearby: Alarms your family and asks active Good Samaritans within 800m to assist.',
-          'Family Only: Alerts only your registered family members.',
+          'Family & Nearby — your family, plus helpers within 800 m.',
+          'Family Only — your family and nobody else.',
         ]}
         actions={[
           {
@@ -633,8 +625,8 @@ function HighAlert({ armed, nextBuzzAt, onToggle }) {
             <Txt variant="h2" color={U.text}>High Alert</Txt>
             <Text style={[T.meta, { color: U.dim }]}>
               {armed
-                ? 'Nigehban checks on you every five to ten minutes'
-                : 'For the walk home, or any route you want watched'}
+                ? 'Checked on every five to ten minutes'
+                : 'For the walk home'}
             </Text>
           </View>
           <View style={[s.statusPill, { backgroundColor: armed ? U.bg : U.raised }]}>
@@ -686,16 +678,14 @@ function HighAlert({ armed, nextBuzzAt, onToggle }) {
           >
             <Icon name="lock" size={13} color={U.amber} />
             <Text style={[T.meta, { color: U.amber, flex: 1 }]}>
-              Set a disarm PIN, so this cannot be switched off by whoever is
-              holding your phone.
+              Set a disarm PIN, so nobody else can switch this off
             </Text>
           </Pressable>
         ) : null}
 
         {armed ? (
           <Text style={[T.meta, { color: U.faint }]}>
-            Miss one of these and your family is told — even if this app has been
-            closed since you armed it.
+            Miss one and your family is told, even with the app closed.
           </Text>
         ) : null}
       </View>

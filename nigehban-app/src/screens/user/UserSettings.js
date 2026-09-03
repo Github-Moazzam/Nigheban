@@ -206,10 +206,8 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             </View>
             <Text style={[T.meta, { color: U.dim }]}>
               {band?.status === 'bad-pin'
-                ? 'Those six digits were not right. Try again — this is the same '
-                  + 'PIN Android asked for when it paired.'
-                : 'Your wristband is paired but locked. Type the same six digits '
-                  + 'Android asked for. You only do this once on this phone.'}
+                ? 'Those six digits were not right. Try again.'
+                : 'Type the six digits Android asked for when it paired. Once, on this phone.'}
             </Text>
             <BandPinAsk wrong={band?.status === 'bad-pin'}
                         onForgot={() => setRecover('ask')}
@@ -224,8 +222,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
               <Text style={[T.h2, { color: U.amber, flex: 1 }]}>Band sync paused</Text>
             </View>
             <Text style={[T.meta, { color: U.dim }]}>
-              The wristband is not connected, so fall detection and the SOS key
-              are not working right now.
+              Fall detection and the SOS key are off until it reconnects.
             </Text>
             <Pressable
               onPress={() => run('reconnect', band?.connect)}
@@ -278,7 +275,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             <>
               <Row
                 icon="edit-3" title="Band name"
-                sub="Shown here, and in your phone's Bluetooth list"
+                sub="Shown in your phone's Bluetooth list too"
                 value={band?.bandName || '—'}
                 onPress={() => setEditing(editing === 'name' ? null : 'name')}
               />
@@ -437,8 +434,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
 
         {band?.status === 'no-permission' ? (
           <Text style={[T.meta, { color: U.amber, marginTop: S.sm }]}>
-            Bluetooth permission was denied, so the band cannot be found. Grant it
-            in Android settings, or let this phone stand in for the band.
+            Bluetooth permission was denied, so the band cannot be found.
           </Text>
         ) : null}
 
@@ -447,17 +443,15 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             the only useful thing to put on screen is how to reset it. */}
         {band?.status === 'bt-stuck' ? (
           <Text style={[T.meta, { color: U.red, marginTop: S.sm }]}>
-            Android has stopped letting this app use Bluetooth. Turn Bluetooth
-            off and on again — and if the band still does not appear after that,
-            force-stop the app and reopen it.
+            Android has blocked this app's Bluetooth. Turn Bluetooth off and on
+            again, then force-stop the app if it still does not appear.
           </Text>
         ) : null}
 
         {band?.status === 'throttled' ? (
           <Text style={[T.meta, { color: U.amber, marginTop: S.sm }]}>
-            Android is rate-limiting Bluetooth scans from this app. Waiting for
-            that to lift — the band reconnects on its own, so there is nothing
-            to press.
+            Android is rate-limiting Bluetooth scans. The band reconnects on its
+            own — there is nothing to press.
           </Text>
         ) : null}
 
@@ -483,7 +477,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         ) : permLeft === 0 ? (
           <View style={s.group}>
             <Row icon="check-circle" title="Everything Nigehban needs is allowed"
-                 sub="Re-check it any time — Android switches these off on its own."
+                 sub="Tap to re-check — Android switches these off on its own"
                  value="Ready" tone={U.mint}
                  busy={asking === 'recheck'}
                  onPress={recheck} />
@@ -517,7 +511,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
             icon="battery-charging" title="Let Nigehban keep running"
             sub={vendor
               ? `${OEM[vendor].label}: ${OEM[vendor].how}`
-              : 'Set battery use to unrestricted, or the watch stops when the screen does.'}
+              : 'Set battery use to unrestricted, or the watch stops with the screen'}
             value="Open settings" tone={U.dim}
             busy={asking === 'battery'}
             onPress={() => openSettingsRow('battery', openBatterySettings)}
@@ -569,8 +563,8 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           <Row
             icon="users" title="Good Samaritan Helper"
             sub={samaritanEnabled
-              ? 'On — strangers within 800m may ask for your help, and your own SOS will ask whether to include them too'
-              : 'Off — you will not be asked to help strangers, and your own SOS goes straight to family only, with no prompt'}
+              ? 'Asked when someone within 800 m needs help. Your SOS asks whether to include them'
+              : 'Never asked. Your SOS goes to family only'}
             value={samaritanEnabled ? 'Participating' : 'Disabled'}
             tone={samaritanEnabled ? U.mint : U.dim}
             busy={samaritanBusy}
@@ -610,10 +604,9 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         tone={U.amber}
         icon="unlock"
         title="Unlink the wristband?"
-        body={'Fall detection and the SOS key stop working until you link it '
-              + 'again — and this phone will forget the band’s PIN, so you '
-              + 'will need those six digits to reconnect.'}
-        note="Losing signal or walking out of range does none of this. The band comes back on its own."
+        body={'Fall detection and the SOS key stop until you link it again, and '
+              + 'this phone forgets the band’s PIN.'}
+        note="Walking out of range does none of this — the band comes back on its own."
         actions={[
           {
             label: 'Unlink it', busyLabel: 'Disconnecting…', icon: 'x', danger: true,
@@ -648,9 +641,8 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
         mode={pinSet ? 'verify' : 'set'}
         title={pinSet ? 'Enter your PIN to see the band PIN' : 'Choose a PIN first'}
         body={pinSet
-          ? 'This is your four-digit app PIN, not the band’s six.'
-          : 'You have no app PIN yet, and it is what protects the band’s. '
-            + 'Choose one now and the band PIN will be shown.'}
+          ? 'Your four-digit app PIN, not the band’s six.'
+          : 'The app PIN is what protects the band’s. Choose one and the band PIN is shown.'}
         wrongNote="Wrong PIN."
         lockedNote="Too many attempts. The band PIN stays hidden."
         onCancel={() => setRecover(null)}
@@ -682,21 +674,16 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                : recover === 'none' ? 'Your account does not have it'
                : 'Your band PIN'}
         body={recover === 'offline'
-          ? 'Your band PIN is kept on your account, not on this phone — the '
-            + 'phone forgets it whenever you disconnect the band. Getting it '
-            + 'back needs an internet connection. Try again when you have signal.'
+          ? 'Your band PIN lives on your account, not on this phone. Try again '
+            + 'when you have signal.'
           : recover === 'none'
-            ? 'No band PIN has ever been saved to your account, so there is '
-              + 'nothing to give you. The band itself is the way back — hold '
-              + 'its button down while it restarts, keep holding for five '
-              + 'seconds, and its name and PIN go back to factory. Then forget '
-              + 'the band in Android’s Bluetooth settings before linking again.'
+            ? 'Nothing has ever been saved to your account. Reset the band '
+              + 'instead: hold its button through a restart for five seconds, '
+              + 'then forget it in Android’s Bluetooth settings.'
             : recover}
         note={recover === 'offline' || recover === 'none' || recover === 'loading'
           ? undefined
-          : 'Write it somewhere safe. If the band refuses it, it was changed on '
-            + 'another phone that had no signal at the time — reset the band '
-            + 'with its own button.'}
+          : 'Write it somewhere safe.'}
         actions={recover === 'loading' ? [] : [
           { label: 'Done', icon: 'check', onPress: () => setRecover(null) },
         ]}
@@ -751,8 +738,7 @@ function NameEditor({ current, onCancel, onSave }) {
         style={p.text}
       />
       <Text style={[T.meta, { color: U.faint }]}>
-        Up to 20 characters. Stored on the wristband, so your Bluetooth list and
-        the rest of your family see it too.
+        Up to 20 characters, stored on the band itself.
       </Text>
       <View style={p.row}>
         <View style={{ flex: 1 }}>
@@ -834,8 +820,7 @@ function PinEditor({ onCancel, onSave, onForgot }) {
       <Text style={[T.meta, { color: again && pin !== again ? U.red : U.faint }]}>
         {again && pin !== again
           ? 'Those two do not match.'
-          : 'Six digits. This phone remembers the new one straight away; every '
-            + 'OTHER phone linked to this band has to be told it.'}
+          : 'Six digits. Every other phone linked to this band has to be told it.'}
       </Text>
       <View style={p.row}>
         <View style={{ flex: 1 }}>

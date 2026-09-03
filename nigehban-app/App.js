@@ -11,6 +11,7 @@ import {
 
 import { clearQueue, dequeue, enqueue, flushQueue, pendingCount, pressId } from './src/alertQueue';
 import { MODES, useBandLink } from './src/bandLink';
+import BigNotice from './src/components/BigNotice';
 import CheckinBanner from './src/components/CheckinBanner';
 import FallCountdown, { FALL_WINDOW_S } from './src/components/FallCountdown';
 import SamaritanCall from './src/components/SamaritanCall';
@@ -75,6 +76,27 @@ const TAKEOVER_TITLE = {
   checkin_missed: 'MISSED CHECK-IN', watch_lost: 'WENT QUIET WHILE ARMED',
   going_dark: 'PHONE ABOUT TO DIE',
 };
+
+// The one line under the name, for the kinds where the heading alone does not
+// say what has actually happened. An emergency needs none of this -- "SOS" and
+// a name is the whole message -- so only the quiet three are listed.
+const TAKEOVER_LEDE = {
+  watch_lost: 'Their watch stopped reporting while it was armed.',
+  checkin_missed: 'They were asked if they were okay and did not answer.',
+  going_dark: 'Their phone will stop reporting when the battery goes.',
+};
+
+// What reaches the family as a full-screen takeover rather than a line in a
+// list. Severity 4 and up is an emergency and brings the siren with it;
+// severity 3 -- a missed check-in, a watch that went quiet, a phone about to
+// die -- takes the screen without one.
+//
+// Three used to be the level that got a notification and nothing else, which
+// is why a family member whose relative's watch went quiet found out only if
+// they happened to look at the shade. Silence *is* the alert for these kinds;
+// delivering it more quietly than every other kind was exactly backwards.
+const TAKEOVER_FROM = 3;
+const SIREN_FROM = 4;
 
 // Battery thresholds, from the acceptance matrix: 20 % tells the family, 5 %
 // says the phone is about to stop being a safety device at all.
@@ -157,6 +179,19 @@ async function notify(title, body) {
   } catch { /* best effort */ }
 }
 
+/**
+ * The same, but only when nobody is looking at the app.
+ *
+ * For anything that also has a screen of its own -- a BigNotice, the takeover
+ * -- a shade banner posted while that screen is up is the same fact twice,
+ * one of them drawn on top of the other. This is for the other half: the
+ * phone in a pocket, where the notification is the only delivery there is.
+ */
+async function notifyIfAway(title, body) {
+  if (AppState.currentState === 'active') return;
+  await notify(title, body);
+}
+
 function Main() {
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState(null);
@@ -170,12 +205,35 @@ function Main() {
   const [deliveredTo, setDeliveredTo] = useState(null);
   const [deliveryStatus, setDeliveryStatus] = useState(null); // null | 'queued' | 'sending' | 'delivered'
   const [toast, setToast] = useState(null);
+  // The queue behind BigNotice: news that is not an emergency but is still
+  // somebody's answer -- a check-in answered, a responder on the way, an alert
+  // stood down. Only the head is on screen; see `pushNotice` below.
+  const [notices, setNotices] = useState([]);
   const [fix, setFix] = useState(null);               // last position, from Home
   const [pendingAlertId, setPendingAlertId] = useState(null); // { id, answered } from a notification
 
   const { state, ctx, dispatch, is, watchMode } = useSafetyMachine();
   const insets = useEdgeInsets();
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  /**
+   * Put one piece of news on the screen, big, and leave it there.
+   *
+   * Appends rather than replaces. Two of these can land within a second of
+   * each other -- two family members both answering the same SOS -- and the
+   * second overwriting the first would mean one of them was never told about
+   * at all. Only the head renders; dismissing it brings the next.
+   *
+   * Keyed so that the *same* news arriving twice (a socket frame and its
+   * push, or a reconnect replaying a frame) does not queue two identical
+   * popups to dismiss one after the other.
+   */
+  const pushNotice = useCallback((notice) => {
+    const key = notice.key || `${notice.icon}:${notice.title}`;
+    setNotices((q) => (q.some((n) => n.key === key) ? q : [...q, { ...notice, key }]));
+  }, []);
+
+  const dismissNotice = useCallback(() => setNotices((q) => q.slice(1)), []);
 
   useEffect(() => {
     (async () => {
@@ -1114,8 +1172,9 @@ function Main() {
   const serverOnline = useLive(session, {
     alert: (m) => {
       const a = m.alert;
-      if (a.severity >= 4) {
-        setIncoming(a);
+      if (a.severity >= TAKEOVER_FROM) setIncoming(a);
+
+      if (a.severity >= SIREN_FROM) {
         // N3.3/N3.4. On a dev or production build this is a real full-screen
         // intent plus a looping siren, so a backgrounded app takes the lock
         // screen over instead of waiting to be noticed. It returns false in
@@ -1131,15 +1190,31 @@ function Main() {
           if (!took) sendEmergencyAlarmIfNothingShown(a);
         });
       } else {
-        notify(`${a.user.name} — ${a.kind.replace('_', ' ')}`,
-               a.maps ? 'Tap to open the app and see their location.' : 'Open the app for details.');
+        // No siren, but the takeover above is on screen and the shade gets a
+        // line too, so the same event is still there after it is dismissed.
+        // The heading is the app's own wording, not `watch_lost` with its
+        // underscore taken out.
+        notifyIfAway(
+          `${a.user.name} — ${(TAKEOVER_TITLE[a.kind] || a.kind.replace(/_/g, ' ')).toLowerCase()}`,
+          TAKEOVER_LEDE[a.kind] || 'Open Nigehban for details.');
+        // A quiet double buzz. The siren covers severity 4 and up; without
+        // this a severity-3 takeover appeared on a silent phone in a pocket.
+        try { Vibration.vibrate([0, 250, 150, 250]); } catch { /* no motor */ }
       }
       bump();
     },
     resolved: (m) => {
       setIncoming((cur) => (cur && cur.id === m.alert_id ? null : cur));
       setSamaritan((cur) => (cur && cur.id === m.alert_id ? null : cur));
-      setToast(`${m.user.name} is safe — they stood the alert down`);
+      // The end of an emergency is the other half of the one that took the
+      // screen. A family member who was shown a siren and then a four-second
+      // toast had no reliable way of learning it was over.
+      pushNotice({
+        icon: 'shield', tone: U.mint,
+        title: `${m.user.name} is safe`,
+        body: 'They stood the alert down themselves.',
+      });
+      notifyIfAway(`${m.user.name} is safe`, 'They stood the alert down themselves.');
       bump();
     },
 
@@ -1169,9 +1244,18 @@ function Main() {
       // `m.at` is the server's clock. Falling back to arrival time is only for
       // a phone talking to a server older than this change.
       dispatch('RESPONDER', { by: m.by, at: m.at });
-      setToast(m.samaritan
-        ? `${m.by.name} is nearby and on the way`
-        : `${m.by.name} has seen your alert and is responding`);
+      // The single most important thing anybody who has pressed SOS is waiting
+      // to hear, and it was a toast that cleared itself after four seconds.
+      pushNotice({
+        icon: 'user-check', tone: U.mint,
+        title: `${m.by.name} is on the way`,
+        body: m.samaritan
+          ? 'They are nearby and can see your location.'
+          : 'They answered your alert and can see your location.',
+        // No buzz. The wearer may be hiding from whoever they pressed the
+        // button about -- the same rule the server's own responder push obeys.
+        quiet: true,
+      });
     },
     checkin_req: (m) => {
       // A detector's question, not a person's. Two things make it different
@@ -1214,7 +1298,19 @@ function Main() {
       band.send({ c: 'checkin_req', window: m.window ?? 90 });
       notify('Nigehban is checking on you', 'Tap "I am fine" to answer.');
     },
-    checkin_ack: (m) => setToast(`${m.by.name} answered — they are fine`),
+    // The answer to a question this phone asked. Somebody pressed "check on
+    // her" precisely because they were worried, and the reply used to be four
+    // and a half seconds of small grey text above the tab bar.
+    checkin_ack: (m) => {
+      pushNotice({
+        icon: 'check-circle', tone: U.mint,
+        title: `${m.by.name} is fine`,
+        body: 'They answered your check-in.',
+      });
+      // No local notification: the server sends this one as a real push now,
+      // which is what reaches a phone that is not running the app at all.
+      bump();
+    },
     watch_updated: () => bump(),
     samaritan: (m) => {
       setSamaritan(m.alert);
@@ -1222,9 +1318,20 @@ function Main() {
       notify('Someone near you needs help',
              'A Nigehban emergency was raised close by. Open the app if you can go.');
     },
-    samaritan_on_way: (m) => setToast(`${m.by.name} is nearby and heading there`),
+    samaritan_on_way: (m) => pushNotice({
+      icon: 'navigation', tone: U.mint,
+      title: `${m.by.name} is heading there`,
+      body: 'A neighbour close by answered the alert.',
+      quiet: true,
+    }),
     invite: (m) => {
-      setToast(`${m.invite.from.name} is asking to be your family — open FAMILY to answer`);
+      // A question waiting for an answer, on a screen the user shell has no
+      // tab for. A toast that expires is the one shape this must not take.
+      pushNotice({
+        icon: 'user-plus', tone: U.amber,
+        title: `${m.invite.from.name} wants to be your family`,
+        body: 'Open Family to accept or decline. Nothing is shared until you do.',
+      });
       notify(`${m.invite.from.name} wants to be your family`,
              'Nothing is shared until you accept.');
       bump();
@@ -1268,9 +1375,17 @@ function Main() {
         }
         setDeliveredTo(count ?? null);
         setDeliveryStatus('delivered');
-        setToast(count
-          ? `Your alert has been delivered to ${count} family member${count === 1 ? '' : 's'}`
-          : 'Your alert has been sent to the server');
+        // The end of the worst wait in the product: an emergency that has been
+        // sitting on the phone with no signal has finally gone out. That is
+        // not a toast, and the SOS screen it belongs to may not even be the
+        // one on top by the time the queue drains.
+        pushNotice({
+          icon: 'send', tone: U.mint,
+          title: count
+            ? `Delivered to ${count} ${count === 1 ? 'person' : 'people'}`
+            : 'Your alert has been sent',
+          body: 'It was saved while you had no signal, and has now gone out.',
+        });
         bump();
         return;
       }
@@ -1284,7 +1399,7 @@ function Main() {
     } finally {
       flushing.current = false;
     }
-  }, [session, dispatch, bump]);
+  }, [session, dispatch, bump, pushNotice]);
 
   const prevOnline = useRef(false);
   useEffect(() => {
@@ -1517,10 +1632,17 @@ function Main() {
       // escalate. Saying nothing here would let the wearer walk away believing
       // they had stopped it.
       reportOutcome('failed');
-      setToast('Could not reach the server — your family may still be told. '
-               + 'Try again, or call them.');
+      // Big, because it is the one message on this path that asks for another
+      // action. A toast that clears itself lets somebody walk away believing
+      // they cancelled an alert that is still going to go out.
+      pushNotice({
+        icon: 'wifi-off', tone: U.amber,
+        title: 'That did not reach the server',
+        body: 'Your family may still be told. Try again, or call them.',
+        action: 'I understand',
+      });
     }
-  }, [dispatch, raise, session, reportOutcome]);
+  }, [dispatch, raise, session, reportOutcome, pushNotice]);
   const cancelFallRef = useRef(cancelFall);
   cancelFallRef.current = cancelFall;
 
@@ -1555,13 +1677,17 @@ function Main() {
     const f = ctxRef.current.fall;
     dispatch('FALL_ESCALATED');
     if (f?.checkinId) {
-      setToast('No answer — your family is being told. '
-               + 'Answering now still tells them you are fine.');
+      pushNotice({
+        icon: 'alert-triangle', tone: U.red,
+        title: 'Your family is being told',
+        body: 'The countdown ran out. Answering now still tells them you are fine.',
+        action: 'I understand',
+      });
       return;
     }
     raise({ kind: f?.reason === 'accident' ? 'accident' : 'fall',
             source: 'band', note: f?.note || '' });
-  }, [dispatch, raise]);
+  }, [dispatch, raise, pushNotice]);
 
   /**
    * THE ONE AUTOMATIC WAY OUT: they are still riding.
@@ -1727,18 +1853,29 @@ function Main() {
         />
       )}
 
-      {/* ---- somebody in the family is in trouble ---- */}
+      {/* ---- somebody in the family is in trouble ----
+          Severity 4 and up arrives with a siren behind it. Severity 3 -- a
+          watch that went quiet, a missed check-in, a phone about to die --
+          takes the same screen in amber and without one: it is not an
+          emergency, but it is the family's only chance to notice that
+          somebody has gone silent, and it used to be a notification nobody
+          saw. */}
       <Modal visible={!!incoming} animationType="fade" onRequestClose={() => setIncoming(null)}>
         {incoming ? (
-          <View style={st.takeover}>
+          <View style={[st.takeover,
+                        incoming.severity < SIREN_FROM && { backgroundColor: C.amberSoft }]}>
             <View style={[st.takeBadge, { backgroundColor: sevColor(incoming.severity) }]}>
-              <Icon name="alert-octagon" size={16} color={C.bg} />
+              <Icon name={incoming.severity >= SIREN_FROM ? 'alert-octagon' : 'alert-triangle'}
+                    size={16} color={C.bg} />
               <Text style={st.takeBadgeText}>
-                {TAKEOVER_TITLE[incoming.kind] || incoming.kind.replace('_', ' ').toUpperCase()}
+                {TAKEOVER_TITLE[incoming.kind] || incoming.kind.replace(/_/g, ' ').toUpperCase()}
               </Text>
             </View>
 
             <Txt variant="display" style={st.takeName}>{incoming.user.name}</Txt>
+            {TAKEOVER_LEDE[incoming.kind] ? (
+              <Text style={st.takeLede}>{TAKEOVER_LEDE[incoming.kind]}</Text>
+            ) : null}
             <Text style={st.takeMeta}>
               {incoming.source === 'band' ? 'Raised from the wristband'
                 : incoming.source === 'server' ? 'Raised by the server watchdog'
@@ -1750,7 +1887,9 @@ function Main() {
                   exit that has to stop the siren itself -- they have plainly
                   seen it, and it must not follow them into Maps. */}
               {incoming.maps ? (
-                <Button title="SEE WHERE THEY ARE" filled big tone={C.red} icon="navigation"
+                <Button title={incoming.severity >= SIREN_FROM
+                          ? 'SEE WHERE THEY ARE' : 'SEE WHERE THEY WERE'}
+                        filled big tone={sevColor(incoming.severity)} icon="navigation"
                         onPress={() => { stopAlarm(); Linking.openURL(incoming.maps); }} />
               ) : null}
               {/* The one button on this screen that speaks to the server, and
@@ -1761,7 +1900,8 @@ function Main() {
                   dialog goes quiet while it runs: dismissing it mid-flight
                   would leave the family with no screen that ever said whether
                   they had answered. */}
-              <Button title={acking ? 'TELLING THEM…' : "I'M ON IT"}
+              <Button title={acking ? 'TELLING THEM…'
+                        : incoming.severity >= SIREN_FROM ? "I'M ON IT" : "I'LL CHECK ON THEM"}
                       tone={C.green} filled icon="user-check" loading={acking}
                       onPress={async () => {
                         if (acking) return;
@@ -1807,6 +1947,17 @@ function Main() {
       {/* ---- a stranger nearby needs help ---- */}
       <SamaritanCall call={samaritan} onRespond={respondAsSamaritan}
                      onDismiss={() => { Vibration.cancel(); setSamaritan(null); }} />
+
+      {/* ---- news worth stopping for, but not an emergency ----
+          Rendered last and gated on everything above it being closed. Two
+          Modals open at once on Android is one Modal that never appears, and
+          the one that must never lose that race is the emergency. The queue
+          holds; this shows the head of it the moment the screen is free. */}
+      <BigNotice
+        notice={(incoming || askSheet || samaritan || is('fall_pending'))
+          ? null : notices[0]}
+        onClose={dismissNotice}
+      />
     </View>
   );
 }
@@ -1849,6 +2000,7 @@ const st = StyleSheet.create({
   },
   takeBadgeText: { ...T.label, color: C.bg, fontSize: 12 },
   takeName: { color: C.text, textAlign: 'center', marginTop: S.md },
+  takeLede: { ...T.body, color: C.text, textAlign: 'center', marginTop: S.xs },
   takeMeta: { ...T.body, color: C.dim, marginBottom: S.xl },
   takeBtns: { alignSelf: 'stretch', gap: S.md },
 
