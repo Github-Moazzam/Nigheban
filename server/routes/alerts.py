@@ -158,9 +158,17 @@ async def resolve(alert_id: int, u=Depends(me)):
                       "beat_armed=high_alert, "
                       "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
                       "WHERE user_id=%s AND mode='sos'", (u["id"],))
+        # Only the Good Samaritans who actually answered *this* alert -- not
+        # every connected socket on the server. `samaritans` is keyed by
+        # (alert_id, user_id), so a stranger who helped on some other alert,
+        # or who was never asked about this one, is not in this list even if
+        # they are online right now.
+        responders = [r["user_id"] for r in c.execute(
+            "SELECT user_id FROM samaritans WHERE alert_id=%s", (alert_id,))]
 
-    # Tell family members and all active connected Good Samaritans that alert is stood down
-    targets = list(set(family_of(u["id"])) | set(HUB.socks.keys()))
+    # Tell family members and the Good Samaritans who responded to this
+    # specific alert that it has been stood down.
+    targets = list(set(family_of(u["id"])) | set(responders))
     await HUB.fanout(targets,
                      {"t": "resolved", "alert_id": alert_id,
                       "user": {"id": u["id"], "name": u["name"]}})
