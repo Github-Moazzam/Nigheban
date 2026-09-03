@@ -23,6 +23,22 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
   const [revealed, setRevealed] = useState(null);
   const [error, setError] = useState(null);
 
+  // This component stays mounted across separate SOS sessions (App.js always
+  // renders it, just with `call` toggling to null and back). Without this,
+  // `revealed` from a previously-accepted call survives into the next SOS and
+  // this screen opens straight to "You said you are going" instead of asking
+  // again -- the state belongs to one alert id, not to the wearer. Reset
+  // during render (not in an effect) so there is no frame where the stale
+  // screen is shown before it flips back to the ask screen.
+  const [lastId, setLastId] = useState(incoming?.id ?? null);
+  const incomingId = incoming?.id ?? null;
+  if (incomingId !== lastId) {
+    setLastId(incomingId);
+    setRevealed(null);
+    setError(null);
+    setBusy(false);
+  }
+
   if (!incoming) return null;
   const a = incoming;
 
