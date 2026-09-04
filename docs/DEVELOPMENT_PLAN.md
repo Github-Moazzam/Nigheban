@@ -233,7 +233,7 @@ family member's request does.
 - [x] B3.1 — ~~`POST /checkin/{member_id}` reworked to write a `checkins` row with `due_at`; add `POST /checkin/{id}/ack` for band or app.~~ Shipped with B2, which needs it.
 - [x] B3.2 — ~~`POST /watch/high_alert` — arm/disarm.~~ Shipped with B2, same reason.
 - [x] B3.3 — `POST /presence` — geohash6 plus lat/lon rounded to ~100 m, one row per person, overwritten. A presence, not a trail, and only read while it is fresh.
-- [x] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the name and the exact pin, logs the responder against the alert, and tells the wearer and their family who is coming. A severity-5 alert carrying a position now fans an anonymous, coarse copy out to fresh presences within 800 m. Both are covered by [tests/test_samaritan_and_checkin.py](../tests/test_samaritan_and_checkin.py).
+- [x] B3.4 — `POST /samaritan/{alert_id}/respond` — releases the name and the exact pin, logs the responder against the alert, and tells the wearer and their family who is coming. A severity-5 alert carrying a position now fans an anonymous, coarse copy out to fresh presences within 300 m. Both are covered by [tests/test_samaritan_and_checkin.py](../tests/test_samaritan_and_checkin.py).
 - [ ] B3.5 — Qwen severity scoring + Urdu dispatch text via Model Studio. *Cut line Day 3 21:00 → fall back to `RiskEngine._template`, which already works.*
 - [ ] B3.6 — WhatsApp fan-out.
 

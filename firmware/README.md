@@ -103,7 +103,8 @@ budget, which is 1–2 days of battery instead of 1–2 weeks.
 
 ## Wiring
 
-Everything is USB powered. **No battery on the breadboard.**
+Everything is USB powered. **No battery on the breadboard** — except **T8**,
+which is the battery test and cannot run without a cell on the BAT pads.
 
 | Motor module | XIAO | |
 |---|---|---|
@@ -153,6 +154,7 @@ would also over-drive a 3 V coin motor.
 | **T4** | [t4_imu](t4_imu/) | none | `IMU OK`, az ≈ 1.00 g flat, `mag` spikes when shaken |
 | **T6** | [t6_ble](t6_ble/) | none | `Nigehban-01` in nRF Connect, heartbeat notifies, writes echo back |
 | **T7** | [t7_fall_tuning](t7_fall_tuning/) | none | Not a pass/fail test — a **measuring instrument**. See below |
+| **T8** | [t8_battery](t8_battery/) | **LiPo on the BAT pads** | `chg` flips within a second of plugging USB in; `mv` agrees with a meter |
 
 **T1 before you wire anything.** It proves the core, board selection, port and
 upload path while there is nothing else to blame.
@@ -206,6 +208,25 @@ the wrist must confirm the gesture while their thumb is still down.
 `P1.08`: the Sense can switch the IMU off entirely for low power, and until you
 drive that pin HIGH, `begin()` fails on perfectly good hardware. The section 8
 skeleton in `EXECUTION_PLAN.md` is missing that line.
+
+**T8** covers **F2.3** and is the only test that needs the cell. Two separate
+signals: the charge bit is the BQ25100's open-drain `~CHG` on **D23 / P0.17** —
+active LOW, `INPUT_PULLUP` or it reads as noise — and the level is the P0.31
+divider through the shipping LiPo curve. `variant.h` has no macro for `~CHG`;
+the pin map in `variant.cpp` is where it is written down.
+
+*"Not charging" has two causes.* `~CHG` only reports current flowing, so a
+topped-off cell on USB reads identically to one running on battery. The `mv`
+column is what separates them. And `pct` reads optimistically high for as long
+as the charger is on, because charge current lifts terminal voltage — so
+**calibrate with USB unplugged**, never while charging.
+
+That calibration is the real reason to run it. `VBAT_DIVIDER_COMP` is a nominal
+1M/510k ratio in both this sketch and the shipping firmware — carried with a
+`VERIFY` on it and never actually measured, while the app's low-battery warning
+rides on it. T8 prints
+the raw ADC average next to the volts so the correction is one multiplication
+from a scrollback — then change it in **both** places.
 
 ---
 

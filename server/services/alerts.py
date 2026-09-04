@@ -62,6 +62,14 @@ def nearby_strangers(uid, lat, lon, now=None):
 
     Only includes users who have opted into participating as a Good Samaritan
     helper (samaritan_enabled).
+
+    A measured distance strictly under SAMARITAN_RADIUS_M is the only thing
+    that puts anybody in this list. There used to be two ways around that -- a
+    presence row with no coordinates was admitted at distance 0, and so was
+    every open websocket, which meant the radius check was dead for anyone with
+    the app in the foreground. A wearer five kilometres away was asked to walk
+    to an emergency the app then described as a hundred metres off. If
+    proximity cannot be shown, the person is not asked.
     """
     now = now or time.time()
     known = set(family_of(uid)) | {uid}
@@ -78,23 +86,12 @@ def nearby_strangers(uid, lat, lon, now=None):
             u_id = r["user_id"]
             if u_id in known or u_id in seen:
                 continue
-            if lat is not None and lon is not None and r.get("lat") is not None and r.get("lon") is not None:
-                d = metres_between(lat, lon, r["lat"], r["lon"])
-                if d <= SAMARITAN_RADIUS_M:
-                    out.append((u_id, d))
-                    seen.add(u_id)
-            else:
-                out.append((u_id, 0))
+            if lat is None or lon is None or r.get("lat") is None or r.get("lon") is None:
+                continue
+            d = metres_between(lat, lon, r["lat"], r["lon"])
+            if d < SAMARITAN_RADIUS_M:
+                out.append((u_id, d))
                 seen.add(u_id)
-
-        # In testing/web scenarios or before presence interval ticks, include
-        # currently connected online strangers whose samaritan_enabled is true
-        for client_uid in list(HUB.socks.keys()):
-            if client_uid not in known and client_uid not in seen:
-                u_row = c.execute("SELECT samaritan_enabled FROM users WHERE id=%s", (client_uid,)).fetchone()
-                if u_row and (u_row.get("samaritan_enabled") is None or u_row.get("samaritan_enabled") is True):
-                    out.append((client_uid, 0))
-                    seen.add(client_uid)
 
     return sorted(out, key=lambda x: x[1])
 
@@ -283,7 +280,7 @@ async def ask_samaritans(row, uid, lat, lon):
                          "severity": row["severity"], "created_at": row["created_at"],
                          "lat": round(clat, 4) if clat is not None else None,
                          "lon": round(clon, 4) if clon is not None else None,
-                         "distance_m": int(round(dist / 50.0) * 50) if dist else 0,
+                         "distance_m": int(round(dist / 50.0) * 50) if dist is not None else None,
                          "maps": maps_url}}
         await HUB.to(who, msg)
     await send_expo_push_notifications(

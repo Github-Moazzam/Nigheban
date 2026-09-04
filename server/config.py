@@ -37,7 +37,12 @@ PRIVATE_KINDS = {"near_miss"}
 
 # Good Samaritan: how far from a severity-5 alert a stranger can be and still
 # be asked, and how coarse the pin they are shown is until they say yes.
-SAMARITAN_RADIUS_M = 800
+#
+# Three hundred metres is a walk of a few minutes, which is the only distance
+# at which "somebody near you needs help" is both true and useful. The bound is
+# exclusive: at 300 m or beyond nobody is asked at all. It was 800 m, which put
+# strangers a ten-minute walk away on a screen that called them close.
+SAMARITAN_RADIUS_M = 300
 SAMARITAN_COARSE_M = 300
 PRESENCE_FRESH_S   = 900
 
