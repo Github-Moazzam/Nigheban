@@ -147,7 +147,7 @@ the pre-`3d5efb9` behaviour restored on purpose.
 | 5 | Remote check-in with a **server-owned** deadline, and escalation when it passes | [`sweeper()`](../server/nigehban_server.py), [`CheckinBanner.js`](../nigehban-app/src/components/CheckinBanner.js) |
 | 6 | High Alert — server-held randomised 5–10 min re-buzz, PIN-gated disarm | [`HighAlertPanel.js`](../nigehban-app/src/components/HighAlertPanel.js), [`PinSheet.js`](../nigehban-app/src/components/PinSheet.js) |
 | 7 | Heartbeat watchdog + watch-status tile (3 min of silence while armed → `watch_lost`) | [`watch.js`](../nigehban-app/src/watch.js), [`WatchStatusTile.js`](../nigehban-app/src/components/WatchStatusTile.js) |
-| 8 | Good Samaritan — coarse anonymous fan-out within 800 m, identity released only on "I'm going" | [`SamaritanCall.js`](../nigehban-app/src/components/SamaritanCall.js) |
+| 8 | Good Samaritan — coarse anonymous fan-out within 300 m, identity released only on "I'm going" | [`SamaritanCall.js`](../nigehban-app/src/components/SamaritanCall.js) |
 | 9 | Live WebSocket delivery, reconnect, and a 30 s keep-alive ping | [`api.js`](../nigehban-app/src/api.js) |
 | 10 | Push to a **force-stopped** app, lock-screen full-screen takeover, looping siren | [`modules/nigehban-alarm/`](../nigehban-app/modules/nigehban-alarm/), [`bgNotifications.js`](../nigehban-app/src/bgNotifications.js) |
 | 11 | Notification tap routing — a tapped push opens the right alert, even from a cold start | [`notifications.js`](../nigehban-app/src/notifications.js) |
@@ -571,7 +571,7 @@ and the family is told.
 ### 3.9 Good Samaritan ✅
 
 **Status:** working. A severity-5 alert carrying a position fans an
-**anonymous, coarse** copy out to fresh presences within 800 m. Before "I'm
+**anonymous, coarse** copy out to fresh presences within 300 m. Before "I'm
 going" there is no name and the pin is snapped to a 300 m grid; saying yes
 releases the name and the exact position, and puts the responder's own name on
 the alert.

@@ -6,6 +6,23 @@ import { Banner, Button, Chip, Divider, Icon, Label, Txt } from '../ui';
 const KIND = { sos: 'An emergency', snatch: 'A wristband was torn off', fall: 'A fall' };
 
 /**
+ * How far away, in words, and never more precisely than the server knows.
+ *
+ * `distance_m` is null when the distance could not be measured. This used to
+ * read `a.distance_m < 100 ? 'a hundred' : a.distance_m`, which turned both a
+ * null (null < 100 is true in JS) and the server's old unknown-distance 0 into
+ * a confident "a hundred metres away" -- on an alert that was five kilometres
+ * off. A screen asking a stranger to walk toward an emergency must not invent
+ * the one number the decision rests on.
+ */
+function howFar(m) {
+  if (m == null) return 'nearby';
+  if (m >= 1000) return `about ${(m / 1000).toFixed(1)} km away`;
+  if (m < 50) return 'right next to you';
+  return `about ${m} metres away`;
+}
+
+/**
  * U4.4 — a stranger nearby needs help.
  *
  * Two screens in one, and the order is the whole feature. Before "I'm going"
@@ -68,8 +85,7 @@ export default function SamaritanCall({ call: incoming, onRespond, onDismiss }) 
         </View>
 
         <Txt variant="h1">
-          {KIND[a.kind] || 'An emergency'} was raised about{' '}
-          {a.distance_m < 100 ? 'a hundred' : a.distance_m} metres away
+          {KIND[a.kind] || 'An emergency'} was raised {howFar(a.distance_m)}
         </Txt>
 
         {revealed ? (
