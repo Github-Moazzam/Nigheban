@@ -869,12 +869,37 @@ void linkLedTick() {
 // readings" -- is exactly the fatal move. That drain is 4.2 V / 1.51 M = 2.8 uA,
 // under 1.5% of the 200-400 uA budget in F4.3. Leave the pin LOW forever.
 // ===========================================================================
+// The acquisition time is not optional. The divider's tap has a source
+// impedance of 1M || 510k = 338k, and the core defaults the SAADC to a 3 us
+// acquisition time (wiring_analog_nRF52.c:33), which Nordic rate for 10k --
+// 34x under what this needs. analogRead() also disables the SAADC on the way
+// out (wiring_analog_nRF52.c:226), so every conversion restarts from an
+// unsettled sample-and-hold and the answer depends on the previous one.
+//
+// Without analogSampleTime(40) the heartbeat's mv field alternates between two
+// clusters ~10% apart with nothing in between -- 3688 one beat, 4072 the next,
+// so the app's battery reading flips between 38% and 92%. The 8-sample average
+// in batteryMilliVolts() cannot help: all 8 land on the same side of it.
+//
+//     TACQ     max source resistance
+//      3 us      10 k    <- the core's default
+//     20 us     400 k
+//     40 us     800 k    <- what 338 k needs
 void batteryBegin() {
   pinMode(VBAT_ENABLE, OUTPUT);
   digitalWrite(VBAT_ENABLE, LOW);        // LOW enables the divider -- see above
   analogReference(AR_INTERNAL_3_0);
   analogReadResolution(12);
+  analogSampleTime(40);                  // 338k source -- see above
+  analogOversampling(16);                // hardware burst average
   delay(1);
+
+  // Order matters: analogCalibrateOffset() calibrates against whatever gain and
+  // reference sit in CH[0].CONFIG, and the core only writes that register from
+  // inside analogRead(). So install them with a throwaway read first.
+  (void)analogRead(PIN_VBAT);
+  analogCalibrateOffset();
+  (void)analogRead(PIN_VBAT);
 }
 
 uint16_t batteryMilliVolts() {

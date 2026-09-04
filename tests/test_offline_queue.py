@@ -32,6 +32,7 @@ press; theirs does not agree. Fixing that is a schema change (a pressed_at on
 AlertIn) and a product decision, not a bug to quietly patch here.
 """
 import asyncio
+import os
 import json
 import time
 import urllib.error
@@ -39,7 +40,12 @@ import urllib.request
 
 import websockets
 
-BASE = "http://127.0.0.1:8000"
+# Point at a deployed server with NGB, e.g.
+#   NGB=https://your-host python tests/test_offline_queue.py
+# Nothing here touches the database directly, so a remote run needs no
+# credentials -- it only creates throwaway accounts and alerts.
+BASE = os.environ.get("NGB", "http://127.0.0.1:8000")
+WS = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws?token="
 
 PASS = FAIL = 0
 
@@ -108,7 +114,7 @@ async def main():
     # The stranger is near Point A -- where she pressed, not where she is now.
     call("/presence", "POST", {"lat": NEAR_A[0], "lon": NEAR_A[1]}, near["token"])
 
-    url = "ws://127.0.0.1:8000/ws?token="
+    url = WS
     async with websockets.connect(url + ward["token"]) as w, \
                websockets.connect(url + kin["token"]) as k, \
                websockets.connect(url + near["token"]) as n:
@@ -149,6 +155,10 @@ async def main():
 
         # ---- 3. strangers are still asked, and asked about Point A --------
         print("\n== the Good Samaritan still fires on a flushed alert ==")
+        # 'pending' until somebody opts in; without this the checks below pass
+        # vacuously, because nothing is ever sent to anybody.
+        call(f"/alert/{alert_id}/samaritan-optin", "POST", {"action": "allow"},
+             ward["token"])
         asked = await wait_for(n, "samaritan", 8)
         check("a stranger near Point A is asked", bool(asked), asked)
         if asked:
@@ -168,7 +178,9 @@ async def main():
 
         # ---- 4. a queued fall is not a queued SOS -------------------------
         print("\n== severity still decides who is told ==")
-        call("/alert", "POST", flushed(kind="fall"), ward["token"])
+        fall = call("/alert", "POST", flushed(kind="fall"), ward["token"])
+        call(f"/alert/{fall['alert']['id']}/samaritan-optin", "POST",
+             {"action": "allow"}, ward["token"])
         fell = await wait_for(k, "alert", 8)
         check("a flushed fall reaches the family", bool(fell), fell)
         check("...at severity 4", bool(fell) and fell["alert"]["severity"] == 4, fell)
@@ -177,7 +189,9 @@ async def main():
 
         # ---- 5. no signal often means no GPS either -----------------------
         print("\n== queued in a dead zone with no fix at all ==")
-        call("/alert", "POST", flushed(lat=None, note=""), ward["token"])
+        dead = call("/alert", "POST", flushed(lat=None, note=""), ward["token"])
+        call(f"/alert/{dead['alert']['id']}/samaritan-optin", "POST",
+             {"action": "allow"}, ward["token"])
         blind = await wait_for(k, "alert", 8)
         check("an alert with no position still reaches the family", bool(blind), blind)
         check("...and says so honestly rather than inventing a pin",
