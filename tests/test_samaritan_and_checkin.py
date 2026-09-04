@@ -14,13 +14,19 @@ that is where the app reads them:
      they are going (matrix #20).
 """
 import asyncio
+import os
 import json
 import time
 import urllib.request
 
 import websockets
 
-BASE = "http://127.0.0.1:8000"
+# Point at a deployed server with NGB, e.g.
+#   NGB=https://your-host python tests/test_samaritan_and_checkin.py
+# Nothing here touches the database directly, so a remote run needs no
+# credentials -- it only creates throwaway accounts and alerts.
+BASE = os.environ.get("NGB", "http://127.0.0.1:8000")
+WS = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws?token="
 
 PASS = FAIL = 0
 
@@ -77,7 +83,7 @@ async def main():
     call("/presence", "POST", {"lat": CLOSE_BY[0], "lon": CLOSE_BY[1]}, near["token"])
     call("/presence", "POST", {"lat": FAR_AWAY[0], "lon": FAR_AWAY[1]}, far["token"])
 
-    url = "ws://127.0.0.1:8000/ws?token="
+    url = WS
     async with websockets.connect(url + ward["token"]) as w, \
                websockets.connect(url + kin["token"]) as k, \
                websockets.connect(url + near["token"]) as n, \
@@ -112,6 +118,13 @@ async def main():
                    ward["token"])
         alert_id = sos["alert"]["id"]
 
+        # A severity-5 alert starts at samaritan_status 'pending' and reaches
+        # no stranger until the wearer or their family opts in -- the consent
+        # gate landed after this test was written, which is why the fan-out
+        # checks below had quietly stopped exercising anything.
+        call(f"/alert/{alert_id}/samaritan-optin", "POST", {"action": "allow"},
+             ward["token"])
+
         asked = await wait_for(n, "samaritan", 8)
         check("a stranger nearby is asked", bool(asked))
         if asked:
@@ -121,10 +134,10 @@ async def main():
                   abs(a["lat"] - HERE[0]) > 0.0004 or abs(a["lon"] - HERE[1]) > 0.0004,
                   f"{a['lat']},{a['lon']} vs {HERE}")
             check("...with a distance they can judge",
-                  isinstance(a.get("distance_m"), int) and a["distance_m"] <= 800, a)
+                  isinstance(a.get("distance_m"), int) and a["distance_m"] < 300, a)
 
         ignored = await wait_for(f, "samaritan", 2)
-        check("somebody five kilometres away is not asked", ignored is None, ignored)
+        check("somebody outside three hundred metres is not asked", ignored is None, ignored)
 
         full = call(f"/samaritan/{alert_id}/respond", "POST", None, near["token"])
         got = full["alert"]
