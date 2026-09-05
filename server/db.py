@@ -177,7 +177,7 @@ def init_db():
     works perfectly well against the older schema.
     """
     want = {"beat_band_link", "beat_armed", "lost_rearm_at", "link_lost_at",
-            "high_alert"}
+            "high_alert", "sos_streak"}
     try:
         with closing(db()) as c:
             have = {r["column_name"] for r in c.execute(
@@ -198,9 +198,11 @@ def init_db():
     missing = sorted(want - have)
     if missing:
         print("\n  *** watch_state is missing " + ", ".join(missing) + " ***")
-        print("  Migrations 006-008 have not been applied. Every heartbeat will")
+        print("  Migrations 006-011 have not been applied. Every heartbeat will")
         print("  fail with UndefinedColumn until they are, and an armed phone")
-        print("  that cannot report in gets reported lost. Fix it with:\n")
+        print("  that cannot report in gets reported lost. Without `sos_streak`")
+        print("  (011) an SOS cannot ask its own check-ins or be stood down by")
+        print("  them, and no live location is recorded at all. Fix it with:\n")
         print("      python server/migrate_pg.py\n")
     if not uniq:
         print("\n  *** users.username is not unique ***")

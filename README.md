@@ -121,6 +121,8 @@ Full instructions: [docs/TESTING_WITHOUT_HARDWARE.md](docs/TESTING_WITHOUT_HARDW
 | **5** | `sos` · `accident` · `snatch` | Every family member paged **plus** the Good Samaritan fan-out |
 | **4** | `fall` | Lock-screen takeover and siren |
 | **3** | `checkin_missed` · `watch_lost` · `going_dark` | The family is told, no siren |
+
+  A **missed High Alert check-in is not on this table** — it is an `sos`, severity 5. High Alert is armed deliberately by somebody who has decided the next stretch of their evening needs watching, and its whole contract is *ask me every five minutes, and if I stop answering, something is wrong*. Delivering the moment that contract comes true as the quietest alert in the product was exactly backwards. The Good Samaritan broadcast stays **pending** on that path: the alert exists *because* the person could not answer, and their silence is not consent to show strangers where they are — the wearer or a family member allows it from the app.
 | **2** | `checkin_req` | A question, with a countdown |
 | **1** | `low_battery` · `band_battery` · `checkin_ack` · `sos_clear` · `near_miss` | Notice, or private record |
 
@@ -129,7 +131,15 @@ Full instructions: [docs/TESTING_WITHOUT_HARDWARE.md](docs/TESTING_WITHOUT_HARDW
 ### 👁 The watch — deadlines nobody's phone owns
 
 - **Remote check-in.** A family member asks *"are you okay?"*; the band buzzes and the wearer has a **server-owned 90-second window**. Miss it and the family is told — *with the wearer's app force-quit*.
-- **High Alert.** Armed in one tap, disarmed only behind **four digits**. That asymmetry is the feature. While armed the **server** buzzes on its own randomised **5–10 minute** schedule, and each buzz opens a real check-in row — so ignoring the server escalates by exactly the same path as ignoring a parent. The interval is randomised precisely so it cannot be timed by somebody watching.
+- **High Alert.** Armed in one tap, disarmed only behind **four digits**. That asymmetry is the feature. While armed the **server** buzzes every **five minutes**, and each buzz opens a real check-in row — so ignoring the server escalates by exactly the same path as ignoring a parent. Miss one and it becomes an **SOS**, not a footnote.
+
+  The interval used to be randomised between five and ten minutes, so a wearer could not learn the rhythm. That bought unpredictability against somebody gaming their own safety device — not a real threat — and it cost the only number that matters: at the top of that range a person could be taken a second after answering and not be missed for ten minutes. Five flat halves the worst case and makes the promise sayable in one sentence.
+
+- **An SOS asks its own check-ins, and two answers end it.** Every five minutes while an alert is live, on the same rhythm, worded differently: this is the question answered to *get out* of something rather than to stay clear of it. Two in a row — ten minutes of a person still able to answer — and the server stands the alert down itself and tells the family they are safe. Missing one raises nothing (they are already being sirened about) and puts the run back to zero. Before this, an SOS raised from an idle phone asked nothing at all and could only be left by pressing a button, which is exactly what somebody being followed home cannot reach for.
+
+- **Live location.** An alert used to carry one position: the fix baked in when the button went down. For a fall in a kitchen that is the whole answer; for a snatch it is the answer for about thirty seconds. A live alert now reports **every 10 seconds for the first 20 minutes, then every 30**, and the trail is kept — so the family see not just *where* but *which way*. Tracking outlives the stand-down by **half an hour at 30 s**, because "I'm safe" gets pressed at the top of a street she still has to walk down.
+
+  It rides the Android **foreground service** that was already running, so the fixes keep going out with the app backgrounded, swiped out of Recents, or killed — and unsent fixes buffer through a dead zone and flush as one batch. The cadence and the stop condition are the **server's**, restated in the answer to every fix: a tracker whose stop condition lives only in the app runs for ever the one time the frame telling it to stop goes missing. The wearer is told it is on, in the app and in the service notification.
 - **Heartbeat watchdog.** The phone beats every 60 s while armed. **Three minutes of silence raises `watch_lost`**, carrying the last position reported.
 - **`watch_lost` is a rule about a transition, not a reading.** It fires only when a live link to a *physical* band and a running alert were both true and *then* the link went away — and a drop starts a 120-second clock rather than an alert, so a sleeve or a microwave costs nothing. See below for why this rewrite matters.
 - **Watch-status tile.** The family's screen shows the health of the watch itself — armed, band linked, last heartbeat — at the **same 180 s threshold the server uses**, so the screen and the sweeper never disagree in front of a user.

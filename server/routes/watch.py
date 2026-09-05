@@ -2,14 +2,13 @@
 High Alert, the heartbeat, and what a family member is shown about it.
 """
 
-import random
 import time
 from contextlib import closing
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from server import watch_lost as WL
-from server.config import BEAT_LOST_S, HIGH_ALERT_MAX_S, HIGH_ALERT_MIN_S
+from server.config import BEAT_LOST_S, CHECKIN_EVERY_S
 from server.db import db
 from server.deps import me
 from server.hub import HUB
@@ -42,9 +41,14 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
     with closing(db()) as c:
         row = watch_row(c, u["id"])
         if b.on:
-            first = b.first_buzz_s if b.first_buzz_s is not None else \
-                random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
-            first = max(5, min(float(first), HIGH_ALERT_MAX_S))
+            # Five minutes, flat. It was `random.uniform(300, 600)` -- jitter
+            # so a wearer could not learn the rhythm, which is a threat nobody
+            # has, and it cost the only number that matters here: how long
+            # silence can last before anybody knows about it. At the top of
+            # that range a wearer could be taken a second after answering and
+            # not be missed for ten minutes. See CHECKIN_EVERY_S.
+            first = b.first_buzz_s if b.first_buzz_s is not None else CHECKIN_EVERY_S
+            first = max(5, min(float(first), CHECKIN_EVERY_S))
             # Arming starts the silence clock, so it also has to write the
             # witnessed state the watchdog will judge that silence against.
             # `on_arm` inherits the band link only if the last beat is recent
@@ -63,6 +67,7 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
                       "link_lost_at=NULL WHERE user_id=%s",
                       (now + first, now, armed.beat_band_link, u["id"]))
             nxt = now + first
+            after = None
         else:
             # Standing down clears the witnessed armed flag as well as the
             # mode. The phone stops beating the moment it goes idle, so leaving
@@ -76,23 +81,44 @@ async def set_high_alert(b: HighAlertIn, u=Depends(me)):
             # and touches nothing else. Writing mode='idle' flatly here -- as
             # it did -- stood a live emergency down along with the schedule,
             # and took the heartbeat watchdog with it.
-            c.execute("UPDATE watch_state SET high_alert=FALSE, next_buzz_at=NULL, "
-                      "mode=CASE WHEN mode='high_alert' THEN 'idle' ELSE mode END, "
-                      "beat_armed=CASE WHEN mode='high_alert' THEN FALSE "
-                      "                ELSE beat_armed END, "
-                      "link_lost_at=CASE WHEN mode='high_alert' THEN NULL "
-                      "                  ELSE link_lost_at END "
-                      "WHERE user_id=%s",
-                      (u["id"],))
-            nxt = None
+            #
+            # `next_buzz_at` gets the same CASE as everything else here, and
+            # it did not until an SOS started asking its own check-ins.
+            #
+            # Clearing it flatly was right while the column was High Alert's
+            # alone. It is now the schedule for BOTH questions, so switching
+            # High Alert off during an emergency used to take the SOS's
+            # five-minute check-ins with it -- silently, and for the whole
+            # emergency. That is the same class of bug as migration 008: one
+            # column answering two questions, and a write for one of them
+            # destroying the answer to the other. The wearer loses the only way
+            # out of the alert that does not involve finding a button.
+            cur = c.execute(
+                "UPDATE watch_state SET high_alert=FALSE, "
+                "next_buzz_at=CASE WHEN mode='sos' THEN next_buzz_at "
+                "                  ELSE NULL END, "
+                "mode=CASE WHEN mode='high_alert' THEN 'idle' ELSE mode END, "
+                "beat_armed=CASE WHEN mode='high_alert' THEN FALSE "
+                "                ELSE beat_armed END, "
+                "link_lost_at=CASE WHEN mode='high_alert' THEN NULL "
+                "                  ELSE link_lost_at END "
+                "WHERE user_id=%s RETURNING mode, next_buzz_at",
+                (u["id"],))
+            after = cur.fetchone()
+            nxt = after["next_buzz_at"] if after else None
         c.commit()
+    # The mode as the row now stands, not as this switch would like it to be.
+    # Standing High Alert down during an emergency leaves an SOS running, and
+    # answering "mode: idle" to that is the app being told the emergency is
+    # over -- by the one endpoint that deliberately does not end it.
+    mode = "high_alert" if b.on else (after["mode"] if after else "idle")
     log.info("high alert %s for %s", "ON" if b.on else "off", u["name"])
     await HUB.fanout(family_of(u["id"]), {
         "t": "watch_updated",
         "user_id": u["id"],
-        "mode": "high_alert" if b.on else "idle"
+        "mode": mode,
     })
-    return {"ok": True, "mode": "high_alert" if b.on else "idle", "next_buzz_at": nxt}
+    return {"ok": True, "mode": mode, "high_alert": bool(b.on), "next_buzz_at": nxt}
 
 
 @router.post("/heartbeat")

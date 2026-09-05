@@ -27,7 +27,7 @@ import DisarmPad from './src/screens/user/DisarmPad';
 import { U } from './src/screens/user/kit';
 import { SafeAreaRoot, useEdgeInsets } from './src/safeArea';
 import { bandEventToAction, useSafetyMachine } from './src/state';
-import { C, S, T, sevColor } from './src/theme';
+import { C, S, T, fmtAgo, sevColor } from './src/theme';
 import { Button, Chip, Icon, IconButton, Txt } from './src/ui';
 import { lastKnownFix, useHeartbeat, usePhoneBattery, usePresence } from './src/watch';
 import {
@@ -35,6 +35,9 @@ import {
   travellingSteadily, useSpeedWatch,
 } from './src/motion';
 import { stopBackgroundWatch, syncBackgroundWatch } from './src/bgService';
+import {
+  adoptTracking, startTracking, stopTracking, trackAfterStandDown,
+} from './src/liveLocation';
 import { wantsBand } from './src/band';
 import {
   registerBackgroundNotifications, unregisterBackgroundNotifications,
@@ -97,6 +100,21 @@ const TAKEOVER_LEDE = {
 // delivering it more quietly than every other kind was exactly backwards.
 const TAKEOVER_FROM = 3;
 const SIREN_FROM = 4;
+
+// Above this severity the Good Samaritan fan-out is available at all. It
+// mirrors the server's own `sev >= 5` in services/alerts.py: a fall is a
+// family matter, a snatch or a crash is one where the nearest stranger is the
+// useful responder.
+const SAMARITAN_FROM = 5;
+
+// How old a live fix may be before the screen stops calling it live.
+//
+// Three missed fast pings, or one missed slow one. Past that the pin is
+// described as what it is -- a last known position -- because "where they are"
+// over a six-minute-old dot is the single most dangerous sentence this app
+// could put in front of somebody who is driving. Mirrors LIVE_FIX_STALE_S in
+// server/config.py.
+const LIVE_STALE_S = 45;
 
 // Battery thresholds, from the acceptance matrix: 20 % tells the family, 5 %
 // says the phone is about to stop being a safety device at all.
@@ -200,6 +218,10 @@ function Main() {
 
   const [incoming, setIncoming] = useState(null);     // family emergency takeover
   const [acking, setAcking] = useState(false);        // "I'm on it", mid-flight
+  // The family's Good Samaritan decision, mid-flight. Its own flag rather than
+  // `acking`: both buttons live on the takeover and pressing one must not make
+  // the other look like it is working.
+  const [optingIn, setOptingIn] = useState(false);
   const [askSheet, setAskSheet] = useState(null);     // the check-in question
   const [samaritan, setSamaritan] = useState(null);   // a stranger nearby
   const [deliveredTo, setDeliveredTo] = useState(null);
@@ -536,6 +558,13 @@ function Main() {
         dispatch('SOS_RAISED', { alert: r.alert });
         setDeliveredTo(r.delivered_to);
         setDeliveryStatus('delivered');
+        // And start reporting where she is, on the rhythm the SERVER asked
+        // for. Only now, not at the local-first dispatch above: until this
+        // reply there is no alert row for the fixes to belong to, and a
+        // tracker started against a `pending-...` id would post positions the
+        // server has nowhere to put. The fix the alert already carries covers
+        // the seconds in between.
+        if (r.tracking) startTracking(r.tracking).catch(() => { /* the bg tick retries */ });
         // The server has it. This is the first moment anything could honestly
         // say so, and it is the only place that says it.
         reportOutcome('delivered', 'sos');
@@ -622,10 +651,17 @@ function Main() {
         bump();
         return;
       }
-      await call(session, `/alert/${id}/resolve`, { method: 'POST' });
+      const r = await call(session, `/alert/${id}/resolve`, { method: 'POST' });
       dispatch('SOS_CLEARED');
       setDeliveredTo(null);
       setDeliveryStatus(null);
+      // The emergency is over; the journey is not. "I'm safe" gets pressed at
+      // the roadside or at the top of a street she still has to walk down, and
+      // the family keep seeing her move for the half hour the server just
+      // granted -- slower, and on a notification that says so. `track_until`
+      // is the server's number: the phone is not trusted to decide when to
+      // stop reporting somebody's position.
+      trackAfterStandDown(id, r?.track_until).catch(() => { /* bg tick retries */ });
       // The notification is sticky by design, so nothing else will ever take it
       // down. An "SOS is active" sitting on the lock screen after the wearer
       // stood it down is the same lie as the screen showing nothing during one.
@@ -1209,12 +1245,45 @@ function Main() {
       // The end of an emergency is the other half of the one that took the
       // screen. A family member who was shown a siren and then a four-second
       // toast had no reliable way of learning it was over.
+      // Two ways an alert ends now, and they are different facts about what a
+      // person did. "She pressed the button" is somebody actively saying they
+      // are fine; "she answered two check-ins" is the server concluding it on
+      // her behalf from two taps five minutes apart. A family member deciding
+      // whether to keep driving is entitled to know which one they have.
+      const how = m.auto
+        ? 'They answered two check-ins in a row, so Nigehban stood it down.'
+        : 'They stood the alert down themselves.';
       pushNotice({
         icon: 'shield', tone: U.mint,
         title: `${m.user.name} is safe`,
-        body: 'They stood the alert down themselves.',
+        body: how,
       });
-      notifyIfAway(`${m.user.name} is safe`, 'They stood the alert down themselves.');
+      notifyIfAway(`${m.user.name} is safe`, how);
+      bump();
+    },
+
+    // Her position, while it is still moving.
+    //
+    // The takeover is the screen most likely to be open when this arrives --
+    // somebody has just been sirened awake and is looking at "SEE WHERE THEY
+    // ARE" -- and until this the button under that heading opened a map of
+    // where they had BEEN, frozen at the moment the button was pressed. The
+    // alert row is patched in place rather than refetched: the frame carries
+    // everything the pin needs, and a network round trip during an emergency
+    // is a round trip that can fail.
+    live_location: (m) => {
+      setIncoming((cur) => (cur && String(cur.id) === String(m.alert_id)
+        ? { ...cur, live_lat: m.lat, live_lon: m.lon, live_at: m.at, maps: m.maps }
+        : cur));
+      // And the wearer's own live alert, when this frame is the echo of a fix
+      // this phone sent. It is what lets her own SOS screen say "Live" only
+      // while the server is actually receiving positions -- see the note on
+      // the fan-out targets in services/alerts.py.
+      dispatch('LIVE_FIX', { alertId: m.alert_id, lat: m.lat, lon: m.lon,
+                             at: m.at, maps: m.maps });
+      // The alert lists redraw from the server, which now carries the same
+      // fields on the row. Throttled by `bump` being cheap rather than by a
+      // timer: at ten seconds apart this is six renders a minute.
       bump();
     },
 
@@ -1286,17 +1355,81 @@ function Main() {
     },
     // The sweeper's own knock, on the server's schedule rather than anyone's
     // thumb. It looks the same to the wearer, which is the point.
+    //
+    // Two rhythms arrive here now and they mean opposite things. `high_alert`
+    // is the standing arrangement: answer, and it continues. `sos` is asked
+    // with the family already alerted and sirens already running, and
+    // answering it is the way OUT -- twice in a row and the alert stands
+    // itself down. `streak` is how far along that the wearer already is, sent
+    // by the server so the screen can say "1 of 2" instead of making somebody
+    // under pressure keep count.
     buzz_now: (m) => {
       const checkin = {
         name: null, system: true, reason: m.reason, checkin_id: m.checkin_id,
         window: m.window || 90, due_at: m.due_at, _startAt: Date.now() / 1000,
+        streak: m.streak ?? null, streakNeeded: m.streak_needed ?? null,
       };
       dispatch('CHECKIN_ASKED', { checkin });
       if (m.next_buzz_at) dispatch('NEXT_BUZZ', { at: m.next_buzz_at });
       setAskSheet(checkin);
       Vibration.vibrate([0, 400, 200, 400]);
       band.send({ c: 'checkin_req', window: m.window ?? 90 });
-      notify('Nigehban is checking on you', 'Tap "I am fine" to answer.');
+      notify(m.reason === 'sos' ? 'Are you safe now?' : 'Nigehban is checking on you',
+             m.reason === 'sos'
+               ? 'Answer twice in a row and your SOS is stood down.'
+               : 'Tap "I am fine" to answer.');
+    },
+
+    // An SOS the wearer never pressed.
+    //
+    // High Alert was armed, a check-in went unanswered, and the sweeper raised
+    // a real emergency about it -- see ESCALATION in server/config.py. This is
+    // the first this phone hears of it, and it is very often a false alarm: a
+    // shower, a bus with no signal, a phone face-down on a desk. So the SOS
+    // screen has to come up, because the one tap that fixes a false alarm is
+    // on it, and the tracker has to start, because the one case where it is
+    // not a false alarm is the case the whole product exists for.
+    sos_started: (m) => {
+      if (!m.alert) return;
+      dispatch('SOS_RAISED', { alert: m.alert });
+      setDeliveredTo(null);
+      setDeliveryStatus('delivered');
+      showOwnSosNotification(m.alert);
+      if (m.tracking) startTracking(m.tracking).catch(() => { /* bg tick retries */ });
+      // No siren from the wearer's own pocket. Same rule as every other
+      // notification they get during an emergency: they may be hiding from
+      // whoever this is about.
+      Vibration.vibrate([0, 400, 200, 400, 200, 400]);
+      pushNotice({
+        icon: 'alert-octagon', tone: U.red,
+        title: 'Your family has been alerted',
+        body: 'You did not answer a check-in. If you are safe, stand it down.',
+        quiet: true,
+      });
+    },
+
+    // The emergency ended without the wearer touching a stand-down button.
+    //
+    // Deliberately not the family's `resolved` frame, which this app renders
+    // as news about somebody else and would show a person a notice about
+    // themselves. What this phone has to do is the part only it can: drop the
+    // SOS screen, and take down the sticky "SOS is active" notification it
+    // posted -- which is un-dismissable by design, so nothing else ever will.
+    sos_cleared: (m) => {
+      dispatch('SOS_CLEARED');
+      setDeliveredTo(null);
+      setDeliveryStatus(null);
+      clearOwnSosNotification();
+      trackAfterStandDown(m.alert_id, m.track_until, m.track_every_s)
+        .catch(() => { /* the next fix re-learns the window from the server */ });
+      pushNotice({
+        icon: 'shield', tone: U.mint,
+        title: 'Your SOS has been stood down',
+        body: m.track_until
+          ? 'You answered two check-ins. Your family can still see you get home.'
+          : 'You answered two check-ins, so your family has been told you are safe.',
+      });
+      bump();
     },
     // The answer to a question this phone asked. Somebody pressed "check on
     // her" precisely because they were worried, and the reply used to be four
@@ -1372,6 +1505,14 @@ function Main() {
         // Replace the local placeholder with the real server alert.
         if (last.response?.alert) {
           dispatch('SOS_RAISED', { alert: last.response.alert });
+        }
+        // And start reporting, now that there is a row to report into. This is
+        // the dead-zone SOS finally landing -- the emergency has been running
+        // for however long the signal took, so the family's first live pin
+        // matters more here than anywhere else: the fix in the alert is where
+        // she was when she pressed it, which by now may be a long way behind.
+        if (last.response?.tracking) {
+          startTracking(last.response.tracking).catch(() => { /* bg tick retries */ });
         }
         setDeliveredTo(count ?? null);
         setDeliveryStatus('delivered');
@@ -1504,7 +1645,29 @@ function Main() {
       const mine = await call(session, '/alerts?scope=mine&limit=5');
       const live = (mine || []).find(
         (a) => !a.resolved_at && EMERGENCY_KINDS.includes(a.kind));
-      if (!live) return;
+
+      // The server says nothing is live, and this tree thinks something is.
+      //
+      // That gap used to be unreachable -- an alert only ended by this app
+      // asking it to -- and it stopped being unreachable the moment two
+      // answered check-ins could end one on their own. The `sos_cleared` frame
+      // covers the app that was running to hear it; this covers the one that
+      // was killed, which is the same app ten minutes later. Without it the
+      // wearer reopens Nigehban to a live SOS screen for an emergency the
+      // whole family already knows is over.
+      //
+      // `_local` is left alone: that is a queued alert the server has never
+      // seen, so its absence from this list means nothing at all.
+      if (!live) {
+        const held = ctxRef.current.activeSos;
+        if (held && !held._local && !String(held.id).startsWith('pending-')) {
+          dispatch('SOS_CLEARED');
+          setDeliveredTo(null);
+          setDeliveryStatus(null);
+          clearOwnSosNotification();
+        }
+        return;
+      }
 
       const known = ctxRef.current.activeSos;
       // Leave alone anything this tree is holding that is not this row: an
@@ -1524,6 +1687,13 @@ function Main() {
       // The process may have been killed since, taking the notification with
       // it. Putting it back is what keeps the lock screen honest.
       showOwnSosNotification(live, live.acks || []);
+      // And the tracker, for the same reason and with the same problem: the
+      // plan it runs on is on disk, but an app update or a fresh install
+      // leaves a live emergency with nothing next to it. `adoptTracking` asks
+      // the server what this phone should be doing rather than working it out
+      // from the row -- the cadence is a product decision, and it is not one
+      // worth duplicating into a build that cannot be redeployed to a pocket.
+      adoptTracking(session).catch(() => { /* offline; the bg tick retries */ });
     } catch {
       // Offline. The queue flush and the live socket still cover their own
       // cases, and a failed lookup must never look like "no emergency".
@@ -1587,6 +1757,11 @@ function Main() {
     await stopPushToThisPhone(session);
     await unregisterBackgroundNotifications();
 
+    // Before stopBackgroundWatch, which takes the service down: stopTracking
+    // hands the interval back and drops the plan and the unsent buffer, and a
+    // plan left on disk would have the NEXT account's foreground service come
+    // up reporting positions against a stranger's alert id.
+    await stopTracking();
     await stopBackgroundWatch();
     await clearSession();
     await clearQueue();
@@ -1882,6 +2057,76 @@ function Main() {
                 : 'Raised from their phone'}
             </Text>
 
+            {/* ---- is this pin moving, and how old is it? ----
+                The one line that decides whether the map button below is worth
+                pressing. A fix from eight seconds ago is where somebody IS; one
+                from six minutes ago is where they were, and telling a family
+                member the second thing in the words of the first is how they
+                end up standing in an empty street. */}
+            {incoming.live_at ? (
+              <Text style={[st.takeMeta, {
+                marginBottom: S.lg,
+                color: (Date.now() / 1000 - incoming.live_at) <= LIVE_STALE_S
+                  ? C.green : C.amber,
+              }]}>
+                {(Date.now() / 1000 - incoming.live_at) <= LIVE_STALE_S
+                  ? '● Live location — updating now'
+                  : `Last position ${fmtAgo(incoming.live_at)}`}
+              </Text>
+            ) : null}
+
+            {/* ---- Good Samaritan, from the family's side ----
+                The server has always allowed this -- /alert/{id}/samaritan-optin
+                takes the call from the victim OR anyone in their family -- and
+                until now nothing in the app ever made it. Only the wearer's own
+                SOS screen had the buttons, which is exactly the screen nobody
+                can reach in the emergencies where it matters: she is not
+                holding her phone, or she is not able to answer it. The
+                permission existed and was unreachable.
+
+                Severity 5 only, and only while the decision is still open. A
+                'denied' set by the wearer is final and is not offered here --
+                a person who chose Family Only for their own emergency does not
+                get overruled by a relative. */}
+            {incoming.severity >= SAMARITAN_FROM
+              && (incoming.samaritan_status || 'pending') === 'pending' ? (
+              <View style={st.takeSam}>
+                <Text style={[T.meta, { color: C.dim, textAlign: 'center' }]}>
+                  Ask Nigehban users near them to help? They are shown a rough
+                  pin and a distance — never {incoming.user.name}&apos;s name.
+                </Text>
+                <View style={{ flexDirection: 'row', gap: S.sm }}>
+                  <View style={{ flex: 1 }}>
+                    <Button title="ALERT NEARBY" tone={C.blue} filled icon="users"
+                            loading={optingIn} disabled={optingIn}
+                            onPress={async () => {
+                              if (optingIn) return;
+                              setOptingIn(true);
+                              try { await handleOptinSamaritan(incoming.id, 'allow'); }
+                              finally { setOptingIn(false); }
+                            }} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Button title="FAMILY ONLY" tone={C.dim}
+                            disabled={optingIn}
+                            onPress={async () => {
+                              if (optingIn) return;
+                              setOptingIn(true);
+                              try { await handleOptinSamaritan(incoming.id, 'deny'); }
+                              finally { setOptingIn(false); }
+                            }} />
+                  </View>
+                </View>
+              </View>
+            ) : null}
+
+            {incoming.severity >= SAMARITAN_FROM
+              && incoming.samaritan_status === 'allowed' ? (
+              <Text style={[st.takeMeta, { color: C.green }]}>
+                Nearby Nigehban users have been asked to help
+              </Text>
+            ) : null}
+
             <View style={st.takeBtns}>
               {/* Opening the map does not close the takeover, so this is the one
                   exit that has to stop the siren itself -- they have plainly
@@ -1928,14 +2173,22 @@ function Main() {
           <View style={st.sheet}>
             <View style={st.grab} />
             <Txt variant="h1">
-              {askSheet?.system
-                ? 'Nigehban is checking on you'
-                : `${askSheet?.name} is checking on you`}
+              {askSheet?.reason === 'sos'
+                ? 'Are you safe now?'
+                : askSheet?.system
+                  ? 'Nigehban is checking on you'
+                  : `${askSheet?.name} is checking on you`}
             </Txt>
             <Text style={st.sheetBody}>
-              {askSheet?.system
-                ? 'High Alert is on. Answer, or your family is told that you did not.'
-                : 'Answer and they will see straight away that you are fine.'}
+              {/* The SOS question is the only one answered to get OUT of
+                  something rather than to stay clear of it, and saying so is
+                  the difference between a wearer tapping twice on purpose and
+                  a wearer tapping to make a buzzing stop. */}
+              {askSheet?.reason === 'sos'
+                ? 'Your SOS is still live. Answer this and the next one, and Nigehban tells your family you are safe.'
+                : askSheet?.system
+                  ? 'High Alert is on. Answer, or your family is told that you did not.'
+                  : 'Answer and they will see straight away that you are fine.'}
             </Text>
             <CheckinBanner checkin={askSheet} onAck={ackCheckin} />
             <Button title={askSheet?.system ? 'Answer later' : 'Not now'} tone={C.dim}
@@ -2003,6 +2256,16 @@ const st = StyleSheet.create({
   takeLede: { ...T.body, color: C.text, textAlign: 'center', marginTop: S.xs },
   takeMeta: { ...T.body, color: C.dim, marginBottom: S.xl },
   takeBtns: { alignSelf: 'stretch', gap: S.md },
+  // The family's Good Samaritan decision, set apart from the two buttons below
+  // it. Those are "I'm on it" and "Dismiss" -- what this reader does next --
+  // and this is a decision about somebody else's privacy. A thumb reaching for
+  // one must not be able to land on the other.
+  takeSam: {
+    alignSelf: 'stretch', gap: S.sm, marginBottom: S.lg,
+    padding: S.md, borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1, borderColor: C.raised || '#1F2937',
+  },
 
   sheetWrap: { flex: 1, justifyContent: 'flex-end' },
   sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: C.scrim },

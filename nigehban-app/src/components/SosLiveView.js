@@ -62,6 +62,13 @@ export default function SosLiveView({
 
   const samaritanStatus = alert?.samaritan_status || 'pending';
 
+  // Is the trail still moving? Forty-five seconds is three missed fast pings
+  // or one missed slow one -- see LIVE_FIX_STALE_S in server/config.py. The
+  // one-second `force` tick above is what makes this go stale on screen
+  // without anything having to push a frame.
+  const liveFresh = !!alert?.live_at
+    && (Date.now() / 1000 - alert.live_at) <= 45;
+
   const handleSamaritan = async (action) => {
     if (samaritanBusy || !alert?.id) return;
     setSamaritanBusy(true);
@@ -131,6 +138,19 @@ export default function SosLiveView({
         </View>
       )}
 
+      {/* Disclosure, not decoration. The phone is sending this person's
+          position every few seconds and they are entitled to be told so in the
+          app as well as in the service notification -- a safety product that
+          reports where somebody is without saying so is a tracking product. */}
+      {!isQueued && liveFresh ? (
+        <View style={s.samaritanBanner}>
+          <Icon name="navigation" size={16} color={C.green} />
+          <Text style={[T.meta, { color: C.green, flex: 1 }]}>
+            Your family can see where you are, and it updates as you move
+          </Text>
+        </View>
+      ) : null}
+
       {!isQueued && samaritanStatus === 'allowed' && (
         <View style={s.samaritanBanner}>
           <Icon name="check-circle" size={16} color={C.green} />
@@ -159,8 +179,16 @@ export default function SosLiveView({
         </View>
         <View style={s.cell}>
           <Label>Location</Label>
-          <Text style={[T.number, { color: fix ? C.green : C.amber }]}>
-            {fix ? 'Attached' : 'Not yet'}
+          {/* Three states, not two, and the middle one is the important one.
+              "Attached" used to mean a fix went out with the alert, which was
+              the whole truth when an alert had exactly one position. Now the
+              pin moves, so what the wearer needs to know is whether it is
+              still moving -- a tracker that quietly stopped in a dead zone
+              must not read as one that is working. */}
+          <Text style={[T.number, { color: liveFresh ? C.green : (fix ? C.amber : C.red) }]}>
+            {liveFresh ? 'Live'
+              : alert?.live_at ? `${fmtAgo(alert.live_at)}`
+                : fix ? 'Sent once' : 'Not yet'}
           </Text>
         </View>
       </View>

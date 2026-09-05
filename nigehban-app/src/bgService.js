@@ -1,7 +1,14 @@
 import { Platform } from 'react-native';
 import { flushPending } from './alertQueue';
+import { IDLE_INTERVAL_MS, currentPlan, reportFixes, syncTracking } from './liveLocation';
 
-const TASK_NAME = 'NIGEHBAN_BACKGROUND_WATCH';
+/**
+ * Exported because liveLocation.js reconfigures this same task when an
+ * emergency needs a faster rhythm than the idle one below. One task, one name,
+ * two callers -- a second registration under a different name would be a
+ * second foreground service and a second sticky notification.
+ */
+export const TASK_NAME = 'NIGEHBAN_BACKGROUND_WATCH';
 
 let TaskManager = null;
 let Location = null;
@@ -24,7 +31,7 @@ try {
 // has to already be registered when that happens.
 if (TaskManager && Location) {
   try {
-    TaskManager.defineTask(TASK_NAME, async ({ error }) => {
+    TaskManager.defineTask(TASK_NAME, async ({ data, error }) => {
       if (error) {
         console.warn('[bgService] task error', error.message);
       }
@@ -44,6 +51,37 @@ if (TaskManager && Location) {
         }
       } catch (e) {
         console.warn('[bgService] background flush failed', e?.message || e);
+      }
+
+      // And the payload itself, which this task threw away for its whole life
+      // until live location needed it.
+      //
+      // This is the only path that survives what the feature is actually for:
+      // the app off screen, swiped out of Recents, or killed by an OEM battery
+      // manager while somebody is being followed home. A JS timer in the React
+      // tree is gone in every one of those; this is not, because Android has
+      // been told to keep the process for the service that produced the tick.
+      //
+      // Guarded separately from the flush above so that neither failure takes
+      // the other with it -- a queued SOS must still leave the phone if the
+      // position report cannot, and the reverse.
+      try {
+        const locs = data?.locations || [];
+        if (locs.length) {
+          const { tracking } = await reportFixes(locs);
+          // The server decides when this stops, and it says so in the answer to
+          // every fix. `tracking: null` is a window that has closed -- the
+          // stand-down window ran out, or this emergency was resolved while
+          // the phone was out of signal -- and the service goes back to its
+          // idle rhythm rather than tracking somebody indefinitely because a
+          // socket frame went missing.
+          await syncTracking();
+          if (!tracking) {
+            console.log('[bgService] live location window closed, back to idle');
+          }
+        }
+      } catch (e) {
+        console.warn('[bgService] live location report failed', e?.message || e);
       }
     });
   } catch (e) {
@@ -92,7 +130,7 @@ export async function startBackgroundWatch() {
     if (!isRunning) {
       await Location.startLocationUpdatesAsync(TASK_NAME, {
         accuracy: Location.Accuracy.Balanced,
-        timeInterval: 60000, // 60 seconds interval
+        timeInterval: IDLE_INTERVAL_MS,
         // Zero, not 50 m. Android treats distanceInterval as a *floor* on
         // movement: with 50 m set, a phone sitting on a table never produces a
         // single tick, however long the interval. That was harmless while the
@@ -100,7 +138,7 @@ export async function startBackgroundWatch() {
         // it -- somebody hiding still in a dead zone is precisely the person
         // whose alert must go out the moment signal returns.
         distanceInterval: 0,
-        deferredUpdatesInterval: 60000,
+        deferredUpdatesInterval: IDLE_INTERVAL_MS,
         foregroundService: {
           notificationTitle: 'Nigehban is watching',
           notificationBody: 'Band link and safety monitoring are active',
@@ -108,6 +146,20 @@ export async function startBackgroundWatch() {
         },
       });
     }
+
+    // A cold start in the middle of an emergency.
+    //
+    // The service has just come up on its ordinary sixty-second rhythm, which
+    // is right for an ordinary Tuesday and wrong for the case where the
+    // process was killed while an alert was live and Android has only now
+    // brought it back. The plan is on disk -- that is why it is written there
+    // -- so this asks it what rhythm is actually owed and reconfigures if the
+    // answer is not the one already running. A no-op when nothing is being
+    // tracked, which is nearly always.
+    try {
+      if (await currentPlan()) await syncTracking();
+    } catch { /* the next fix, or the next foreground, tries again */ }
+
     lastError = null;
     return true;
   } catch (e) {

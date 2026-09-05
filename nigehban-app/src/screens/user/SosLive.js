@@ -63,6 +63,13 @@ export default function SosLive({
 
   const samaritanStatus = alert?.samaritan_status || 'pending';
 
+  // Is the position trail still moving? Forty-five seconds is three missed
+  // fast pings or one missed slow one -- see LIVE_FIX_STALE_S in
+  // server/config.py. It goes stale on screen off the one-second tick above,
+  // with nothing having to push a frame, which is the point: a tracker that
+  // stopped in a dead zone must not go on looking like one that is working.
+  const liveFresh = !!alert?.live_at && (Date.now() / 1000 - alert.live_at) <= 45;
+
   const handleSamaritan = async (action) => {
     if (samaritanBusy || !alert?.id) return;
     setSamaritanBusy(true);
@@ -113,6 +120,28 @@ export default function SosLive({
           </View>
         </View>
       )}
+
+      {/* ---- live location ----
+          Disclosure, not decoration. This phone is reporting where its wearer
+          is every few seconds, and she is entitled to be told so in the app as
+          well as in the foreground-service notification. A safety product that
+          sends somebody's position without saying so is a tracking product.
+
+          It is also the honest version of the old "Location: attached" line,
+          which said a fix went out with the alert and then never changed --
+          equally true five seconds and five miles later. */}
+      {!isQueued ? (
+        <View style={[s.samaritanBanner, !liveFresh && { backgroundColor: U.amberSoft }]}>
+          <Icon name="navigation" size={16} color={liveFresh ? U.mint : U.amber} />
+          <Text style={[T.meta, { color: liveFresh ? U.mint : U.amber, flex: 1 }]}>
+            {liveFresh
+              ? 'Your family can see where you are — it updates as you move'
+              : alert?.live_at
+                ? `Last position sent ${fmtAgo(alert.live_at)} — still trying`
+                : 'Finding your position…'}
+          </Text>
+        </View>
+      ) : null}
 
       {/* ---- Good Samaritan controls / status ---- */}
       {!isQueued && samaritanStatus === 'pending' && (

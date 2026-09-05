@@ -296,10 +296,15 @@ export default function Dashboard({
 
       {ctx.checkin ? (
         <View style={s.checkin}>
+          {/* Three questions, and the SOS one is the opposite of the other
+              two: those are answered to STAY clear, this one is answered to
+              GET clear. Two in a row and the alert stands itself down. */}
           <Text style={[T.bodyMed, { color: U.amber }]}>
-            {ctx.checkin.system
-              ? 'Nigehban is checking on you'
-              : `${ctx.checkin.name} is checking on you`}
+            {ctx.checkin.reason === 'sos'
+              ? 'Are you safe now? Two answers stand your SOS down'
+              : ctx.checkin.system
+                ? 'Nigehban is checking on you'
+                : `${ctx.checkin.name} is checking on you`}
           </Text>
           <Pressable
             onPress={async () => {
