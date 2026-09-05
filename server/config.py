@@ -182,6 +182,18 @@ LIVE_FIX_SLOW_S   = 30      # and after that
 TRACK_AFTER_STANDDOWN_S = 1800
 TRACK_AFTER_STANDDOWN_EVERY_S = 30
 
+# The hard ceiling on a shareable tracking link, whatever else happens.
+#
+# The normal life of one is minutes: it dies when the alert is stood down plus
+# TRACK_AFTER_STANDDOWN_S. This is for the alert that is never stood down --
+# the phone died, nobody pressed anything, the emergency ended in a way the
+# product never saw. Without a ceiling that link works for ever, and a link
+# forwarded to a WhatsApp group during one bad evening becomes a permanent
+# window into where somebody is. Twelve hours is long enough that no real
+# emergency outlives it and short enough that a forgotten link is not a
+# tracking device.
+SHARE_MAX_S = 43200
+
 # How stale a live fix may be before the family screen stops calling it live.
 # Three missed fast pings, or one missed slow one, and the pin is described as
 # what it is -- a last known position -- rather than as where somebody is.

@@ -17,6 +17,7 @@ from server.routes import (
     checkins,
     watch,
     samaritan,
+    share,
     ws,
 )
 
@@ -29,5 +30,6 @@ ROUTERS = [
     checkins.router,
     watch.router,
     samaritan.router,
+    share.router,
     ws.router,
 ]

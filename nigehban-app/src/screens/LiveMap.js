@@ -72,9 +72,26 @@ export function liveUrl(session, alert) {
   return base ? base + path : null;
 }
 
+/** Metres between two fixes. Equirectangular -- exact enough under a kilometre. */
+function metresBetween(a, b) {
+  if (!a || !b) return 0;
+  const R = 6371000, rad = Math.PI / 180;
+  const x = (b.lon - a.lon) * rad * Math.cos(((a.lat + b.lat) / 2) * rad);
+  const y = (b.lat - a.lat) * rad;
+  return Math.sqrt(x * x + y * y) * R;
+}
+
+// How far she has to move before the directions somebody is already driving on
+// are worth redoing. Two hundred metres is roughly a city block: far enough
+// that a nudge is not noise every ten seconds, close enough that nobody
+// arrives at the wrong end of a street.
+const REROUTE_M = 200;
+
 export default function LiveMap({ visible, alert, session, onClose }) {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  // Where she was when Directions was last pressed. Null until it has been.
+  const [routedTo, setRoutedTo] = useState(null);
   const url = liveUrl(session, alert);
   const name = alert?.user?.name || 'They';
 
@@ -102,6 +119,7 @@ export default function LiveMap({ visible, alert, session, onClose }) {
    */
   const openDirections = async () => {
     if (lat == null) return;
+    setRoutedTo({ lat, lon });
     const web = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
     const label = encodeURIComponent(name);
     const first = Platform.OS === 'android'
@@ -119,6 +137,18 @@ export default function LiveMap({ visible, alert, session, onClose }) {
   // The one origin this view may ever show. Without it a redirect could put
   // anything at all on a screen somebody reached from a siren.
   const origin = (session?.url || SERVER_URL || '').replace(/\/+$/, '');
+
+  // Google Maps was handed ONE coordinate and it will not follow her. It
+  // re-routes as the driver moves, which is what navigation does, but the
+  // destination is frozen at the moment the button was pressed -- and no maps
+  // app on any platform accepts a moving destination from a URL.
+  //
+  // So the app says so, rather than letting somebody drive confidently to
+  // where she was ten minutes ago. This is the one piece of the live-location
+  // story that cannot be solved and can only be admitted.
+  const drift = routedTo && lat != null
+    ? metresBetween(routedTo, { lat, lon }) : 0;
+  const stale = drift >= REROUTE_M;
 
   const shareLink = async () => {
     if (!url) return;
@@ -203,6 +233,15 @@ export default function LiveMap({ visible, alert, session, onClose }) {
           )}
         </View>
 
+        {stale ? (
+          <Pressable onPress={openDirections} style={s.reroute}>
+            <Icon name="corner-up-right" size={16} color={C.bg} />
+            <Text style={[T.button, { color: C.bg, flex: 1 }]}>
+              {`They have moved ${Math.round(drift / 10) * 10} m — update directions`}
+            </Text>
+          </Pressable>
+        ) : null}
+
         <View style={s.acts}>
           {lat != null ? (
             <Pressable
@@ -252,6 +291,11 @@ const s = StyleSheet.create({
   },
   acts: {
     flexDirection: 'row', gap: S.sm, padding: S.lg, paddingBottom: S.xxl,
+  },
+  reroute: {
+    flexDirection: 'row', alignItems: 'center', gap: S.sm,
+    marginHorizontal: S.lg, paddingHorizontal: S.lg, minHeight: 48,
+    borderRadius: 12, backgroundColor: C.amber,
   },
   btn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
