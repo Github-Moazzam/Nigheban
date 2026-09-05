@@ -44,6 +44,7 @@ See migration 011, ESCALATION and SOS_SAFE_STREAK in server/config.py.
 """
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -85,9 +86,26 @@ def call(path, method="GET", body=None, token=None):
             return e.code, raw
 
 
+# A fresh password per run, generated, never written down.
+#
+# The rest of the suite uses a shared literal, and a scanner flagged this file
+# for repeating it. The scanner is right for a better reason than the one it
+# gives: these accounts are registered against whatever database the run points
+# at, and for this project that is routinely the production Supabase. A fixed,
+# guessable password on throwaway accounts that hold a real family link -- and
+# so can see a real person's alerts and position -- is a door left open in a
+# safety product, however small.
+#
+# Generated once per process so the three users in a run share it and nothing
+# has to be passed around. NGB_TEST_PW is the escape hatch for a run somebody
+# needs to log into by hand afterwards.
+TEST_PW = os.environ.get("NGB_TEST_PW") or secrets.token_urlsafe(18)
+
+
 def mkuser(tag):
     u = f"{tag}{int(time.time() * 1000) % 1000000}"
-    st, r = call("/register", "POST", {"username": u, "password": "pw12", "name": tag.title()})
+    st, r = call("/register", "POST",
+                 {"username": u, "password": TEST_PW, "name": tag.title()})
     assert st == 200, r
     return r
 
