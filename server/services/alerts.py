@@ -8,7 +8,11 @@ socket frame. Two code paths would drift, and the one that drifts is the one
 that only runs at 3 a.m.
 """
 
+import base64
+import hashlib
+import hmac
 import logging
+import os
 import time
 from contextlib import closing
 
@@ -17,7 +21,7 @@ from fastapi import HTTPException
 from server.config import (
     CHECKIN_EVERY_S, LIVE_FIX_FAST_FOR_S, LIVE_FIX_FAST_S, LIVE_FIX_SLOW_S,
     PRESENCE_FRESH_S, PRIVATE_KINDS, RESPONDER_CHANNEL_ID, SAMARITAN_RADIUS_M,
-    SEVERITY, TRACK_AFTER_STANDDOWN_EVERY_S, TRACK_AFTER_STANDDOWN_S,
+    SEVERITY, SHARE_MAX_S, TRACK_AFTER_STANDDOWN_EVERY_S, TRACK_AFTER_STANDDOWN_S,
 )
 from server.db import db
 from server.geo import coarsen, metres_between
@@ -163,6 +167,11 @@ def alert_row(r, author, acks=()):
             "acks": list(acks),
             "maps": (f"https://maps.google.com/?q={pin_lat:.6f},{pin_lon:.6f}"
                      if pin_lat is not None else None),
+            # The live page, as a path the app prefixes with its own server
+            # URL. `maps` above stays -- it is the fallback for a build that
+            # does not know about this yet, and the thing to hand somebody who
+            # only wants a pin -- but this is the one that moves.
+            "share_path": (share_path(r["id"]) if r["severity"] >= 4 else None),
             "maps_start": (f"https://maps.google.com/?q={r['lat']:.6f},{r['lon']:.6f}"
                            if r["lat"] is not None else None)}
 
@@ -210,6 +219,28 @@ async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
         if row is None:
             # Only reachable if the row vanished between the two statements.
             raise HTTPException(500, "could not record the alert")
+        # The shareable link, registered with the alert rather than on demand.
+        # It has to exist before the first push goes out, because the family
+        # member who taps that notification is the one who forwards the link --
+        # and minting it lazily would mean the first person to ask creates it,
+        # which during an emergency is a round trip nobody has time for.
+        #
+        # GUARDED, and this is the important part. A link is a convenience; the
+        # alert is the product. If `alert_share` is missing -- a deploy that
+        # restarted before its migration finished, a database rolled back --
+        # then an unguarded INSERT here raises, POST /alert answers 500, and
+        # pressing SOS does nothing at all. A missing map link would have taken
+        # the emergency down with it. So it is attempted, and its failure costs
+        # exactly the link: the alert is still written, the family are still
+        # sirened, and `share_path` comes back null so the app falls through to
+        # the static pin it used before any of this existed.
+        if sev >= 4:
+            try:
+                ensure_share(c, row["id"], time.time() + SHARE_MAX_S)
+            except Exception as e:
+                log.warning("alert %s has no shareable link (%s: %s)"
+                            " -- the alert itself is unaffected",
+                            row["id"], type(e).__name__, e)
         c.commit()
         who = c.execute("SELECT id,name FROM users WHERE id=%s", (uid,)).fetchone()
         targets = [] if kind in PRIVATE_KINDS else family_of(uid, c)
@@ -431,6 +462,22 @@ async def resolve_alert(alert_id, uid, *, auto=False, note=""):
             c.execute("UPDATE alerts SET resolved_at=%s,"
                       " track_until=COALESCE(%s, track_until) WHERE id=%s",
                       (now, track_until, alert_id))
+            # The link's clock follows the tracking window down. It was set to
+            # the twelve-hour ceiling when the alert was raised; standing down
+            # brings it in to half an hour, which is the honest answer to "how
+            # long can whoever I sent this to still see me".
+            #
+            # NOT guarded, unlike the one in emit_alert, and the asymmetry is
+            # deliberate. That one is inside a transaction whose other half is
+            # "the emergency is over" -- and a stand-down that half-succeeded,
+            # leaving the alert resolved while the link keeps working for
+            # twelve hours, is the failure this column exists to prevent. If
+            # this cannot be written the whole stand-down rolls back and the
+            # wearer's phone reports it failed, which is recoverable. Sharing
+            # somebody's position for eleven hours longer than they agreed is
+            # not.
+            if track_until:
+                ensure_share(c, alert_id, track_until)
             # It falls back to High Alert rather than to idle when High Alert
             # is still armed. The emergency is over; the standing watch the
             # wearer switched on before it is not, and it was never the SOS's
@@ -696,3 +743,109 @@ async def record_fixes(uid, points, name=None):
         "maps": f"https://maps.google.com/?q={newest['lat']:.6f},{newest['lon']:.6f}",
     })
     return {**about, "live": True, "at": newest["at"]}
+
+
+# ---- the shareable live link -------------------------------------------
+
+
+def _share_key():
+    """The key the share tokens are derived from.
+
+    `SHARE_SECRET` if it is set, and DATABASE_URL if it is not. The fallback
+    looks like a shortcut and is a deliberate one: it needs no setup, it is
+    already secret, it is stable across restarts -- which a random per-process
+    key would not be, breaking every link on every deploy -- and HMAC is
+    one-way, so a token can never leak anything about it. Rotating the database
+    password invalidates outstanding links, which is harmless: none of them
+    lives longer than about an hour anyway.
+    """
+    k = os.environ.get("SHARE_SECRET") or os.environ.get("DATABASE_URL") or ""
+    return hashlib.sha256(("nigehban-share:" + k).encode()).digest()
+
+
+def share_token(alert_id):
+    """The token for one alert. Derived, not stored, and the same every time.
+
+    Deriving rather than generating is what lets the database hold only a hash
+    while the clear token stays recomputable. That matters for one specific
+    reason: a family member opens the app an hour into an emergency and wants
+    the link again to send to somebody else. If the token could not be
+    recomputed, the only options would be storing a live credential in the
+    database or MINTING A NEW ONE -- and a new one silently kills the link they
+    already sent to the police.
+    """
+    mac = hmac.new(_share_key(), f"alert:{alert_id}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:32]
+
+
+def share_path(alert_id):
+    """What the app appends to its own server URL. Deliberately not absolute.
+
+    The server does not reliably know its own public address -- it sits behind
+    a tunnel in development and a load balancer in production -- and guessing
+    it wrong produces a link that looks right and goes nowhere. The app already
+    knows which host it is talking to, so it composes the absolute URL and this
+    stays honest.
+    """
+    return f"/t/{share_token(alert_id)}"
+
+
+def ensure_share(c, alert_id, expires_at):
+    """Register the link for this alert. Idempotent, and never rotates.
+
+    ON CONFLICT DO UPDATE on the expiry alone: the token is derived from the
+    alert id so it cannot change, and the window moves when a stand-down
+    extends tracking. A second call is how the expiry follows `track_until`.
+    """
+    from server.security import tok_hash
+    c.execute(
+        "INSERT INTO alert_share (alert_id, token_hash, created_at, expires_at)"
+        " VALUES (%s,%s,%s,%s)"
+        " ON CONFLICT (alert_id) DO UPDATE SET expires_at=EXCLUDED.expires_at",
+        (alert_id, tok_hash(share_token(alert_id)), time.time(), expires_at))
+
+
+def resolve_share(token, now=None):
+    """Token -> the alert it watches, or None if it is dead.
+
+    Dead covers every way a link stops working, and they are all the same
+    answer to whoever is holding it: expired, revoked, or the alert deleted.
+    A link that has died must not distinguish between those, or it becomes an
+    oracle for whether a given emergency ever existed.
+    """
+    now = now or time.time()
+    try:
+        row = _share_row(token)
+    except Exception as e:
+        # A public page, so it fails as "this link has ended" rather than as a
+        # stack trace. Somebody standing in a road does not need to know that a
+        # migration has not been applied.
+        log.warning("share lookup failed (%s: %s)", type(e).__name__, e)
+        return None
+    if not row or row["revoked_at"]:
+        return None
+    if row["expires_at"] is not None and now > row["expires_at"]:
+        return None
+    return row
+
+
+def _share_row(token):
+    from server.security import tok_hash
+    with closing(db()) as c:
+        return c.execute(
+            "SELECT s.*, a.user_id, a.kind, a.created_at AS raised_at,"
+            "       a.resolved_at, a.track_until, a.live_lat, a.live_lon,"
+            "       a.live_accuracy, a.live_at, a.lat, a.lon, u.name"
+            "  FROM alert_share s"
+            "  JOIN alerts a ON a.id = s.alert_id"
+            "  JOIN users  u ON u.id = a.user_id"
+            " WHERE s.token_hash=%s", (tok_hash(token),)).fetchone()
+
+
+def share_trail(alert_id, limit=300):
+    """The path behind the moving pin, oldest first."""
+    with closing(db()) as c:
+        pts = c.execute(
+            "SELECT at,lat,lon FROM alert_track WHERE alert_id=%s"
+            " ORDER BY at DESC LIMIT %s", (alert_id, limit)).fetchall()
+    return [{"at": p["at"], "lat": p["lat"], "lon": p["lon"]} for p in reversed(pts)]

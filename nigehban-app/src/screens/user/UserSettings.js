@@ -14,6 +14,7 @@ import {
 } from '../../permissions';
 import { clearPin, hasPin } from '../../security';
 import { S, T, fmtAgo } from '../../theme';
+import { liveMapAvailable } from '../LiveMap';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { usePhoneBattery } from '../../watch';
 import { RU, U, rowStyles as r } from './kit';
@@ -371,6 +372,20 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
           <Row
             icon="activity" title="Last heard from"
             value={band?.lastSeen ? fmtAgo(band.lastSeen / 1000) : '—'}
+          />
+          <View style={r.line} />
+          {/* Whether this BUILD can draw a moving map, which is not something
+              the screen can otherwise reveal: the live map degrades silently
+              to a fixed pin so that a missing module can never be the thing
+              standing between somebody and an address during an emergency.
+              Silence is right there and useless here, so it is stated. */}
+          <Row
+            icon="map" title="Live map"
+            sub={liveMapAvailable()
+              ? 'Family can watch you move during an alert'
+              : 'This build shows a fixed pin instead of a moving map'}
+            value={liveMapAvailable() ? 'Ready' : 'Limited'}
+            tone={liveMapAvailable() ? U.mint : U.amber}
           />
           <View style={r.line} />
           <Row
