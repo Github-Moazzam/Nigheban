@@ -16,11 +16,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from server.config import SWEEP_TICK_S
+from server.config import (
+    CHECKIN_EVERY_S, LIVE_FIX_FAST_S, SOS_SAFE_STREAK, SWEEP_TICK_S,
+)
 from server.db import close_db, db_label, init_db
 from server.hub import _BACKGROUND
 from server.logging_setup import get_logger
 from server.routes import ROUTERS
+from server import sweeper as sweeper_mod
 from server.sweeper import sweeper
 
 log = get_logger(__name__)
@@ -32,6 +35,27 @@ async def lifespan(_app):
     task = asyncio.create_task(sweeper())
     log.info("server ready - db at %s", db_label())
     log.info("sweeper ticking every %ss - deadlines survive the phone", SWEEP_TICK_S)
+    # The rules this process will actually apply, said out loud at startup.
+    #
+    # Not decoration. These are the product's promises, they live in config.py,
+    # and the one question nobody could answer during a rollout was whether the
+    # server answering the phone was the server whose source you were reading.
+    # A stale process looks identical to a current one from the outside -- same
+    # routes, same responses -- right up to the moment a missed check-in becomes
+    # the wrong kind of alert and a family is told the quiet thing instead of
+    # the loud one. One line in the terminal settles it before anybody tests.
+    #
+    # Read off the SWEEPER's own binding, not off config. That distinction is
+    # the entire value of the line. config.py and sweeper.py are separate
+    # modules with separate bytecode, and the failure worth catching is the one
+    # where they disagree -- a process holding a current config next to a stale
+    # sweeper answers every probe correctly and still escalates the wrong way.
+    # This prints the object that actually decides.
+    log.info("check-ins every %ss; a missed High Alert check-in becomes '%s'; "
+             "%d answered SOS check-ins in a row stand it down; live fixes every %ss",
+             int(CHECKIN_EVERY_S),
+             sweeper_mod.ESCALATION.get("high_alert", "checkin_missed"),
+             SOS_SAFE_STREAK, LIVE_FIX_FAST_S)
     try:
         yield
     finally:

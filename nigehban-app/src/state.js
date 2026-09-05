@@ -82,6 +82,19 @@ const TRANSITIONS = {
     SOS_RAISED:     'sos_live',          // update activeSos with real server alert
     SOS_CLEARED:    'rest',
     CHECKIN_ASKED:  null,
+    // Answered, and STILL in sos_live. Both halves matter.
+    //
+    // It was missing entirely, which was correct while an emergency asked no
+    // questions: nothing could open a check-in here, so nothing needed to
+    // close one. An SOS now asks its own every five minutes, and without this
+    // row the answer is dropped as an illegal event -- `ctx.checkin` never
+    // clears, and the banner on Home and Dashboard sits there counting down a
+    // question the wearer has already answered, for the rest of the emergency.
+    //
+    // `null` rather than 'rest' because answering a check-in is not the end of
+    // an SOS. Two of them in a row are, and that is the SERVER's conclusion,
+    // arriving here as `sos_cleared`.
+    CHECKIN_CLOSED: null,
     FALL_DETECTED:  null,                // already the worst case
     HIGH_ALERT_SET: null,
   },
@@ -211,6 +224,21 @@ const CONTEXT_ONLY = {
         samaritan_decided_by: a.decided_by,
       },
     };
+  },
+  // A position report the server has confirmed, folded into the live alert.
+  //
+  // The wearer's own phone is the one sending these, and it is echoed its own
+  // fix precisely so this can exist: `live_at` on the row is the difference
+  // between a screen saying "Live" and a screen saying "last seen four minutes
+  // ago", and only the server can settle which of those is true.
+  //
+  // Guarded on the id. A straggling frame about an emergency that has already
+  // been stood down must not resurrect a pin on the one that replaced it.
+  LIVE_FIX:   (c, a) => {
+    if (!c.activeSos || String(c.activeSos.id) !== String(a.alertId)) return c;
+    return { ...c,
+             activeSos: { ...c.activeSos, live_lat: a.lat, live_lon: a.lon,
+                          live_at: a.at, maps: a.maps ?? c.activeSos.maps } };
   },
   SYNC:       (c, a) => ({ ...c, ...a.patch }),
 };

@@ -80,7 +80,16 @@ class FakeConn:
 
 
 def updates(fragment):
-    """Only the UPDATEs -- the SELECTs mention these columns too."""
+    """Only the UPDATEs, and only what they SET.
+
+    `fragment` is matched against the statement, but the caller passes the
+    `SET ...` clause rather than the bare column. That precision is now load
+    bearing: the sweeper claims its rows with a single
+    `UPDATE ... WHERE id IN (SELECT ... WHERE escalated=FALSE ...) RETURNING *`,
+    so a statement that RELEASES no latch at all still contains the text
+    "escalated=FALSE" inside its subquery. Matching the column alone reported
+    every claim as a release.
+    """
     return [(s, p) for s, p in EXECUTED
             if s.startswith("UPDATE") and fragment in s]
 
@@ -124,9 +133,9 @@ async def main():
     check("a failing escalation does not abandon the rest of the batch",
           tried == ["u1", "u2", "u3"], tried)
     check("the failed check-in's latch is released, and only that one",
-          updates("escalated=FALSE")
+          updates("SET escalated=FALSE")
           == [("UPDATE checkins SET escalated=FALSE WHERE id=%s", (2,))],
-          updates("escalated=FALSE"))
+          updates("SET escalated=FALSE"))
     check("a tick reports how many escalations failed",
           result.get("failed") == 1 and result.get("missed") == 3, result)
 
@@ -139,8 +148,8 @@ async def main():
     S.emit_alert = fine
     result = await S.sweep_once(NOW)
     check("nothing is released when every escalation goes out",
-          updates("escalated=FALSE") == [] and result["failed"] == 0,
-          updates("escalated=FALSE"))
+          updates("SET escalated=FALSE") == [] and result["failed"] == 0,
+          updates("SET escalated=FALSE"))
 
     # ---- the band-gone branch restores the countdown as well -------------
     #
@@ -162,7 +171,7 @@ async def main():
 
     S.emit_alert = always_fails
     await S.sweep_once(NOW)
-    released = updates("lost_notified=FALSE")
+    released = updates("SET lost_notified=FALSE")
     check("a failed band-gone page restores link_lost_at, not just the latch",
           len(released) == 1 and released[0][1] == (800.0, "u9")
           and "link_lost_at=%s" in released[0][0], released)

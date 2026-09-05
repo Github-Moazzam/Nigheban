@@ -105,8 +105,14 @@ print("     waiting 10s for a buzz DURING the SOS...")
 time.sleep(10)
 w = watch()
 check("the sweeper still asks its check-in mid-SOS", w["checkin_due_at"] is not None, w)
+# The reason is the SOS's, not High Alert's, and that is the point of the
+# change rather than an incidental relabelling. `mode` is the highest live
+# alert, so during an emergency the five-minute question IS the emergency's --
+# it is worded differently on the wrist, it does not escalate into a second
+# alert when it is missed, and two answers to it in a row stand the SOS down.
+# See `_KNOCK` in server/sweeper.py and SOS_SAFE_STREAK in server/config.py.
 check("...and the recovery read carries the id to answer it with",
-      w["checkin_id"] is not None and w["checkin_reason"] == "high_alert", w)
+      w["checkin_id"] is not None and w["checkin_reason"] == "sos", w)
 check("...and says High Alert is armed even though mode says sos",
       w["mode"] == "sos" and w["high_alert"] is True, w)
 
@@ -129,7 +135,13 @@ r = row()
 check("High Alert is off", r["high_alert"] is False, r)
 check("...the SOS is untouched", r["mode"] == "sos", r["mode"])
 check("...and the watch is still armed", r["beat_armed"] is True, r)
-check("...with no more buzzes scheduled", r["next_buzz_at"] is None, r)
+# NOT None any more, and this is the second half of the same bug as above.
+# `next_buzz_at` used to belong to High Alert alone, so switching High Alert
+# off cleared it -- which now takes the SOS's own check-ins with it, silently,
+# for the whole emergency. The wearer would lose the only way out of the alert
+# that does not involve finding a button.
+check("...and the SOS keeps its own five-minute check-ins",
+      r["next_buzz_at"] is not None, r["next_buzz_at"])
 
 call(f"/alert/{a2['alert']['id']}/resolve", "POST", token=W)
 r = row()

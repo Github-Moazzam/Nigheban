@@ -10,21 +10,21 @@ sweep_once is factored out so a test can drive one tick directly.
 """
 
 import asyncio
-import random
 import time
 from contextlib import closing
 
 from server import watch_lost as WL
 from server.config import (
-    BEAT_LOST_S, CHECKIN_WINDOW_S, HIGH_ALERT_MAX_S, HIGH_ALERT_MIN_S,
-    INCIDENT_ESCALATION, SWEEP_TICK_S,
+    BEAT_LOST_S, CHECKIN_EVERY_S, CHECKIN_WINDOW_S, ESCALATION,
+    RESPONDER_CHANNEL_ID, SOS_CHECKIN_EVERY_S, SOS_SAFE_STREAK, SWEEP_TICK_S,
 )
 from server.db import db
 from server.hub import HUB
 from server.logging_setup import get_logger
 from server.push import send_expo_push_notifications
 from server.ratelimit import LIMIT
-from server.services.alerts import emit_alert
+from server.services.alerts import emit_alert, tracking_plan
+from server.services.watch import arm_sos
 
 log = get_logger(__name__)
 
@@ -53,30 +53,80 @@ async def sweeper():
             # A sweeper that dies takes every deadline with it, silently. It
             # logs and keeps ticking instead.
             #
-            # Reaching here now means the tick failed BEFORE it got to the
-            # escalations -- the query itself, or the pool. Nothing has been
-            # latched at that point, so the next tick finds the same rows and
-            # tries again. Failures of an individual escalation are handled
-            # further down, in _guard, and never reach this.
+            # Reaching here is now close to unreachable, and that is the
+            # point. Each of the four branches catches its own failure (see
+            # sweep_once) and each escalation catches its own (see _guard), so
+            # what is left for this handler is the pool itself going away
+            # between them. Nothing is latched on that path, so the next tick
+            # finds the same rows and tries again.
             log.exception("sweep failed, still ticking")
         await asyncio.sleep(SWEEP_TICK_S)
 
 
 async def sweep_once(now):
-    """One tick, factored out so a test can drive it directly."""
+    """One tick, factored out so a test can drive it directly.
+
+    EVERY BRANCH IS ISOLATED, and that is not defensive habit -- it is the one
+    invariant this function has to hold. Each branch sets a latch (`escalated`,
+    `lost_notified`) and the alert it stands for is sent further down, AFTER
+    this connection is handed back. The pool is autocommit, so those latches
+    are durable the moment they are written.
+
+    So a branch that raises used to take every other branch's ALERT with it
+    while leaving every other branch's LATCH in place: the exception left
+    sweep_once entirely, the loop in sweeper() logged a line, and the rows
+    could never match their queries again. Nobody was paged late; nobody was
+    paged at all. Seen in testing as a `checkin_missed` row sitting at
+    `escalated=TRUE` with no alert anywhere and a wearer whose family were
+    never told -- exactly the failure the latches exist to make impossible.
+
+    A failure in one branch now costs that branch one tick. The per-item
+    `_guard` calls below stay as they are: they cover a single escalation
+    failing, this covers the query around it.
+    """
     # One connection for all three deadline checks.  Each was a separate pool
     # checkout before, costing three round trips to the pooler every five
     # seconds -- just to learn that nothing happened.
     with closing(db()) as c:
         # 1. missed check-ins -> tell the family
-        due = c.execute(
-            "SELECT * FROM checkins WHERE acked_at IS NULL AND escalated=FALSE AND due_at<=%s",
-            (now,)).fetchall()
-        if due:
-            c.execute("UPDATE checkins SET escalated=TRUE WHERE id = ANY(%s)",
-                      ([r["id"] for r in due],))
+        #
+        # `due` is emptied if ANYTHING here fails, and that is the opposite
+        # default to the branches below. A failure between the SELECT and the
+        # UPDATE means these rows are NOT latched, so escalating them now would
+        # page the family and then page them again on the next tick, when the
+        # same rows come back. An escalation that happens twice is worse than
+        # one that happens five seconds late.
+        due = []
+        try:
+            # CLAIMED, not read-then-marked. One statement, and that is the
+            # whole point of it.
+            #
+            # This was a SELECT followed by an UPDATE, which is correct exactly
+            # as long as one sweeper exists. Two of them -- a laptop and the
+            # deployed box against the same database, which is the normal state
+            # of this project during development -- can both run the SELECT
+            # before either runs the UPDATE, and then both escalate the same
+            # silence. A family paged twice for one missed check-in is how a
+            # family learns to distrust the pages, and docs/AWS_DEPLOYMENT.md
+            # §1.1 names it as the reason this server must be a singleton.
+            #
+            # `FOR UPDATE SKIP LOCKED` makes the claim atomic: each row is
+            # handed to exactly one sweeper and the other simply does not see
+            # it. That does not make two instances a good idea -- HUB and LIMIT
+            # are still per-process -- but it does mean the failure is now a
+            # wasted tick rather than a duplicated emergency.
+            due = c.execute(
+                "UPDATE checkins SET escalated=TRUE WHERE id IN ("
+                "  SELECT id FROM checkins"
+                "   WHERE acked_at IS NULL AND escalated=FALSE AND due_at<=%s"
+                "   FOR UPDATE SKIP LOCKED) RETURNING *", (now,)).fetchall()
+        except Exception:
+            log.exception(
+                "sweep: the missed-check-in branch failed -- nothing is latched,"
+                " so the next tick finds the same rows")
+            due = []
 
-        # 2. High Alert: time to ask again?
+        # 2. Time to ask again?
         #
         # On `high_alert`, not on `mode='high_alert'`. `mode` is the highest
         # live alert and POST /alert overwrites it with 'sos', so this query
@@ -85,18 +135,53 @@ async def sweep_once(now):
         # Alert, press SOS, and the check-ins ended there for good while the
         # phone went on drawing a countdown to `next_buzz_at`. See migration
         # 008.
-        buzz = c.execute(
-            "SELECT * FROM watch_state WHERE high_alert=TRUE AND next_buzz_at IS NOT NULL "
-            "AND next_buzz_at<=%s", (now,)).fetchall()
-        opened = {}
-        for w in buzz:
-            nxt = now + random.uniform(HIGH_ALERT_MIN_S, HIGH_ALERT_MAX_S)
-            c.execute("UPDATE watch_state SET next_buzz_at=%s WHERE user_id=%s",
-                      (nxt, w["user_id"]))
-            cur = c.execute("INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at)"
-                            " VALUES (%s,NULL,'high_alert',%s,%s) RETURNING id",
-                            (w["user_id"], now + CHECKIN_WINDOW_S, now))
-            opened[w["user_id"]] = (cur.fetchone()["id"], nxt)
+        #
+        # `OR mode='sos'` is the other half of that, and it is new. An SOS now
+        # asks its own check-ins on the same five-minute rhythm, whether or not
+        # High Alert was ever armed -- because the question "are you all right
+        # NOW" is worth asking hardest during an emergency, and because two
+        # answers to it in a row are what ends one. Before this, an SOS raised
+        # from an idle phone asked nothing at all and could only be left by
+        # pressing a button.
+        try:
+            # Claimed the same way, and for the same reason: two sweepers
+            # both finding `next_buzz_at` in the past is two check-ins opened
+            # for one schedule slot, which is two wrists buzzed and two
+            # deadlines to miss. Moving the schedule forward IS the claim, so
+            # it has to be the statement that selects the rows.
+            #
+            # The new deadline is computed in SQL rather than in Python because
+            # it differs per row -- an emergency and a standing watch are on
+            # their own intervals -- and the claim has to be one statement.
+            # RETURNING hands back the updated row, so `next_buzz_at` on it is
+            # already the next one; `mode` is untouched and still says which
+            # question this is.
+            buzz = c.execute(
+                "UPDATE watch_state SET next_buzz_at = %s + CASE WHEN mode='sos'"
+                "   THEN %s ELSE %s END"
+                " WHERE user_id IN ("
+                "   SELECT user_id FROM watch_state"
+                "    WHERE (high_alert=TRUE OR mode='sos') AND next_buzz_at IS NOT NULL"
+                "      AND next_buzz_at<=%s FOR UPDATE SKIP LOCKED)"
+                " RETURNING *",
+                (now, SOS_CHECKIN_EVERY_S, CHECKIN_EVERY_S, now)).fetchall()
+            opened = {}
+            for w in buzz:
+                # The reason is the mode, and it decides what the silence means.
+                # An unanswered `high_alert` becomes an SOS (see ESCALATION); an
+                # unanswered `sos` raises nothing, because the family are already
+                # being sirened about this person -- it only resets the streak.
+                reason = "sos" if w["mode"] == "sos" else "high_alert"
+                nxt = w["next_buzz_at"]
+                cur = c.execute("INSERT INTO checkins (user_id,asked_by,reason,due_at,created_at)"
+                                " VALUES (%s,NULL,%s,%s,%s) RETURNING id",
+                                (w["user_id"], reason, now + CHECKIN_WINDOW_S, now))
+                opened[w["user_id"]] = (cur.fetchone()["id"], nxt, reason)
+        except Exception:
+            log.exception(
+                "sweep: the check-in schedule branch failed -- every other branch in this"
+                " tick still runs")
+            buzz, opened = [], {}
 
         # 3. heartbeat watchdog: armed, WITH A BAND LINK, and then gone quiet
         #
@@ -115,18 +200,24 @@ async def sweep_once(now):
         #   - `band_link` was never consulted at all, so an armed phone with no
         #     band in the room reported its wearer's watch lost. A link that
         #     never existed cannot be lost -- `beat_band_link` is that check.
-        candidates = c.execute(
-            "SELECT * FROM watch_state WHERE mode!='idle' AND lost_notified=FALSE "
-            "AND last_beat IS NOT NULL AND last_beat < %s", (now - BEAT_LOST_S,)).fetchall()
-        lost = [r for r in candidates
-                if WL.on_silence(WL.Watch.from_row(r), now=now,
-                                 beat_lost_s=BEAT_LOST_S).notify]
-        if lost:
-            # The latch AND the flap window, so a phone that comes back for one
-            # beat and goes again does not page a second time.
-            c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
-                      "WHERE user_id = ANY(%s)",
-                      (now + WL.REARM_S, [r["user_id"] for r in lost]))
+        try:
+            candidates = c.execute(
+                "SELECT * FROM watch_state WHERE mode!='idle' AND lost_notified=FALSE "
+                "AND last_beat IS NOT NULL AND last_beat < %s", (now - BEAT_LOST_S,)).fetchall()
+            lost = [r for r in candidates
+                    if WL.on_silence(WL.Watch.from_row(r), now=now,
+                                     beat_lost_s=BEAT_LOST_S).notify]
+            if lost:
+                # The latch AND the flap window, so a phone that comes back for one
+                # beat and goes again does not page a second time.
+                c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
+                          "WHERE user_id = ANY(%s)",
+                          (now + WL.REARM_S, [r["user_id"] for r in lost]))
+        except Exception:
+            log.exception(
+                "sweep: the heartbeat-watchdog branch failed -- every other branch in this"
+                " tick still runs")
+            lost = []
 
         # 4. the grace window: a band that went away and has not come back
         #
@@ -139,23 +230,29 @@ async def sweep_once(now):
         # beating. If the band goes and then the phone dies too, this still
         # pages at the two-minute mark, and the latch it sets stops branch 3
         # adding a second alert about the same silence a minute later.
-        waiting = c.execute(
-            "SELECT * FROM watch_state WHERE link_lost_at IS NOT NULL "
-            "AND link_lost_at <= %s", (now - WL.WATCH_LOST_DELAY_S,)).fetchall()
-        elapsed = [(r, WL.on_grace_elapsed(WL.Watch.from_row(r), now=now,
-                                           delay_s=WL.WATCH_LOST_DELAY_S))
-                   for r in waiting]
-        gone = [r for r, d in elapsed if d.notify]
-        # Every row whose window is up stops counting, whether it pages or not.
-        # A countdown abandoned because the wearer stood down must not sit in
-        # the table being re-evaluated every five seconds for ever.
-        if waiting:
-            c.execute("UPDATE watch_state SET link_lost_at=NULL WHERE user_id = ANY(%s)",
-                      ([r["user_id"] for r in waiting],))
-        if gone:
-            c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
-                      "WHERE user_id = ANY(%s)",
-                      (now + WL.REARM_S, [r["user_id"] for r in gone]))
+        try:
+            waiting = c.execute(
+                "SELECT * FROM watch_state WHERE link_lost_at IS NOT NULL "
+                "AND link_lost_at <= %s", (now - WL.WATCH_LOST_DELAY_S,)).fetchall()
+            elapsed = [(r, WL.on_grace_elapsed(WL.Watch.from_row(r), now=now,
+                                               delay_s=WL.WATCH_LOST_DELAY_S))
+                       for r in waiting]
+            gone = [r for r, d in elapsed if d.notify]
+            # Every row whose window is up stops counting, whether it pages or not.
+            # A countdown abandoned because the wearer stood down must not sit in
+            # the table being re-evaluated every five seconds for ever.
+            if waiting:
+                c.execute("UPDATE watch_state SET link_lost_at=NULL WHERE user_id = ANY(%s)",
+                          ([r["user_id"] for r in waiting],))
+            if gone:
+                c.execute("UPDATE watch_state SET lost_notified=TRUE, lost_rearm_at=%s "
+                          "WHERE user_id = ANY(%s)",
+                          (now + WL.REARM_S, [r["user_id"] for r in gone]))
+        except Exception:
+            log.exception(
+                "sweep: the grace-window branch failed -- every other branch in this"
+                " tick still runs")
+            waiting, elapsed, gone = [], [], []
 
         if due or buzz or lost or waiting:
             c.commit()
@@ -190,13 +287,13 @@ async def sweep_once(now):
         failed += not ok
 
     for w in buzz:
-        checkin_id, nxt = opened[w["user_id"]]
+        checkin_id, nxt, reason = opened[w["user_id"]]
         # No latch to put back, and deliberately so. The check-in row is already
         # written, so the deadline is real whether or not this knock is ever
         # heard, and the sweeper escalates it on time either way. Re-running the
         # knock next tick would only move `next_buzz_at` again.
-        ok = await _guard(f"high-alert knock for {w['user_id']}", None,
-                          _knock, w, checkin_id, nxt, now)
+        ok = await _guard(f"{reason} knock for {w['user_id']}", None,
+                          _knock, w, checkin_id, nxt, reason, now)
         failed += not ok
 
     for w in lost:
@@ -275,11 +372,125 @@ async def _escalate_missed_checkin(r, now):
 
     # What the silence means depends on what was asked. A parent's question
     # going unanswered is `checkin_missed` and always was. A fall or a crash
-    # going unanswered is the incident itself -- see INCIDENT_ESCALATION --
-    # and it carries the pin captured at the impact rather than nothing at
-    # all, because "she is not answering" and "she is not answering, here"
-    # are not the same message to send a family at 2 a.m.
-    kind = INCIDENT_ESCALATION.get(r["reason"], "checkin_missed")
+    # going unanswered is the incident itself -- see ESCALATION -- and it
+    # carries the pin captured at the impact rather than nothing at all,
+    # because "she is not answering" and "she is not answering, here" are not
+    # the same message to send a family at 2 a.m.
+    kind = ESCALATION.get(r["reason"], "checkin_missed")
+
+    # The question an emergency asked, going unanswered. Nothing is raised.
+    #
+    # The family already have a live SOS about this exact person sirening on
+    # their phones; a `checkin_missed` on top of it is a second, quieter alert
+    # saying less about the same thing, arriving while they are driving. What
+    # the silence actually costs the wearer is the way out: the run of answers
+    # that would have stood the alert down goes back to zero, so the next two
+    # have to be consecutive again. That is the whole meaning of a missed one.
+    if r["reason"] == "sos":
+        with closing(db()) as c:
+            c.execute("UPDATE watch_state SET sos_streak=0 WHERE user_id=%s",
+                      (r["user_id"],))
+            c.commit()
+        log.info("%s missed an SOS check-in (%ss late) - safe streak reset",
+                 r["user_id"], late)
+        return
+
+    # High Alert's question, going unanswered. This is an emergency.
+    #
+    # It used to be `checkin_missed`: severity 3, no siren, a line in a list.
+    # But High Alert is armed on purpose by somebody who decided the next hour
+    # needed watching, and its entire contract is "ask me every five minutes,
+    # and if I stop answering, something is wrong". The moment that contract
+    # comes true is the wrong moment for the quietest alert in the product.
+    #
+    # The pin is the last position the heartbeat reported, not one from the
+    # check-in row -- a High Alert question is not about a place, so it carries
+    # none. Sixty seconds old at worst, and from here the live tracker takes
+    # over: `arm_sos` puts the watch into `sos`, which is what the phone's
+    # location loop and the next five-minute check-in both hang off.
+    if kind == "sos":
+        with closing(db()) as c:
+            w = c.execute("SELECT * FROM watch_state WHERE user_id=%s",
+                          (r["user_id"],)).fetchone()
+            # Already covered. Raise nothing.
+            #
+            # The sequence that gets here: High Alert asks, the wearer says
+            # nothing and presses SOS instead -- or the band does -- and ninety
+            # seconds later the question she never answered runs out. The
+            # family are already being sirened about this exact person, and a
+            # second severity-5 row would be a second siren, a second takeover
+            # and a second Good Samaritan decision for one emergency.
+            #
+            # The condition is a live ALERT, not `mode='sos'`, and the
+            # difference is the whole point of writing it down. `arm_sos` below
+            # sets the mode BEFORE emit_alert goes out -- deliberately -- so if
+            # the send then fails, _guard puts the `escalated` latch back and
+            # the next tick arrives at a row whose mode already says sos. A
+            # mode check would look at that and conclude the family had been
+            # told, when the truth is that nobody has been and nobody now ever
+            # will be. Reading the alerts table instead makes the retry work,
+            # because it asks the question that actually matters: does an
+            # emergency about this person exist?
+            live = c.execute(
+                "SELECT id FROM alerts WHERE user_id=%s AND resolved_at IS NULL"
+                " AND severity>=5 ORDER BY created_at DESC LIMIT 1",
+                (r["user_id"],)).fetchone()
+            if live:
+                log.info("%s missed a high-alert check-in while alert %s is live"
+                         " (%ss late) - already covered",
+                         r["user_id"], live["id"], late)
+                return
+            # Ordered deliberately: the watch goes into `sos` BEFORE the alert
+            # goes out. The alert is what wakes four phones, and by the time
+            # anybody taps it the row they are looking at has to be one the
+            # tracker is already writing positions to. The other order leaves a
+            # window -- small, and exactly the width of an Expo round trip --
+            # in which the family have a live emergency and the server does not
+            # think anybody is in one.
+            arm_sos(c, r["user_id"], now)
+            c.commit()
+        lat = w["last_lat"] if w else None
+        lon = w["last_lon"] if w else None
+        placed = (" The pin is where their phone last reported." if lat is not None
+                  else " There was no position fix, so this alert has no pin.")
+        payload, targets = await emit_alert(
+            r["user_id"], "sos", source="server", lat=lat, lon=lon,
+            # `allow_samaritan=None` -- pending, not allowed. Nobody consented
+            # to this: the alert exists BECAUSE the person could not answer,
+            # and reading their silence as permission to show their position to
+            # strangers is the one inference this product must never make. The
+            # wearer or a family member allows it from the app.
+            allow_samaritan=None,
+            note=("High Alert was on and a check-in went unanswered for "
+                  f"{late}s past its deadline." + placed
+                  + " Their location updates live from here."
+                  " Try calling; if there is no answer, treat this as real."))
+        # The wearer's own phone, which has been told nothing so far. It needs
+        # this twice over: to put the SOS screen up so one tap can stand down
+        # what may well be a false alarm, and to start the location loop that
+        # `arm_sos` has just made the server expect.
+        #
+        # Quiet, on the responder channel, for the same reason the wearer's own
+        # SOS notification is: they may be hiding from whoever this is about,
+        # and a siren from their own pocket is the last thing that should give
+        # them away.
+        await HUB.to(r["user_id"], {
+            "t": "sos_started", "alert": payload, "reason": "missed_checkin",
+            # The same block POST /alert hands back, because this phone has to
+            # start reporting its position and has no reply to read it off:
+            # nobody made a request. Without it the one emergency where the
+            # wearer is least able to help would be the one with no live
+            # location -- which is exactly backwards.
+            "tracking": tracking_plan(payload["id"], payload["created_at"])})
+        await send_expo_push_notifications(
+            [r["user_id"]], "Your family has been alerted",
+            "You did not answer a check-in. Open Nigehban to stand it down if you are safe.",
+            {"alert_id": payload["id"], "severity": 2, "t": "sos_started"},
+            channel=RESPONDER_CHANNEL_ID, sound=None)
+        log.info("high-alert check-in missed by %s (%ss late) -> SOS, %d family member(s)",
+                 r["user_id"], late, len(targets))
+        return
+
     if kind == "checkin_missed":
         await emit_alert(r["user_id"], "checkin_missed", source="server",
                          note=f"no answer to a {r['reason']} check-in ({late}s late)")
@@ -317,13 +528,34 @@ async def _escalate_missed_checkin(r, now):
               + " Try calling; if there is no answer, treat this as real."))
 
 
-async def _knock(w, checkin_id, nxt, now):
-    """High Alert coming round again: buzz the wrist, and push in case it cannot."""
-    await HUB.to(w["user_id"], {"t": "buzz_now", "reason": "high_alert",
+# What the five-minute knock says, and it is not the same sentence twice.
+#
+# High Alert's question is routine: nothing has happened, this is the standing
+# arrangement, answer it and the arrangement continues. The SOS one is asked
+# with the family already alerted and sirens already running, so it has to
+# carry the thing the wearer most needs to know and cannot otherwise learn --
+# that answering is now the way OUT, and that it takes two.
+_KNOCK = {
+    "high_alert": ("Nigehban is checking on you",
+                   "Tap 'I am fine' to answer."),
+    "sos": ("Are you safe now?",
+            f"Your SOS is still live. Answer {SOS_SAFE_STREAK} check-ins in a row"
+            " and Nigehban stands it down."),
+}
+
+
+async def _knock(w, checkin_id, nxt, reason, now):
+    """The five-minute question: buzz the wrist, and push in case it cannot."""
+    await HUB.to(w["user_id"], {"t": "buzz_now", "reason": reason,
                                 "checkin_id": checkin_id,
                                 "window": CHECKIN_WINDOW_S,
                                 "due_at": now + CHECKIN_WINDOW_S,
-                                "next_buzz_at": nxt})
+                                "next_buzz_at": nxt,
+                                # How close this answer is to ending it. The
+                                # wearer's screen counts up to SOS_SAFE_STREAK
+                                # rather than making them guess.
+                                "streak": w["sos_streak"] if reason == "sos" else None,
+                                "streak_needed": SOS_SAFE_STREAK})
     # And a push, because the socket is not a delivery guarantee -- it is
     # a delivery *optimisation*. HUB.to writes to whatever sockets happen
     # to be open and drops the frame silently when there are none, which on
@@ -337,11 +569,18 @@ async def _knock(w, checkin_id, nxt, now):
     # her. A person's own check-in gets a push (see /checkin/ask); the
     # server's own knock was the one path that did not, and it is the path
     # that runs while nobody is watching.
+    title, body = _KNOCK.get(reason, _KNOCK["high_alert"])
+    # The SOS knock goes out on the responder channel: it vibrates and makes no
+    # sound. Every other notification the wearer gets during an emergency
+    # already obeys that rule -- see notify_owner_of_ack -- and for the same
+    # reason, which is that the person being asked may be hiding from whoever
+    # the alert is about.
     await send_expo_push_notifications(
-        [w["user_id"]], "Nigehban is checking on you",
-        "Tap 'I am fine' to answer.",
-        {"checkin_id": checkin_id, "severity": 2, "reason": "high_alert",
-         "due_at": now + CHECKIN_WINDOW_S})
+        [w["user_id"]], title, body,
+        {"checkin_id": checkin_id, "severity": 2, "reason": reason,
+         "due_at": now + CHECKIN_WINDOW_S},
+        channel=RESPONDER_CHANNEL_ID if reason == "sos" else None,
+        sound=None if reason == "sos" else "default")
 
 
 async def _page_phone_silent(w, now):

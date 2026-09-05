@@ -5,10 +5,14 @@ Check-ins: a question with a deadline the SERVER owns.
 import time
 from contextlib import closing
 
-from server.config import RESPONDER_CHANNEL_ID
+from server.config import RESPONDER_CHANNEL_ID, SOS_SAFE_STREAK
 from server.db import db
 from server.hub import HUB
+from server.logging_setup import get_logger
 from server.push import send_expo_push_notifications
+from server.services.alerts import resolve_alert
+
+log = get_logger(__name__)
 
 
 #
@@ -33,6 +37,12 @@ async def ack_open_checkins(uid, by="app"):
     asked, and then High Alert asked again, one press of "I'm fine" means the
     person is fine -- leaving a second question open so it can escalate ninety
     seconds later would be a false alarm the product invented for itself.
+
+    It is also where an emergency can end. While an SOS is live the server asks
+    its own check-in every five minutes, and answering SOS_SAFE_STREAK of them
+    in a row stands the alert down -- the wearer saying "I am fine" twice, five
+    minutes apart, with the family already alerted. See the comment on the
+    streak below for why only the server's own questions are counted.
     """
     now = time.time()
     with closing(db()) as c:
@@ -42,8 +52,39 @@ async def ack_open_checkins(uid, by="app"):
             return 0
         c.execute("UPDATE checkins SET acked_at=%s WHERE user_id=%s AND acked_at IS NULL",
                   (now, uid))
+
+        # The run of answers that ends an emergency.
+        #
+        # Only a question the SOS itself asked counts. A parent's "are you
+        # okay?" answered during an emergency is a kind thing and it is not
+        # evidence: it can be answered from anywhere, by anyone holding the
+        # phone, at a moment of the asker's choosing. What SOS_SAFE_STREAK is
+        # actually measuring is that this person was still able to answer five
+        # minutes after the last time they were -- so it has to be the
+        # server's own clock asking, twice, on its own schedule.
+        #
+        # `AND mode='sos'` is the guard that stops the count running against an
+        # emergency that has already ended: the wearer's own stand-down and
+        # this can land in either order, and incrementing a streak after the
+        # alert is resolved would leave a number sitting in the row waiting to
+        # end the NEXT emergency one answer early.
+        streak = None
+        if any(r["reason"] == "sos" for r in rows):
+            w = c.execute("UPDATE watch_state SET sos_streak=sos_streak+1"
+                          " WHERE user_id=%s AND mode='sos'"
+                          " RETURNING sos_streak", (uid,)).fetchone()
+            streak = w["sos_streak"] if w else None
+
         c.commit()
         u = c.execute("SELECT id,name FROM users WHERE id=%s", (uid,)).fetchone()
+        # Read on the same connection, before it goes back to the pool: the
+        # stand-down below needs an alert id, and this is the row the streak
+        # was just counted against.
+        live = None
+        if streak is not None and streak >= SOS_SAFE_STREAK:
+            live = c.execute(
+                "SELECT id FROM alerts WHERE user_id=%s AND resolved_at IS NULL"
+                " AND severity>=4 ORDER BY created_at DESC LIMIT 1", (uid,)).fetchone()
 
     who = {"id": uid, "name": u["name"] if u else uid}
 
@@ -72,5 +113,17 @@ async def ack_open_checkins(uid, by="app"):
             # already resolved itself one way or the other.
             ttl=300,
             sound=None)
+
+    # Two in a row, and the emergency is over.
+    #
+    # Deliberately last. Everything above is the answer being recorded and the
+    # person who asked being told, and none of it should be skipped because the
+    # stand-down failed -- an emergency that stays live one cycle longer is a
+    # recoverable state, and an answer that was never written down is not.
+    if live:
+        log.info("%s answered %d SOS check-ins in a row - standing the alert down",
+                 who["name"], SOS_SAFE_STREAK)
+        await resolve_alert(live["id"], uid, auto=True,
+                            note=f"answered {SOS_SAFE_STREAK} check-ins in a row")
 
     return len(rows)

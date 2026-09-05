@@ -264,8 +264,13 @@ time.sleep(12)
 _, w = call(f"/watch/{bob['user_id']}", token=A)
 check("the server asked on its own - a new question is open",
       w["checkin_due_at"] is not None, w)
-check("and it scheduled the next one 5-10 minutes out",
-      w["next_buzz_at"] and 290 < w["next_buzz_at"] - time.time() < 610,
+# Five minutes, flat. It was `random.uniform(300, 600)` and the range is gone:
+# the jitter bought unpredictability against a wearer gaming their own safety
+# device, which is not a real threat, and it cost the only number that matters
+# -- at the top of that range somebody could be taken a second after answering
+# and not be missed for ten minutes. See CHECKIN_EVERY_S.
+check("and it scheduled the next one exactly five minutes out",
+      w["next_buzz_at"] and 295 < w["next_buzz_at"] - time.time() <= 305,
       w.get("next_buzz_at"))
 call("/alert", "POST", {"kind": "checkin_ack"}, B)
 st, r = call("/watch/high_alert", "POST", {"on": False}, B)

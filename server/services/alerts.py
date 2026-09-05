@@ -15,8 +15,9 @@ from contextlib import closing
 from fastapi import HTTPException
 
 from server.config import (
-    PRESENCE_FRESH_S, PRIVATE_KINDS, RESPONDER_CHANNEL_ID,
-    SAMARITAN_RADIUS_M, SEVERITY,
+    CHECKIN_EVERY_S, LIVE_FIX_FAST_FOR_S, LIVE_FIX_FAST_S, LIVE_FIX_SLOW_S,
+    PRESENCE_FRESH_S, PRIVATE_KINDS, RESPONDER_CHANNEL_ID, SAMARITAN_RADIUS_M,
+    SEVERITY, TRACK_AFTER_STANDDOWN_EVERY_S, TRACK_AFTER_STANDDOWN_S,
 )
 from server.db import db
 from server.geo import coarsen, metres_between
@@ -123,6 +124,24 @@ def acks_for(alert_ids, c):
 
 
 def alert_row(r, author, acks=()):
+    # `.get` on everything migration 011 added, for the same reason the
+    # sweeper uses it on migration 005's columns: this row may have come off a
+    # database where 011 has not been applied, and a KeyError here would take
+    # out the alert list, the restore path and the socket frame at once -- for
+    # the sake of a pin.
+    live_lat, live_lon = r.get("live_lat"), r.get("live_lon")
+    # Where the pin goes. The live fix when there is one, the fix the alert was
+    # raised with when there is not.
+    #
+    # These are two different facts and the app is handed both: `lat`/`lon` is
+    # where it happened -- the roadside, the doorway, the moment the button
+    # went down -- and it must not move, because it is what a family member
+    # searches when the trail goes cold. `maps` is where to GO, which during a
+    # snatch stops being the same place within a minute. The button on the
+    # family's takeover says "SEE WHERE THEY ARE", and until this it opened a
+    # map of where they had been.
+    pin_lat = live_lat if live_lat is not None else r["lat"]
+    pin_lon = live_lon if live_lon is not None else r["lon"]
     return {"id": r["id"], "kind": r["kind"], "severity": r["severity"],
             "source": r["source"], "lat": r["lat"], "lon": r["lon"],
             "accuracy": r["accuracy"], "note": r["note"],
@@ -130,12 +149,22 @@ def alert_row(r, author, acks=()):
             "samaritan_status": r.get("samaritan_status") or "pending",
             "samaritan_decided_by": r.get("samaritan_decided_by"),
             "user": author,
+            # The moving half. `live_at` is the part that decides how the app
+            # words it -- a fix from eight seconds ago is "where she is", one
+            # from six minutes ago is "last seen", and only the timestamp can
+            # tell those apart. Null throughout means nothing has been reported
+            # since the alert was raised.
+            "live_lat": live_lat, "live_lon": live_lon,
+            "live_accuracy": r.get("live_accuracy"), "live_at": r.get("live_at"),
+            "track_until": r.get("track_until"),
             # Always present, even when empty. The app replays these on every
             # restore, and "the key is missing" and "nobody has answered" have
             # to be the same thing to it or a stale build reads as a silence.
             "acks": list(acks),
-            "maps": (f"https://maps.google.com/?q={r['lat']:.6f},{r['lon']:.6f}"
-                     if r["lat"] is not None else None)}
+            "maps": (f"https://maps.google.com/?q={pin_lat:.6f},{pin_lon:.6f}"
+                     if pin_lat is not None else None),
+            "maps_start": (f"https://maps.google.com/?q={r['lat']:.6f},{r['lon']:.6f}"
+                           if r["lat"] is not None else None)}
 
 
 async def emit_alert(uid, kind, *, source="server", lat=None, lon=None,
@@ -346,3 +375,324 @@ async def notify_owner_of_ack(row, responder, total, samaritan=False):
         # delivered half an hour late describes a situation that has moved on.
         ttl=300,
         sound=None)
+
+
+async def resolve_alert(alert_id, uid, *, auto=False, note=""):
+    """Stand an alert down. One path out, for the same reason there is one in.
+
+    Until now this lived inside POST /alert/{id}/resolve, which was fine while
+    a thumb on a button was the only way an emergency could end. It is not any
+    more: two answered check-ins end one by themselves (see SOS_SAFE_STREAK),
+    and that path has no request behind it, no `u` to read, and no business
+    reimplementing the four writes and the fan-out that standing down actually
+    is. Two implementations of "the emergency is over" is one implementation
+    that leaves the watch in `sos` for ever, and it would be the one nobody
+    watches run.
+
+    Raises HTTPException so the route keeps the wording it always had. The
+    automatic path never trips either: it has already read the row.
+
+    `auto` travels all the way to the family's screen. "She stood it down" and
+    "she answered twice and it stood itself down" are different facts about
+    what a person did, and a family deciding whether to keep driving deserves
+    the one that is true.
+    """
+    now = time.time()
+    with closing(db()) as c:
+        row = c.execute("SELECT * FROM alerts WHERE id=%s", (alert_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "no such alert")
+        if row["user_id"] != uid:
+            raise HTTPException(403, "only the person who raised it can stand it down")
+        if row["resolved_at"]:
+            # Already over. Not an error -- a second tap on a button that did
+            # work, or the auto path racing the wearer's own thumb -- and doing
+            # the fan-out again would tell the family a second time that an
+            # emergency they have already stopped worrying about is over.
+            #
+            # `track_until` still goes back, and that is not tidiness. The
+            # caller uses it to decide whether to keep reporting positions, and
+            # answering a double tap with nothing would have the second tap
+            # stop the walk home that the first tap started.
+            return {"ok": True, "already": True,
+                    "track_until": row["track_until"]}
+
+        # Tracking outlives the stand-down. `track_until` is only extended for
+        # the alerts that were actually being tracked -- an emergency -- and
+        # never invented for a low-battery row that nobody was following.
+        track_until = (now + TRACK_AFTER_STANDDOWN_S) if row["severity"] >= 4 else None
+
+        # Both writes or neither. Standing down is two facts -- the alert is
+        # over, and the watch is no longer in `sos` -- and half of it is a
+        # state the product has no name for: an alert marked resolved with the
+        # watch still in sos, so the heartbeat watchdog goes on treating a
+        # finished emergency as a live one and pages the family about it.
+        with c.transaction():
+            c.execute("UPDATE alerts SET resolved_at=%s,"
+                      " track_until=COALESCE(%s, track_until) WHERE id=%s",
+                      (now, track_until, alert_id))
+            # It falls back to High Alert rather than to idle when High Alert
+            # is still armed. The emergency is over; the standing watch the
+            # wearer switched on before it is not, and it was never the SOS's
+            # to end. See migration 008.
+            #
+            # `next_buzz_at` goes with it, and that is new. The SOS was asking
+            # its own five-minute check-ins (see arm_sos); leaving that column
+            # set would have the sweeper go on asking them about an emergency
+            # that is over, and clearing it flatly would leave a still-armed
+            # High Alert with no next question -- silently, for ever, which is
+            # the exact shape of the bug migration 008 was written for.
+            c.execute("UPDATE watch_state SET "
+                      "mode=CASE WHEN high_alert THEN 'high_alert' ELSE 'idle' END, "
+                      "beat_armed=high_alert, "
+                      "next_buzz_at=CASE WHEN high_alert THEN %s ELSE NULL END, "
+                      "sos_streak=0, "
+                      "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
+                      "WHERE user_id=%s AND mode='sos'", (now + CHECKIN_EVERY_S, uid))
+        who = c.execute("SELECT id,name FROM users WHERE id=%s", (uid,)).fetchone()
+        # Only the Good Samaritans who actually answered *this* alert -- not
+        # every connected socket on the server. `samaritans` is keyed by
+        # (alert_id, user_id), so a stranger who helped on some other alert,
+        # or who was never asked about this one, is not in this list even if
+        # they are online right now.
+        responders = [r["user_id"] for r in c.execute(
+            "SELECT user_id FROM samaritans WHERE alert_id=%s", (alert_id,))]
+
+    name = who["name"] if who else uid
+    targets = list(set(family_of(uid)) | set(responders))
+
+    await HUB.fanout(targets, {
+        "t": "resolved", "alert_id": alert_id,
+        "user": {"id": uid, "name": name},
+        "auto": bool(auto), "note": note,
+        # The family screen keeps following for another half hour. Sent with
+        # the stand-down rather than fetched afterwards, because the app that
+        # most needs to know is the one that is about to stop listening.
+        "track_until": track_until,
+        "track_every_s": TRACK_AFTER_STANDDOWN_EVERY_S if track_until else None,
+    })
+
+    # The wearer's own phone, on its own frame.
+    #
+    # Not the family's `resolved` frame, which the app renders as "somebody
+    # else is safe" and would show a person a notice about themselves. What
+    # this phone needs is the two things only it can do: drop the SOS screen,
+    # and take down the sticky "SOS is active" notification it posted -- which
+    # is deliberately un-dismissable, so nothing else will ever remove it. An
+    # emergency that ended an hour ago still claiming the lock screen is the
+    # same lie as a screen showing nothing during a live one.
+    #
+    # It matters most for the automatic stand-down, where the wearer pressed
+    # "I'm fine" at a check-in and never touched a stand-down button at all.
+    await HUB.to(uid, {"t": "sos_cleared", "alert_id": alert_id,
+                       "auto": bool(auto), "note": note,
+                       "track_until": track_until,
+                       "track_every_s": (TRACK_AFTER_STANDDOWN_EVERY_S
+                                         if track_until else None)})
+
+    # And a push, because the socket only lands on an app that is open and the
+    # family member who was sirened awake at 2 a.m. has since put the phone
+    # down. Being told an emergency is over is not optional news: without it
+    # the last thing that phone ever said about this person is that they were
+    # in trouble.
+    #
+    # Severity 1 and the responder channel: it vibrates, it does not sound, and
+    # it stays away from the siren and the lock-screen takeover. Good news must
+    # never arrive in the shape of an emergency.
+    if row["severity"] >= 3 and targets:
+        body = ("They answered two check-ins in a row, so Nigehban stood the alert down."
+                if auto else "They stood the alert down themselves.")
+        _spawn(send_expo_push_notifications(
+            targets, f"{name} is safe", body,
+            {"alert_id": alert_id, "severity": 1, "t": "resolved"},
+            channel=RESPONDER_CHANNEL_ID, ttl=1800, sound=None),
+            f"resolved-push:{alert_id}")
+
+    # The wearer, but only when they did not do this themselves. A stand-down
+    # somebody pressed needs no notification telling them they pressed it; one
+    # the server decided on their behalf absolutely does, because the phone may
+    # have been killed since and the frame above reached nothing.
+    if auto:
+        _spawn(send_expo_push_notifications(
+            [uid], "Your SOS has been stood down",
+            "You answered two check-ins, so Nigehban told your family you are safe.",
+            {"alert_id": alert_id, "severity": 1, "t": "sos_cleared"},
+            channel=RESPONDER_CHANNEL_ID, ttl=1800, sound=None),
+            f"sos-cleared-push:{alert_id}")
+
+    log.info("alert %s stood down by %s (%s)", alert_id, name,
+             "two answered check-ins" if auto else "the wearer")
+    return {"ok": True, "auto": bool(auto), "track_until": track_until}
+
+
+def tracking_plan(alert_id, started):
+    """How often this phone should report its position, and until when.
+
+    Two intervals rather than one. The first twenty minutes of an emergency are
+    when help is arriving and a pin that is thirty seconds old is thirty
+    seconds of somebody driving to the wrong place; the hour after that is when
+    the phone still has to be alive to be reached at all. A tracker that
+    flattens the battery has closed every path to the family in order to keep
+    one open.
+    """
+    started = started or time.time()
+    return {"alert_id": alert_id,
+            "fast_s": LIVE_FIX_FAST_S,
+            "fast_until": started + LIVE_FIX_FAST_FOR_S,
+            "slow_s": LIVE_FIX_SLOW_S,
+            "after_standdown_s": TRACK_AFTER_STANDDOWN_EVERY_S}
+
+
+def tracked_alert(c, uid, now=None):
+    """The emergency this person's positions belong to, or None.
+
+    "Which alert is this fix about" has to be the SERVER's question, not the
+    phone's. The phone often does not know the answer: an SOS raised out of a
+    missed High Alert check-in has an id the wearer's handset has never seen,
+    and the phone that most needs to be reporting -- backgrounded, killed and
+    restarted headless by the foreground service -- is exactly the one with no
+    memory of what it was doing five minutes ago. So it sends a position and
+    the server decides what it is a position for.
+
+    Two alerts qualify, and the second is the one worth spelling out: an alert
+    that has been stood down but is still inside its `track_until` window. The
+    emergency is over and the journey is not -- see TRACK_AFTER_STANDDOWN_S.
+    """
+    now = now or time.time()
+    return c.execute(
+        "SELECT * FROM alerts WHERE user_id=%s AND severity>=4"
+        " AND (resolved_at IS NULL"
+        "      OR (track_until IS NOT NULL AND track_until > %s))"
+        " ORDER BY created_at DESC LIMIT 1", (uid, now)).fetchone()
+
+
+def _clean(points, now):
+    """Drop what cannot be a position. Never raises on one bad point."""
+    out = []
+    for p in points or []:
+        try:
+            lat, lon = float(p["lat"]), float(p["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            continue
+        at = p.get("at")
+        try:
+            at = float(at) if at is not None else now
+        except (TypeError, ValueError):
+            at = now
+        # A fix from the future is a phone with a wrong clock, and trusting it
+        # would park a pin at the head of the trail that nothing newer can ever
+        # displace. A fix from more than a day ago is a buffer that outlived
+        # its emergency.
+        if at > now + 300 or at < now - 86400:
+            at = now
+        acc = p.get("accuracy")
+        try:
+            acc = float(acc) if acc is not None else None
+        except (TypeError, ValueError):
+            acc = None
+        out.append({"lat": lat, "lon": lon, "at": at, "accuracy": acc})
+    return sorted(out, key=lambda p: p["at"])
+
+
+async def record_fixes(uid, points, name=None):
+    """Where she is now. Written to the trail, and pushed to the family live.
+
+    Takes a LIST because the interesting case is not the ten-second ping that
+    arrives on time -- it is the eight minutes of them that were buffered under
+    a flyover and arrive together the moment there is signal again. Sending
+    those one at a time would mean nine round trips from a phone whose battery
+    and signal are both the thing at stake, and the family would watch the pin
+    crawl through history instead of jumping to where she actually is.
+
+    Returns None when there is nothing to attach the fixes to. That is the
+    ordinary case for a phone reporting a moment after a stand-down, and it is
+    not an error: the tracking window is the server's to close, and a phone
+    that has not noticed yet must not be given a 4xx for it.
+    """
+    now = time.time()
+    pts = _clean(points, now)
+    if not pts:
+        return None
+
+    with closing(db()) as c:
+        row = tracked_alert(c, uid, now)
+        if not row:
+            return None
+
+        # Anything not newer than what the row already holds is a duplicate or
+        # a straggler from a buffer that has already been flushed. It goes in
+        # the trail -- the path is a record and gaps in it are worth keeping --
+        # but it must not become the live pin, or a late arrival would move the
+        # family's map backwards.
+        fresh = [p for p in pts if row["live_at"] is None or p["at"] > row["live_at"]]
+
+        with c.transaction():
+            # On a cursor, not on the connection: psycopg 3 puts `execute` on
+            # both and `executemany` only on the cursor, so the obvious
+            # spelling is an AttributeError -- at runtime, inside an emergency,
+            # on the one code path that has no request waiting to be told.
+            with c.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO alert_track (alert_id,at,lat,lon,accuracy)"
+                    " VALUES (%s,%s,%s,%s,%s)",
+                    [(row["id"], p["at"], p["lat"], p["lon"], p["accuracy"])
+                     for p in pts])
+            if fresh:
+                newest = fresh[-1]
+                c.execute("UPDATE alerts SET live_lat=%s, live_lon=%s,"
+                          " live_accuracy=%s, live_at=%s WHERE id=%s",
+                          (newest["lat"], newest["lon"], newest["accuracy"],
+                           newest["at"], row["id"]))
+                # The watch's own position too. The family's health screen and
+                # a future `watch_lost` both read from here, and during an
+                # emergency the ten-second fix is a great deal fresher than the
+                # sixty-second heartbeat that normally writes it.
+                c.execute("UPDATE watch_state SET last_lat=%s, last_lon=%s"
+                          " WHERE user_id=%s", (newest["lat"], newest["lon"], uid))
+
+        if name is None:
+            u = c.execute("SELECT name FROM users WHERE id=%s", (uid,)).fetchone()
+            name = u["name"] if u else uid
+        responders = [r["user_id"] for r in c.execute(
+            "SELECT user_id FROM samaritans WHERE alert_id=%s", (row["id"],))]
+
+    # Everything the caller needs to answer the phone, carried out of the one
+    # connection this function opens. The route used to check a second one out
+    # of the pool just to re-read the row it had already had in its hand -- six
+    # times a minute, per tracked emergency, against a pool of eight. See the
+    # comment on DB_POOL_MAX in server/db.py for why that is not a small thing.
+    about = {"alert_id": row["id"], "accepted": len(pts),
+             "created_at": row["created_at"], "track_until": row["track_until"],
+             "resolved": row["resolved_at"] is not None}
+
+    if not fresh:
+        return {**about, "live": False}
+
+    newest = fresh[-1]
+    # The wearer's own phone is in this list, and it is the sender.
+    #
+    # Echoing a fix back to the handset that just posted it looks like waste
+    # and is the only honest way to draw its own screen. "Live location on" has
+    # to mean "the server has my position", and the sending phone cannot know
+    # that from the inside -- a request that was written to a socket and never
+    # arrived looks identical to one that did. Without this the wearer's SOS
+    # screen would show a confident green "Live" through an entire dead zone,
+    # which is the one lie this screen must never tell.
+    targets = list(set(family_of(uid)) | set(responders) | {uid})
+    # No push. This is the one frame in the product that fires every ten
+    # seconds, and a push per fix would be three hundred notifications an hour
+    # to four phones -- which is not a busier version of the alert, it is the
+    # end of anyone reading any of them. The emergency itself has already been
+    # pushed, with its siren and its takeover; this only keeps the map under it
+    # honest for whoever is looking at one.
+    await HUB.fanout(targets, {
+        "t": "live_location", "alert_id": row["id"],
+        "user": {"id": uid, "name": name},
+        "lat": newest["lat"], "lon": newest["lon"],
+        "accuracy": newest["accuracy"], "at": newest["at"],
+        "resolved": row["resolved_at"] is not None,
+        "maps": f"https://maps.google.com/?q={newest['lat']:.6f},{newest['lon']:.6f}",
+    })
+    return {**about, "live": True, "at": newest["at"]}

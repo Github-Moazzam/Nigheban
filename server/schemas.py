@@ -116,6 +116,35 @@ class AlertIn(BaseModel):
     allow_samaritan: Optional[bool] = None
 
 
+class FixIn(BaseModel):
+    """One position, on the way somewhere."""
+    lat: float
+    lon: float
+    accuracy: Optional[float] = None
+    # The phone's clock, not the server's. A batch flushed after eight minutes
+    # in a dead zone is eight minutes of history, and stamping all of it with
+    # arrival time would draw a person standing still and then teleporting.
+    # Sanity-checked rather than trusted -- see `_clean` in services/alerts.py.
+    at: Optional[float] = None
+
+
+class LocationIn(BaseModel):
+    """A live position report, singular or batched.
+
+    Both shapes on one model on purpose. `points` is what the tracker sends,
+    because a buffer flushed after a dead zone is the case the endpoint exists
+    for; the flat `lat`/`lon` is what a hand-written curl, an older build, or a
+    debugging session sends, and refusing those would make the one endpoint in
+    this product that has to work from a headless background task the hardest
+    one to test.
+    """
+    points: Optional[list[FixIn]] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    accuracy: Optional[float] = None
+    at: Optional[float] = None
+
+
 class SamaritanOptIn(BaseModel):
     action: str  # 'allow' or 'deny'
 
