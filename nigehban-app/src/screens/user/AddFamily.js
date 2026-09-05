@@ -22,8 +22,17 @@ import { RU, U } from './kit';
  * end user already has her permanent code on the board behind this sheet, and
  * a second kind of code to explain is exactly the thing this shell is meant
  * not to have.
+ *
+ * `focus` is which door was used -- the ADD button, or the bell that carries
+ * the dot when somebody is waiting. It changes the heading and what an empty
+ * list says, and nothing else: opening this from a request and finding no way
+ * to answer it, or from the bell and finding a form instead of the question,
+ * are the same failure. Requests sit at the top either way, because somebody
+ * else is waiting on those and on nothing else here.
  */
-export default function AddFamily({ visible, session, invites, onClose, onChanged }) {
+export default function AddFamily({
+  visible, session, invites, focus = 'add', onClose, onChanged,
+}) {
   const [code, setCode] = useState('');
   const [relation, setRelation] = useState('');
   const [busy, setBusy] = useState(false);
@@ -111,7 +120,9 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
             <View style={s.grab} />
 
             <View style={s.head}>
-              <Txt variant="h1" color={U.text} style={{ flex: 1 }}>Family</Txt>
+              <Txt variant="h1" color={U.text} style={{ flex: 1 }}>
+                {focus === 'requests' ? 'Requests' : 'Family'}
+              </Txt>
               <Pressable onPress={close} accessibilityRole="button" accessibilityLabel="Close"
                          style={({ pressed }) => [s.close, pressed && { opacity: 0.6 }]}>
                 <Icon name="x" size={18} color={U.dim} />
@@ -184,6 +195,19 @@ export default function AddFamily({ visible, session, invites, onClose, onChange
                     </View>
                   ))}
                 </>
+              ) : null}
+
+              {/* Opened from the bell with nothing waiting. Said plainly and
+                  then got out of the way: the form below is what somebody who
+                  came looking for a request they have already answered is
+                  most likely to want next. */}
+              {focus === 'requests' && !incoming.length ? (
+                <View style={s.none}>
+                  <Icon name="check-circle" size={16} color={U.faint} />
+                  <Text style={[T.meta, { color: U.dim, flex: 1 }]}>
+                    Nobody is waiting for an answer.
+                  </Text>
+                </View>
               ) : null}
 
               {/* ---- asking somebody yourself ---- */}
@@ -370,6 +394,11 @@ const s = StyleSheet.create({
   msg: {
     flexDirection: 'row', alignItems: 'flex-start', gap: S.sm,
     padding: S.md, borderRadius: RU.inner,
+  },
+
+  none: {
+    flexDirection: 'row', alignItems: 'center', gap: S.sm,
+    padding: S.lg, borderRadius: RU.card, backgroundColor: U.card,
   },
 
   mine: {

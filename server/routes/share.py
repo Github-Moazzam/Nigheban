@@ -91,17 +91,38 @@ def share_feed(token: str, since: float = 0.0):
 
 
 @router.get("/t/{token}")
-def share_page(token: str):
+def share_page(token: str, embed: str = ""):
     """The map. One self-contained page, no build step, no API key.
 
     OpenStreetMap tiles through Leaflet rather than Google: no key to
     provision, no billing account to attach, and nothing to break in a
     deployment that is already carrying enough. The app embeds this exact page
     for its own live map, so the two can never drift apart.
+
+    `?embed=1` is the app asking for the map and nothing else. Around this page
+    it draws its own name, its own Directions -- which hands the coordinates to
+    whichever navigation app the phone's owner actually uses -- and its own
+    Share, which opens the system sheet. Served plain, the page's own heading
+    and buttons land directly underneath that: two names, two Directions, two
+    Shares, stacked, in front of somebody who has just been woken by a siren.
+    So the embedded page gives up everything the app already provides and keeps
+    the one thing only it knows, because only it is polling: how old the fix on
+    screen is.
+
+    It stays a difference of CSS rather than a second template. There is one
+    page, and the version the police open is the version the family is looking
+    at.
+
+    The parameter is read as a string rather than declared an int on purpose.
+    Anything unparseable would otherwise be a 422 -- a validation error where a
+    map should be -- and a cosmetic flag is never worth failing this page for.
     """
     if not resolve_share(token):
         return HTMLResponse(_DEAD, status_code=410, headers=NOINDEX)
-    return HTMLResponse(_PAGE.replace("__TOKEN__", token), headers=NOINDEX)
+    embedded = embed.strip().lower() not in ("", "0", "false", "no")
+    page = (_PAGE.replace("__TOKEN__", token)
+                 .replace("__EMBED__", _EMBED_CSS if embedded else ""))
+    return HTMLResponse(page, headers=NOINDEX)
 
 
 @router.head("/t/{token}")
@@ -127,6 +148,40 @@ _DEAD = """<!doctype html><meta charset="utf-8">
      them, call them directly.</p>
 </div>
 """
+
+
+# What `?embed=1` adds. Nothing is deleted from the page and no branch is
+# added to its script: the same markup renders, and the pieces the app already
+# draws are simply not shown. That is why `draw()` below can go on writing to
+# `#who` without knowing which mode it is in.
+#
+# What survives is the status line, because it is the only thing on this screen
+# that the app cannot know. The app learns positions from a websocket push; the
+# page is polling this server every few seconds. When the socket drops -- a
+# lift, a tunnel, a carrier hiccup -- the map keeps moving and the app does not
+# hear about it, so a freshness claim drawn natively would be the wrong one at
+# exactly the moment it mattered. Whoever is polling gets to say how old the
+# fix is, and that is the page.
+_EMBED_CSS = """<style>
+ /* The app's own header carries the name and the app's own bar carries the
+    actions. Both would otherwise appear twice, one under the other. */
+ #who{display:none}
+ #acts{display:none}
+ /* No scrim either: the app's header is already a solid dark surface, and a
+    second gradient under it reads as a smudge. */
+ #bar{background:none;padding:.5rem;text-align:center}
+ /* The status line becomes a floating pill rather than a full-width card --
+    it is one short phrase, and the map underneath is what people came for.
+    Hidden until the first answer arrives: standalone, the card says "Loading…"
+    in a heading this mode does not draw, so without this an empty pill sits
+    over the map for as long as the first poll takes. */
+ #card{display:inline-block;max-width:none;padding:.4rem .7rem;border-radius:999px;
+   background:#151A1EE6;box-shadow:0 2px 10px #0006;visibility:hidden}
+ #card.ready{visibility:visible}
+ #sub{margin:0;justify-content:center;font-size:.8rem}
+ /* Follow-again sat above buttons that are no longer there. */
+ #recenter{bottom:1rem}
+</style>"""
 
 
 # The page. Deliberately one file with no build step: it has to be openable by
@@ -167,7 +222,7 @@ _PAGE = """<!doctype html><meta charset="utf-8">
    background:var(--card);color:var(--text);border:0;border-radius:10px;
    padding:.6rem .8rem;font-size:.85rem;box-shadow:0 4px 14px #0008;cursor:pointer}
 </style>
-
+__EMBED__
 <div id="map"></div>
 <div id="bar"><div id="card">
   <div id="who">Loading…</div>
@@ -212,6 +267,9 @@ _PAGE = """<!doctype html><meta charset="utf-8">
   }
 
   function draw(d) {
+    // Embedded, the pill stays hidden until there is something in it to read.
+    // Harmless anywhere else: no rule attaches to the class outside that mode.
+    document.getElementById('card').classList.add('ready');
     document.getElementById('who').textContent =
       d.name + ' ' + d.what;
 
@@ -261,7 +319,14 @@ _PAGE = """<!doctype html><meta charset="utf-8">
   }
 
   function dead() {
-    document.getElementById('who').textContent = 'This location link has ended';
+    document.getElementById('card').classList.add('ready');
+    var who = document.getElementById('who');
+    // Embedded, the heading is normally hidden because the app draws the name
+    // above it. This one sentence is the exception: the app has no way of
+    // knowing the link died mid-view, and "ended" is not a detail to leave to
+    // a status line somebody may not read.
+    who.style.display = 'block';
+    who.textContent = 'This location link has ended';
     var dot = document.getElementById('dot'); dot.className = 'dot over';
     document.getElementById('state').textContent =
       'Live sharing stops when the emergency is over.';

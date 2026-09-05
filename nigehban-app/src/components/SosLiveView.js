@@ -290,7 +290,7 @@ const s = StyleSheet.create({
     padding: S.md,
   },
   samaritanCard: {
-    backgroundColor: C.card,
+    backgroundColor: C.surface,
     borderRadius: 12,
     padding: S.md,
     gap: S.xs,
