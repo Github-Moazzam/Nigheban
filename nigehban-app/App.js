@@ -21,6 +21,7 @@ import Auth from './src/screens/Auth';
 import Band from './src/screens/Band';
 import Family from './src/screens/Family';
 import Home from './src/screens/Home';
+import LiveMap from './src/screens/LiveMap';
 import Setup from './src/screens/Setup';
 import UserShell from './src/screens/UserShell';
 import DisarmPad from './src/screens/user/DisarmPad';
@@ -222,6 +223,10 @@ function Main() {
   // `acking`: both buttons live on the takeover and pressing one must not make
   // the other look like it is working.
   const [optingIn, setOptingIn] = useState(false);
+  // The alert whose live map is open, or null. Its own state rather than a
+  // flag on `incoming`, because the map outlives the takeover: dismissing the
+  // emergency screen to look at a road should not close the road.
+  const [liveMap, setLiveMap] = useState(null);
   const [askSheet, setAskSheet] = useState(null);     // the check-in question
   const [samaritan, setSamaritan] = useState(null);   // a stranger nearby
   const [deliveredTo, setDeliveredTo] = useState(null);
@@ -1281,6 +1286,13 @@ function Main() {
       // the fan-out targets in services/alerts.py.
       dispatch('LIVE_FIX', { alertId: m.alert_id, lat: m.lat, lon: m.lon,
                              at: m.at, maps: m.maps });
+      // The embedded page polls the server itself, so the map moves without
+      // this. What it does not know about is the native Directions button
+      // underneath it, which routes from `live_lat` -- and a stale one sends
+      // somebody to where she was when they opened the screen.
+      setLiveMap((cur) => (cur && String(cur.id) === String(m.alert_id)
+        ? { ...cur, live_lat: m.lat, live_lon: m.lon, live_at: m.at, maps: m.maps }
+        : cur));
       // The alert lists redraw from the server, which now carries the same
       // fields on the row. Throttled by `bump` being cheap rather than by a
       // timer: at ten seconds apart this is six renders a minute.
@@ -2035,7 +2047,8 @@ function Main() {
           emergency, but it is the family's only chance to notice that
           somebody has gone silent, and it used to be a notification nobody
           saw. */}
-      <Modal visible={!!incoming} animationType="fade" onRequestClose={() => setIncoming(null)}>
+      <Modal visible={!!incoming && !liveMap} animationType="fade"
+             onRequestClose={() => setIncoming(null)}>
         {incoming ? (
           <View style={[st.takeover,
                         incoming.severity < SIREN_FROM && { backgroundColor: C.amberSoft }]}>
@@ -2132,10 +2145,22 @@ function Main() {
                   exit that has to stop the siren itself -- they have plainly
                   seen it, and it must not follow them into Maps. */}
               {incoming.maps ? (
-                <Button title={incoming.severity >= SIREN_FROM
-                          ? 'SEE WHERE THEY ARE' : 'SEE WHERE THEY WERE'}
+                <Button title={incoming.share_path && !incoming.resolved_at
+                          ? 'WATCH THEM LIVE'
+                          : incoming.severity >= SIREN_FROM
+                            ? 'SEE WHERE THEY ARE' : 'SEE WHERE THEY WERE'}
                         filled big tone={sevColor(incoming.severity)} icon="navigation"
-                        onPress={() => { stopAlarm(); Linking.openURL(incoming.maps); }} />
+                        onPress={() => {
+                          stopAlarm();
+                          // In-app when there is a live page to show, and out
+                          // to Maps when there is not -- an older server, or a
+                          // kind of alert that is not tracked. The wording
+                          // above changes with it, because "watch them live"
+                          // over a frozen pin is the one promise this screen
+                          // must not make.
+                          if (incoming.share_path) setLiveMap(incoming);
+                          else Linking.openURL(incoming.maps);
+                        }} />
               ) : null}
               {/* The one button on this screen that speaks to the server, and
                   it is pressed by somebody who has just been woken by a siren.
@@ -2211,6 +2236,13 @@ function Main() {
           ? null : notices[0]}
         onClose={dismissNotice}
       />
+
+      {/* ---- watching somebody move ----
+          The answer to the oldest complaint about this app: the map link was a
+          photograph. This is the server's own live page, embedded, and the
+          same page that gets forwarded to whoever is closer than the family. */}
+      <LiveMap visible={!!liveMap} alert={liveMap} session={session}
+               onClose={() => setLiveMap(null)} />
     </View>
   );
 }

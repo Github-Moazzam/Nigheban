@@ -29,7 +29,8 @@
     "react-native": "0.86.2",
     "react-native-ble-plx": "^3.5.1",
     "react-native-safe-area-context": "~5.7.0",
-    "react-native-web": "^0.21.2"
+    "react-native-web": "^0.21.2",
+    "react-native-webview": "13.16.1"
   },
   "scripts": {
     "start": "expo start",
