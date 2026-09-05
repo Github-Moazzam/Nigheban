@@ -6,6 +6,7 @@ import {
   backgroundWatchDiagnostics, isBackgroundWatchRunning, startBackgroundWatch,
 } from '../bgService';
 import { backgroundNotificationDiagnostics } from '../bgNotifications';
+import { liveMapAvailable } from './LiveMap';
 import {
   alarmCapability, fullScreenIntentAllowed, openFullScreenIntentSettings,
   presentAlarm, stopAlarm,
@@ -55,7 +56,7 @@ export default function Setup({ onDone, session }) {
     bgModules: null, bgRunning: null, bgError: null,
     pushToken: null, pushError: null, pushRegistered: false, testSent: false,
     alarmLevel: null, alarmReason: null, alarmError: null, bgNotifRegistered: null,
-    fsiAllowed: null,
+    fsiAllowed: null, liveMap: null,
     alarmTesting: false,
   });
   const [diagBusy, setDiagBusy] = useState(false);
@@ -85,6 +86,14 @@ export default function Setup({ onDone, session }) {
       ...d,
       bgModules: bg.modulesLoaded,
       bgRunning: running,
+      // Whether react-native-webview is actually in THIS binary.
+      //
+      // The live map degrades silently on purpose -- a build without the
+      // module shows the old static pin rather than a white screen during an
+      // emergency -- and silence is exactly what makes it hard to tell a
+      // working fallback from a failed install. This is the answer, on the
+      // device, without having to raise an SOS to find out.
+      liveMap: liveMapAvailable(),
       bgError: bg.lastError,
       pushToken: push.token,
       pushError: push.error,
@@ -333,6 +342,22 @@ export default function Setup({ onDone, session }) {
             </View>
             {diag.bgError ? (
               <Text style={[T.meta, { color: C.faint }]}>{diag.bgError}</Text>
+            ) : null}
+
+            <View style={s.diagRow}>
+              <Text style={[T.meta, { color: C.dim }]}>Live map</Text>
+              {diag.liveMap ? (
+                <Chip text="ready" tone={C.green} icon="check" />
+              ) : (
+                <Chip text="static pin only" tone={C.amber} icon="alert-triangle" />
+              )}
+            </View>
+            {diag.liveMap === false ? (
+              <Text style={[T.meta, { color: C.faint }]}>
+                react-native-webview is not in this build — alerts open a fixed
+                pin in Maps instead of a map that moves. Rebuild after
+                `npx expo install react-native-webview`.
+              </Text>
             ) : null}
 
             <View style={s.diagRow}>

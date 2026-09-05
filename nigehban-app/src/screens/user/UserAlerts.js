@@ -8,6 +8,7 @@ import { call, optinSamaritan } from '../../api';
 import { S, T, fmtAgo } from '../../theme';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { RU, U } from './kit';
+import LiveMap from '../LiveMap';
 
 /** Every kind the server can write, said the way a person would say it. */
 const KIND = {
@@ -50,6 +51,10 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
   const [busy, setBusy] = useState(null);
   const [acked, setAcked] = useState(() => new Set());
   const [err, setErr] = useState(null);
+  // The alert whose live map is open. Held here rather than lifted to App.js
+  // because this screen already has the row and the session, and threading a
+  // callback through UserShell to open a modal would be three files for one.
+  const [liveMap, setLiveMap] = useState(null);
   const [, force] = useState(0);
 
   const load = useCallback(async () => {
@@ -113,158 +118,181 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
 
 
   return (
-    <FlatList
-      style={s.root}
-      contentContainerStyle={s.content}
-      data={rows}
-      keyExtractor={(a) => String(a.id)}
-      ItemSeparatorComponent={() => <View style={{ height: S.md }} />}
-      refreshControl={(
-        <RefreshControl
-          refreshing={refreshing}
-          tintColor={U.mint}
-          onRefresh={() => { setRefreshing(true); load(); }}
-        />
-      )}
-      ListHeaderComponent={(
-        <View style={s.header}>
-          <View style={{ gap: 2 }}>
-            <Txt variant="h1" color={U.text}>Alerts</Txt>
-            <Text style={[T.meta, { color: U.faint }]}>Newest first</Text>
-          </View>
+    <>
+      <FlatList
+        style={s.root}
+        contentContainerStyle={s.content}
+        data={rows}
+        keyExtractor={(a) => String(a.id)}
+        ItemSeparatorComponent={() => <View style={{ height: S.md }} />}
+        refreshControl={(
+          <RefreshControl
+            refreshing={refreshing}
+            tintColor={U.mint}
+            onRefresh={() => { setRefreshing(true); load(); }}
+          />
+        )}
+        ListHeaderComponent={(
+          <View style={s.header}>
+            <View style={{ gap: 2 }}>
+              <Txt variant="h1" color={U.text}>Alerts</Txt>
+              <Text style={[T.meta, { color: U.faint }]}>Newest first</Text>
+            </View>
 
-          <View style={s.segment}>
-            {SCOPES.map(([k, label]) => {
-              const on = scope === k;
-              return (
-                <Pressable
-                  key={k}
-                  onPress={() => setScope(k)}
-                  accessibilityRole="tab"
-                  accessibilityState={{ selected: on }}
-                  style={[s.segBtn, on && { backgroundColor: U.raised }]}
-                >
-                  <Text style={[T.button, { fontSize: 14, color: on ? U.text : U.faint }]}>
-                    {label}
+            <View style={s.segment}>
+              {SCOPES.map(([k, label]) => {
+                const on = scope === k;
+                return (
+                  <Pressable
+                    key={k}
+                    onPress={() => setScope(k)}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: on }}
+                    style={[s.segBtn, on && { backgroundColor: U.raised }]}
+                  >
+                    <Text style={[T.button, { fontSize: 14, color: on ? U.text : U.faint }]}>
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {err ? (
+              <View style={s.errBox}>
+                <Icon name="alert-circle" size={14} color={U.red} />
+                <Text style={[T.meta, { color: U.dim, flex: 1 }]}>{err}</Text>
+              </View>
+            ) : null}
+          </View>
+        )}
+        ListEmptyComponent={loading ? (
+          <SkeletonGroup label="Loading alerts">
+            <AlertCardSkeleton />
+            <AlertCardSkeleton />
+            <AlertCardSkeleton />
+          </SkeletonGroup>
+        ) : (
+          <View style={s.empty}>
+            <Icon name={scope === 'incoming' ? 'shield' : 'activity'} size={22} color={U.faint} />
+            <Txt variant="h2" color={U.text}>
+              {scope === 'incoming' ? 'Nothing from your family' : 'You have not raised anything'}
+            </Txt>
+            <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
+              {scope === 'incoming'
+                ? 'That is the good outcome. Anything they raise lands here.'
+                : 'Your own alerts, check-ins and near misses are kept here.'}
+            </Text>
+          </View>
+        )}
+        renderItem={({ item }) => {
+          const meta = KIND[item.kind] || { title: item.kind.replace(/_/g, ' '), icon: 'circle' };
+          const t = tone(item.severity);
+          const live = item.severity >= 4 && !item.resolved_at;
+          const mine = scope === 'mine';
+
+          return (
+            <View style={[s.card, live && { backgroundColor: U.redSoft }]}>
+              {live ? <View style={[s.accent, { backgroundColor: t }]} /> : null}
+
+              <View style={s.head}>
+                <View style={[s.mark, { backgroundColor: live ? t : U.raised }]}>
+                  <Icon name={meta.icon} size={16} color={live ? U.bg : t} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Txt variant="h2" color={U.text}>{meta.title}</Txt>
+                  <Text style={[T.meta, { color: U.dim }]}>
+                    {mine ? 'You' : item.user?.name || 'Family'}
+                    {item.source === 'band' ? ' · from the band'
+                      : item.source === 'server' ? ' · noticed by Nigehban'
+                      : ' · from the phone'}
                   </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          {err ? (
-            <View style={s.errBox}>
-              <Icon name="alert-circle" size={14} color={U.red} />
-              <Text style={[T.meta, { color: U.dim, flex: 1 }]}>{err}</Text>
-            </View>
-          ) : null}
-        </View>
-      )}
-      ListEmptyComponent={loading ? (
-        <SkeletonGroup label="Loading alerts">
-          <AlertCardSkeleton />
-          <AlertCardSkeleton />
-          <AlertCardSkeleton />
-        </SkeletonGroup>
-      ) : (
-        <View style={s.empty}>
-          <Icon name={scope === 'incoming' ? 'shield' : 'activity'} size={22} color={U.faint} />
-          <Txt variant="h2" color={U.text}>
-            {scope === 'incoming' ? 'Nothing from your family' : 'You have not raised anything'}
-          </Txt>
-          <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
-            {scope === 'incoming'
-              ? 'That is the good outcome. Anything they raise lands here.'
-              : 'Your own alerts, check-ins and near misses are kept here.'}
-          </Text>
-        </View>
-      )}
-      renderItem={({ item }) => {
-        const meta = KIND[item.kind] || { title: item.kind.replace(/_/g, ' '), icon: 'circle' };
-        const t = tone(item.severity);
-        const live = item.severity >= 4 && !item.resolved_at;
-        const mine = scope === 'mine';
-
-        return (
-          <View style={[s.card, live && { backgroundColor: U.redSoft }]}>
-            {live ? <View style={[s.accent, { backgroundColor: t }]} /> : null}
-
-            <View style={s.head}>
-              <View style={[s.mark, { backgroundColor: live ? t : U.raised }]}>
-                <Icon name={meta.icon} size={16} color={live ? U.bg : t} />
+                </View>
+                <Text style={[T.meta, { color: U.faint }]}>{fmtAgo(item.created_at)}</Text>
               </View>
-              <View style={{ flex: 1, gap: 2 }}>
-                <Txt variant="h2" color={U.text}>{meta.title}</Txt>
-                <Text style={[T.meta, { color: U.dim }]}>
-                  {mine ? 'You' : item.user?.name || 'Family'}
-                  {item.source === 'band' ? ' · from the band'
-                    : item.source === 'server' ? ' · noticed by Nigehban'
-                    : ' · from the phone'}
-                </Text>
+
+              {item.note ? (
+                <Text style={[T.meta, { color: U.dim }]}>{item.note}</Text>
+              ) : null}
+
+              <View style={s.chips}>
+                {item.resolved_at ? (
+                  <Chip icon="check" text={`stood down ${fmtAgo(item.resolved_at)}`} tint={U.mint} />
+                ) : live ? (
+                  <Chip icon="radio" text="still live" tint={t} />
+                ) : null}
+                {item.maps ? null : <Chip icon="map-pin" text="no location" tint={U.faint} />}
+                {acked.has(item.id) ? (
+                  <Chip icon="user-check" text="you are on it" tint={U.mint} />
+                ) : null}
+                {item.samaritan_status === 'allowed' ? (
+                  <Chip icon="users" text="helpers notified" tint={U.mint} />
+                ) : item.samaritan_status === 'denied' ? (
+                  <Chip icon="shield" text="family only" tint={U.faint} />
+                ) : null}
               </View>
-              <Text style={[T.meta, { color: U.faint }]}>{fmtAgo(item.created_at)}</Text>
+
+              {/* Live while the server is still tracking, a plain pin after.
+                  The window outlives the stand-down by half an hour -- see
+                  TRACK_AFTER_STANDDOWN_S -- so a stood-down alert can still be
+                  worth watching while she walks home, and one from last Tuesday
+                  cannot. Getting that wrong in the other direction is the worse
+                  mistake: "watch live" over a dead link is a promise this list
+                  should never make. */}
+              {item.share_path && (!item.resolved_at
+                || (item.track_until && item.track_until > Date.now() / 1000)) ? (
+                <Action
+                  icon="navigation" label="Watch their live location"
+                  sub="The map moves as they do"
+                  onPress={() => setLiveMap(item)}
+                />
+              ) : item.maps ? (
+                <Action
+                  icon="map-pin" label="Open in maps"
+                  sub={item.accuracy ? `accurate to about ${Math.round(item.accuracy)} m` : null}
+                  onPress={() => Linking.openURL(item.maps)}
+                />
+              ) : null}
+
+              {/* The two things a record can still be. Answering somebody else's
+                  emergency, or ending your own -- never both on one card. */}
+              {!mine && item.severity >= 3 && !item.resolved_at && !acked.has(item.id) ? (
+                <Action
+                  filled tint={t} icon="user-check" label="I've seen this — I'm on it"
+                  busyLabel="Telling them…"
+                  busy={busy === item.id} onPress={() => ack(item)}
+                />
+              ) : null}
+
+              {/* If emergency is pending Good Samaritan consent, family can alert nearby helpers */}
+              {!mine && item.severity >= 4 && !item.resolved_at && item.samaritan_status === 'pending' ? (
+                <Action
+                  tint={U.mint} icon="users" label="📢 Alert Nearby Helpers"
+                  busyLabel="Alerting…"
+                  busy={busy === `samaritan-${item.id}`} onPress={() => handleOptin(item, 'allow')}
+                />
+              ) : null}
+
+              {mine && live ? (
+                <Action
+                  filled tint={U.mint} icon="shield" label="I am safe — stand down"
+                  busyLabel="Standing down…"
+                  busy={busy === item.id} onPress={() => standDown(item)}
+                />
+              ) : null}
+
             </View>
+          );
+        }}
+      />
 
-            {item.note ? (
-              <Text style={[T.meta, { color: U.dim }]}>{item.note}</Text>
-            ) : null}
-
-            <View style={s.chips}>
-              {item.resolved_at ? (
-                <Chip icon="check" text={`stood down ${fmtAgo(item.resolved_at)}`} tint={U.mint} />
-              ) : live ? (
-                <Chip icon="radio" text="still live" tint={t} />
-              ) : null}
-              {item.maps ? null : <Chip icon="map-pin" text="no location" tint={U.faint} />}
-              {acked.has(item.id) ? (
-                <Chip icon="user-check" text="you are on it" tint={U.mint} />
-              ) : null}
-              {item.samaritan_status === 'allowed' ? (
-                <Chip icon="users" text="helpers notified" tint={U.mint} />
-              ) : item.samaritan_status === 'denied' ? (
-                <Chip icon="shield" text="family only" tint={U.faint} />
-              ) : null}
-            </View>
-
-            {item.maps ? (
-              <Action
-                icon="navigation" label="Open in maps"
-                sub={item.accuracy ? `accurate to about ${Math.round(item.accuracy)} m` : null}
-                onPress={() => Linking.openURL(item.maps)}
-              />
-            ) : null}
-
-            {/* The two things a record can still be. Answering somebody else's
-                emergency, or ending your own -- never both on one card. */}
-            {!mine && item.severity >= 3 && !item.resolved_at && !acked.has(item.id) ? (
-              <Action
-                filled tint={t} icon="user-check" label="I've seen this — I'm on it"
-                busyLabel="Telling them…"
-                busy={busy === item.id} onPress={() => ack(item)}
-              />
-            ) : null}
-
-            {/* If emergency is pending Good Samaritan consent, family can alert nearby helpers */}
-            {!mine && item.severity >= 4 && !item.resolved_at && item.samaritan_status === 'pending' ? (
-              <Action
-                tint={U.mint} icon="users" label="📢 Alert Nearby Helpers"
-                busyLabel="Alerting…"
-                busy={busy === `samaritan-${item.id}`} onPress={() => handleOptin(item, 'allow')}
-              />
-            ) : null}
-
-            {mine && live ? (
-              <Action
-                filled tint={U.mint} icon="shield" label="I am safe — stand down"
-                busyLabel="Standing down…"
-                busy={busy === item.id} onPress={() => standDown(item)}
-              />
-            ) : null}
-
-          </View>
-        );
-      }}
-    />
+      {/* The live map, over the list. Reached from a row rather than only
+          from the takeover, because the takeover is dismissed the moment
+          somebody taps 'I'm on it' -- and that is exactly when they start
+          driving and want to see where they are driving TO. */}
+      <LiveMap visible={!!liveMap} alert={liveMap} session={session}
+               onClose={() => setLiveMap(null)} />
+    </>
   );
 }
 
