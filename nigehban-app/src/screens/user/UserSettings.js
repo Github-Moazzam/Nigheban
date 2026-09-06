@@ -12,7 +12,7 @@ import {
   OEM, askPermission, ladderRows, openActivity, openBatterySettings,
   readPermissions, vendorKey,
 } from '../../permissions';
-import { clearPin, hasPin } from '../../security';
+import { clearDisarmPin, hasPin } from '../../security';
 import { S, T, fmtAgo } from '../../theme';
 import { liveMapAvailable } from '../LiveMap';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
@@ -566,7 +566,7 @@ export default function UserSettings({ session, band, serverOnline, onSignOut })
                 onPress={async () => {
                   if (pinBusy) return;
                   setPinBusy(true);
-                  try { await clearPin(); await refreshPin(); } finally { setPinBusy(false); }
+                  try { await clearDisarmPin(); await refreshPin(); } finally { setPinBusy(false); }
                 }}
               />
             </>
