@@ -496,6 +496,35 @@ async def resolve_alert(alert_id, uid, *, auto=False, note=""):
                       "sos_streak=0, "
                       "link_lost_at=CASE WHEN high_alert THEN link_lost_at ELSE NULL END "
                       "WHERE user_id=%s AND mode='sos'", (now + CHECKIN_EVERY_S, uid))
+
+            # And the questions this person still owes an answer to.
+            #
+            # "I am safe" is a stronger answer than "I'm fine", and this is the
+            # only place it gets recorded as one. Nothing else ever closes a
+            # check-in that escalated: the sweeper sets `escalated` and pages
+            # the family, it does not set `acked_at`, so without this the row
+            # stays in the table as an open question for ever. `open_checkin`
+            # keeps handing it to GET /watch/{me}, and the wearer's own app --
+            # which asks on every foreground, which is exactly what tapping the
+            # notification does -- puts the dead question back on screen the
+            # moment the SOS screen comes down. A fall the family already know
+            # about, redrawn as "Nigehban is checking on you", overdue.
+            #
+            # All of them, for the same reason ack_open_checkins answers all of
+            # them: the fall check-in that became this alert, the five-minute
+            # ones the SOS asked while it was live, and a parent's "are you
+            # okay?" that landed mid-emergency are one question as far as the
+            # wearer is concerned, and they have just answered it.
+            #
+            # Gated on the same severity as `track_until`. Standing down a
+            # low-battery row is not somebody saying they are safe, and it must
+            # not silently answer a question their mother is waiting on.
+            #
+            # No `checkin_ack` frame goes out for these -- see the fan-out
+            # below, which tells the same people the truer thing: X is safe.
+            if row["severity"] >= 4:
+                c.execute("UPDATE checkins SET acked_at=%s"
+                          " WHERE user_id=%s AND acked_at IS NULL", (now, uid))
         who = c.execute("SELECT id,name FROM users WHERE id=%s", (uid,)).fetchone()
         # Only the Good Samaritans who actually answered *this* alert -- not
         # every connected socket on the server. `samaritans` is keyed by

@@ -24,10 +24,24 @@ log = get_logger(__name__)
 
 
 def open_checkin(c, uid):
-    """The oldest question this person still owes an answer to."""
+    """The oldest question this person still owes an answer to.
+
+    `escalated` first in the ordering, and it is not cosmetic. An escalated row
+    is a question whose deadline has already passed and whose family have
+    already been paged -- the sweeper latches `escalated` and does NOT set
+    `acked_at`, so the row goes on being open indefinitely. Ordered by `due_at`
+    alone, that dead row is always the oldest, so it masks every live question
+    behind it: a wearer with an unanswered fall gets the SOS's own five-minute
+    knock rendered as the fall from twenty minutes ago, and the family screen
+    counts down to a deadline that expired before they even opened the app.
+
+    Still returned when nothing live is waiting, which is the point of putting
+    it second rather than excluding it. Answering late is a real thing people
+    do, and it still means what it always meant.
+    """
     return c.execute(
         "SELECT * FROM checkins WHERE user_id=%s AND acked_at IS NULL "
-        "ORDER BY due_at LIMIT 1", (uid,)).fetchone()
+        "ORDER BY escalated, due_at LIMIT 1", (uid,)).fetchone()
 
 
 async def ack_open_checkins(uid, by="app"):
