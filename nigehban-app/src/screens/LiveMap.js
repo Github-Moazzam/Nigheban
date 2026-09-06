@@ -59,6 +59,51 @@ try {
   /* not in this build: the static pin below is the fallback */
 }
 
+/**
+ * The same hiding the server does for `?embed=1`, applied from this side too.
+ *
+ * The app and the server ship on their own schedules. A phone carrying this
+ * screen can talk to a server that predates `?embed=1`, and that server has no
+ * idea the parameter means anything -- FastAPI drops unknown query params
+ * without complaint -- so it serves the page whole: its heading under this
+ * screen's heading, its Directions and Share under this screen's DIRECTIONS
+ * and SEND LINK. Two of everything, on the one screen somebody reached by
+ * being woken with a siren.
+ *
+ * So the request is not the only thing asking. The rules below are the server's
+ * `_EMBED_CSS` verbatim, injected into whatever page comes back, which makes
+ * the layout correct against every server version rather than only current
+ * ones. When the server has already done it this changes nothing -- the same
+ * declarations, applied twice.
+ *
+ * `#who` is left overridable on purpose, exactly as the server leaves it: the
+ * page reveals that heading with an inline style to say the link has ended,
+ * which is the one thing it knows and this app does not. `!important` here
+ * would silence that message.
+ */
+const EMBED_CHROME_CSS = `
+ #who{display:none}
+ #acts{display:none}
+ #bar{background:none;padding:.5rem;text-align:center}
+ #card{display:inline-block;max-width:none;padding:.4rem .7rem;border-radius:999px;
+   background:#151A1EE6;box-shadow:0 2px 10px #0006;visibility:hidden}
+ #card.ready{visibility:visible}
+ #sub{margin:0;justify-content:center;font-size:.8rem}
+ #recenter{bottom:1rem}
+`;
+
+// Idempotent, because it is injected twice: once before the document loads so
+// nothing flashes, and once after, because Android has historically been
+// unreliable about running the first on every page. Trailing `true` keeps
+// Android from warning about a non-serialisable evaluation result.
+const EMBED_CHROME_JS = `(function(){
+  if (document.getElementById('nb-embed')) return;
+  var s = document.createElement('style');
+  s.id = 'nb-embed';
+  s.textContent = ${JSON.stringify(EMBED_CHROME_CSS)};
+  (document.head || document.documentElement).appendChild(s);
+})(); true;`;
+
 /** Is the live map actually available in this binary? Used by Setup's diagnostics. */
 export function liveMapAvailable() {
   return !!WebView;
@@ -242,6 +287,10 @@ export default function LiveMap({ visible, alert, session, onClose }) {
                 javaScriptEnabled
                 domStorageEnabled
                 startInLoadingState={false}
+                // Belt and braces against a server that predates `?embed=1`.
+                // See EMBED_CHROME_CSS above.
+                injectedJavaScriptBeforeContentLoaded={EMBED_CHROME_JS}
+                injectedJavaScript={EMBED_CHROME_JS}
               />
               {loading ? (
                 <View style={s.loading} pointerEvents="none">
