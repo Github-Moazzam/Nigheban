@@ -34,6 +34,11 @@ export default function UserShell({
   // responders and the server's deadline are all untouched by it, because not
   // one of them lives in this view.
   const [minimised, setMinimised] = useState(false);
+  // People waiting on an answer from this phone. Counted by the board below,
+  // which loads the list anyway, and reported up so the tab bar can carry a
+  // dot from any of the three tabs -- a request answered nowhere is a person
+  // who thinks they are covered and is not.
+  const [requests, setRequests] = useState(0);
 
   // A dot on the Alerts tab, and only for an emergency that is still running.
   // `refreshKey` bumps on every socket frame, so this follows the alert rather
@@ -126,6 +131,7 @@ export default function UserShell({
             onAckCheckin={onAckCheckin}
             onToggleHighAlert={onToggleHighAlert}
             onFix={onFix}
+            onInvites={setRequests}
           />
         ) : tab === 'alerts' ? (
           <UserAlerts
@@ -144,9 +150,11 @@ export default function UserShell({
       </View>
 
       <View style={[s.tabBar, { paddingBottom: S.sm + insets.bottom }]}>
-        <Tab icon="home" label="Home"
+        <Tab icon="home" label="Home" dot={requests > 0}
+             dotLabel={`${requests} waiting to be your family`}
              active={tab === 'dashboard'} onPress={() => setTab('dashboard')} />
         <Tab icon="bell" label="Alerts" dot={liveFamily > 0}
+             dotLabel="a family emergency is live"
              active={tab === 'alerts'} onPress={() => setTab('alerts')} />
         <Tab icon="settings" label="Setup"
              active={tab === 'settings'} onPress={() => setTab('settings')} />
@@ -204,14 +212,14 @@ function LiveSosBar({ alert, deliveryStatus, responders = [], onPress }) {
   );
 }
 
-function Tab({ icon, label, active, onPress, dot }) {
+function Tab({ icon, label, active, onPress, dot, dotLabel }) {
   return (
     <Pressable
       onPress={onPress}
       style={s.tab}
       accessibilityRole="tab"
       accessibilityState={{ selected: active }}
-      accessibilityLabel={dot ? `${label}, a family emergency is live` : label}
+      accessibilityLabel={dot && dotLabel ? `${label}, ${dotLabel}` : label}
     >
       <View>
         <Icon name={icon} size={21} color={active ? U.mint : U.faint} />

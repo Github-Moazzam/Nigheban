@@ -262,6 +262,41 @@ function Main() {
 
   const dismissNotice = useCallback(() => setNotices((q) => q.slice(1)), []);
 
+  /**
+   * How many people are waiting on an answer from this phone.
+   *
+   * Only the admin console needs it up here, and only admins pay for it: its
+   * Family tab is where a request is answered, and a tab with nothing on it is
+   * indistinguishable from a tab with somebody's question behind it. The user
+   * shell counts its own, from the list its board is already loading -- one
+   * more request on every socket frame, for a number somebody else has, is
+   * exactly the kind of cost this app should not be paying during an
+   * emergency.
+   *
+   * Re-read on `refreshKey`, which every arriving invite bumps, and again by
+   * hand when the Family tab answers one -- answering there is a round trip
+   * this component never hears about otherwise, and a dot that outlives the
+   * question it was about is worse than no dot at all. A failure leaves the
+   * old count: the tab still opens, the request is still in the list behind
+   * it, and a mark this small is not worth an error message.
+   */
+  const [pendingInvites, setPendingInvites] = useState(0);
+  // Which account the in-flight read belongs to. Sign out while it is on the
+  // wire and the answer that comes back is about somebody who is no longer
+  // holding this phone.
+  const invitesFor = useRef(null);
+  const refreshInvites = useCallback(async () => {
+    const who = session?.user_id || null;
+    invitesFor.current = who;
+    if (!session || session.role !== 'admin') { setPendingInvites(0); return; }
+    try {
+      const r = await call(session, '/invites');
+      if (invitesFor.current === who) setPendingInvites(r?.incoming?.length || 0);
+    } catch { /* the dot is the only casualty */ }
+  }, [session]);
+
+  useEffect(() => { refreshInvites(); }, [refreshInvites, refreshKey]);
+
   useEffect(() => {
     (async () => {
       await setupNotificationChannels();
@@ -1470,13 +1505,26 @@ function Main() {
       quiet: true,
     }),
     invite: (m) => {
-      // A question waiting for an answer, on a screen the user shell has no
-      // tab for. A toast that expires is the one shape this must not take.
-      pushNotice({
-        icon: 'user-plus', tone: U.amber,
-        title: `${m.invite.from.name} wants to be your family`,
-        body: 'Open Family to accept or decline. Nothing is shared until you do.',
-      });
+      // Deliberately NOT a BigNotice, which is what this used to be.
+      //
+      // Every other notice in that queue is news: a check-in was answered, an
+      // alert stood down, something that is over by the time it is read and
+      // whose only correct response is to know it. A request is the opposite
+      // -- it is a question with two answers, and it stays true until one of
+      // them is given. Taking the screen for it meant reading it, dismissing
+      // it, and then going to find the sheet where it could actually be
+      // answered: three steps, one of them teaching a family that a thing
+      // filling the screen is a thing you swipe away. That habit is the last
+      // one this app can afford, because the same shape carries a siren.
+      //
+      // It lives in the interface now instead, in the two places somebody
+      // looks for family: the bell beside ADD on the user shell's board, and
+      // the Family tab in the admin console -- both carrying a dot for as
+      // long as the question is unanswered, which is the whole point. `bump`
+      // is what makes both of them true, by reloading the invite list.
+      //
+      // The OS notification stays exactly as it was. It is the only half that
+      // reaches a phone this app is not running on.
       notify(`${m.invite.from.name} wants to be your family`,
              'Nothing is shared until you accept.');
       bump();
@@ -1991,7 +2039,10 @@ function Main() {
         )}
 
         {tab === 'band' && <Band band={band} serverOnline={serverOnline} />}
-        {tab === 'family' && <Family session={session} refreshKey={refreshKey} />}
+        {tab === 'family' && (
+          <Family session={session} refreshKey={refreshKey}
+                  onChanged={refreshInvites} />
+        )}
         {tab === 'alerts' && <Alerts session={session} refreshKey={refreshKey} />}
         {tab === 'setup' && <Setup session={session} />}
       </View>
@@ -1999,11 +2050,21 @@ function Main() {
       <View style={[st.tabbar, { paddingBottom: 8 + insets.bottom }]}>
         {TABS.map(([k, label, icon]) => {
           const on = tab === k;
+          // Somebody is waiting behind this tab. The count goes in the label
+          // rather than in the mark, because a red dot is a hint and not a
+          // sentence -- and it is the only thing in this bar that is about a
+          // person rather than about a screen.
+          const waiting = k === 'family' ? pendingInvites : 0;
           return (
             <Pressable key={k} onPress={() => setTab(k)} style={st.tabBtn}
                        accessibilityRole="tab" accessibilityState={{ selected: on }}
-                       accessibilityLabel={label}>
-              <Icon name={icon} size={19} color={on ? C.green : C.faint} />
+                       accessibilityLabel={waiting
+                         ? `${label}, ${waiting} waiting for an answer`
+                         : label}>
+              <View>
+                <Icon name={icon} size={19} color={on ? C.green : C.faint} />
+                {waiting ? <View style={st.tabDot} /> : null}
+              </View>
               <Text style={[st.tabText, on && { color: C.green }]}>{label}</Text>
             </Pressable>
           );
@@ -2267,6 +2328,13 @@ const st = StyleSheet.create({
   },
   tabBtn: { flex: 1, alignItems: 'center', gap: 4, paddingVertical: 6, minHeight: 48 },
   tabText: { ...T.label, color: C.faint },
+  // Ringed in the bar's own colour so it reads as a mark on the icon rather
+  // than as part of it, at any icon size.
+  tabDot: {
+    position: 'absolute', top: -2, right: -4,
+    width: 10, height: 10, borderRadius: 5,
+    backgroundColor: C.red, borderWidth: 2, borderColor: C.surface,
+  },
 
   toast: {
     position: 'absolute', left: S.lg, right: S.lg, flexDirection: 'row',

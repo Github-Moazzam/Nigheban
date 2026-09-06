@@ -25,7 +25,7 @@ import {
  * a bearer secret that cannot be taken back, and one screenshot of it is
  * forever. The pairing code is the one the screen leads with.
  */
-export default function Family({ session, refreshKey }) {
+export default function Family({ session, refreshKey, onChanged }) {
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState({ incoming: [], outgoing: [] });
   const [pair, setPair] = useState(null);      // { code, until }
@@ -145,6 +145,9 @@ export default function Family({ session, refreshKey }) {
           ? `${inv.from.name} is now in your family.`
           : 'Declined. They are not told, and they cannot ask again.');
         await load();
+        // The tab bar is carrying a dot for as long as this was unanswered,
+        // and it is drawn a level above this screen.
+        onChanged?.();
       } catch (e) {
         setErr(e.message);
       }

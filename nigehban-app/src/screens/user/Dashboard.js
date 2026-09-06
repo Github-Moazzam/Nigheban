@@ -1,9 +1,8 @@
-import * as Clipboard from 'expo-clipboard';
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, AppState, FlatList, Pressable, RefreshControl, StyleSheet,
-  Text, View,
+  ActivityIndicator, AppState, FlatList, Linking, Platform, Pressable,
+  RefreshControl, StyleSheet, Text, View,
 } from 'react-native';
 import { call } from '../../api';
 import PinSheet from '../../components/PinSheet';
@@ -30,14 +29,17 @@ import { RU, U } from './kit';
  */
 export default function Dashboard({
   session, ctx, refreshKey, serverOnline, onRaise, onAckCheckin,
-  onToggleHighAlert, onFix,
+  onToggleHighAlert, onFix, onInvites,
 }) {
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState({ incoming: [], outgoing: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [adding, setAdding] = useState(false);
+  // null when the sheet is shut, otherwise which half of it was asked for:
+  // 'add' from the ADD button, 'requests' from the bell or the banner. One
+  // sheet either way -- a link needs two people to agree, and answering
+  // somebody is the same subject as asking them.
+  const [adding, setAdding] = useState(null);
   // Taking somebody off the list, which is four steps rather than one: ask,
   // take the PIN, do it, say so. All four live up here rather than on the card
   // itself, because the third step reloads the list -- the card unmounts
@@ -100,10 +102,15 @@ export default function Dashboard({
       }));
       setMembers(withWatch);
       setInvites(i);
+      // The shell puts a dot on the Home tab from this, so that a question
+      // nobody has answered is visible from the other two as well. Reported
+      // from here because this is the fetch that already happens -- and it
+      // happens again the moment a request is answered in the sheet.
+      onInvites?.(i?.incoming?.length || 0);
     } catch { /* the strip below already says the server is unreachable */ }
     setLoading(false);
     setRefreshing(false);
-  }, [session]);
+  }, [session, onInvites]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
 
@@ -120,11 +127,6 @@ export default function Dashboard({
     return () => { alive = false; sub.remove(); };
   }, []);
 
-  const copyCode = async () => {
-    await Clipboard.setStringAsync(session.user_id);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1600);
-  };
 
   /**
    * REMOVING SOMEBODY — why there is a PIN in front of it.
@@ -172,6 +174,7 @@ export default function Dashboard({
   const endDrop = () => { setDropping(null); setDropStage(null); setDropErr(null); };
 
   const online = members.filter((m) => m.online).length;
+  const pending = invites.incoming.length;
   const pct = members.length ? Math.round((online / members.length) * 100) : 0;
   const secureTone = !members.length ? U.faint : pct === 100 ? U.mint : U.amber;
 
@@ -185,18 +188,7 @@ export default function Dashboard({
           <Txt variant="h2" color={U.text}>Family Safety</Txt>
           <Text style={[T.meta, { color: U.faint }]}>Peace of Mind Board</Text>
         </View>
-        <Pressable
-          onPress={copyCode}
-          hitSlop={HIT}
-          accessibilityRole="button"
-          accessibilityLabel={`Copy your code, ${session.user_id}`}
-          style={({ pressed }) => [s.codePill, pressed && { opacity: 0.7 }]}
-        >
-          <Text style={[T.label, { color: copied ? U.mint : U.dim }]}>
-            {copied ? 'COPIED' : `CODE #${session.user_id}`}
-          </Text>
-          <Icon name={copied ? 'check' : 'copy'} size={12} color={copied ? U.mint : U.faint} />
-        </Pressable>
+        <LocationChip state={locState} fix={fix} />
       </View>
 
       <View style={s.strip}>
@@ -276,24 +268,6 @@ export default function Dashboard({
         </Pressable>
       ) : null}
 
-      {/* Somebody asked to be family. Without this the request is invisible
-          until it expires -- the user shell has no Family tab to find it in. */}
-      {invites.incoming.length ? (
-        <Pressable
-          onPress={() => setAdding(true)}
-          accessibilityRole="button"
-          style={({ pressed }) => [s.invite, pressed && { opacity: 0.75 }]}
-        >
-          <Icon name="user-plus" size={16} color={U.amber} />
-          <Text style={[T.bodyMed, { color: U.amber, flex: 1 }]}>
-            {invites.incoming.length === 1
-              ? `${invites.incoming[0].from.name} wants to be your family`
-              : `${invites.incoming.length} people want to be your family`}
-          </Text>
-          <Icon name="chevron-right" size={16} color={U.amber} />
-        </Pressable>
-      ) : null}
-
       {ctx.checkin ? (
         <View style={s.checkin}>
           {/* Three questions, and the SOS one is the opposite of the other
@@ -338,9 +312,6 @@ export default function Dashboard({
         nextBuzzAt={ctx.nextBuzzAt}
         onToggle={onToggleHighAlert}
       />
-
-      {/* What her family gets instead of a guess. */}
-      <LocationCard state={locState} fix={fix} />
 
       {/* THE BUTTON.
           Round, because nothing else on this screen is, and a shape that
@@ -389,8 +360,31 @@ export default function Dashboard({
 
       <View style={s.sectionRow}>
         <Text style={[T.label, { color: U.faint, flex: 1 }]}>MONITORED MEMBERS</Text>
+        {/* Requests wait behind a button that is always here.
+            They used to arrive as a full-screen notice that had to be
+            acknowledged before it could be acted on -- "somebody wants to be
+            your family", then Got it, then find the sheet, then answer. Three
+            steps and a dismissal for a question with two answers, and the
+            dismissal taught the one habit this app cannot afford: that a thing
+            taking the whole screen is something you swipe away.
+            So the news lives in the interface instead. The dot is the only
+            part that changes, and the count is spoken in the label -- a red
+            mark that is the sole way of knowing is no way of knowing. */}
         <Pressable
-          onPress={() => setAdding(true)}
+          onPress={() => setAdding('requests')}
+          hitSlop={HIT}
+          accessibilityRole="button"
+          accessibilityLabel={
+            pending
+              ? `Family requests, ${pending} waiting for an answer`
+              : 'Family requests, none waiting'}
+          style={({ pressed }) => [s.bell, pressed && { opacity: 0.7 }]}
+        >
+          <Icon name="bell" size={14} color={pending ? U.amber : U.faint} />
+          {pending ? <View style={s.bellDot} /> : null}
+        </Pressable>
+        <Pressable
+          onPress={() => setAdding('add')}
           hitSlop={HIT}
           accessibilityRole="button"
           accessibilityLabel="Add a family member"
@@ -431,7 +425,7 @@ export default function Dashboard({
               Add someone with their code, or give them yours.
             </Text>
             <Pressable
-              onPress={() => setAdding(true)}
+              onPress={() => setAdding('add')}
               accessibilityRole="button"
               style={({ pressed }) => [
                 s.primary, s.emptyBtn, { backgroundColor: U.mint },
@@ -454,10 +448,11 @@ export default function Dashboard({
       />
 
       <AddFamily
-        visible={adding}
+        visible={!!adding}
+        focus={adding || 'add'}
         session={session}
         invites={invites}
-        onClose={() => setAdding(false)}
+        onClose={() => setAdding(null)}
         onChanged={load}
       />
 
@@ -709,82 +704,74 @@ function HighAlert({ armed, nextBuzzAt, onToggle }) {
   );
 }
 
-/** Where an alert would say she is. Denied is the only state with an action. */
-function LocationCard({ state, fix }) {
-  const tone = state === 'ok' ? U.mint : state === 'denied' ? U.red : U.amber;
-
-  return (
-    <View style={s.card}>
-      <View style={s.cardHead}>
-        <View style={s.cardMark}>
-          <Icon name="map-pin" size={17} color={tone} />
-        </View>
-        <View style={{ flex: 1, gap: 2 }}>
-          <Txt variant="h2" color={U.text}>Your location</Txt>
-          <Text style={[T.meta, { color: U.dim }]}>
-            {state === 'ok' && fix
-              ? `Accurate to about ${Math.round(fix.acc)} m · updated ${fmtAgo(fix.at / 1000)}`
-              : state === 'denied'
-                ? 'Location is off, so an alert cannot say where you are'
-                : state === 'error'
-                  ? 'Location is unavailable on this device'
-                  : 'Waiting for a fix from the phone…'}
-          </Text>
-        </View>
-        <View style={[s.statusPill, { backgroundColor: U.raised }]}>
-          <View style={[s.dot, { backgroundColor: tone }]} />
-          <Text style={[T.label, { color: tone }]}>
-            {state === 'ok' ? 'LIVE' : state === 'denied' ? 'OFF' : 'WAITING'}
-          </Text>
-        </View>
-      </View>
-
-      {state === 'ok' && fix ? (
-        <View style={s.panel}>
-          <Text style={[T.number, { color: U.text, flex: 1 }]}>
-            {fix.lat.toFixed(5)}, {fix.lon.toFixed(5)}
-          </Text>
-        </View>
-      ) : state === 'denied' ? (
-        <AskForLocation />
-      ) : null}
-    </View>
-  );
-}
-
 /**
- * The permission dialog can take a beat to appear, and on a phone that has
- * already refused once it never appears at all -- so the button has to admit
- * it was pressed by itself rather than waiting for Android to say so.
+ * Where the big card used to be, shrunk to a pill beside the code -- the
+ * board already says everyone else's status in one line each, and hers does
+ * not need a card of its own to say the same three things: waiting, live, or
+ * off. Off is the only state with anything to do about it, and on is the only
+ * state with anywhere to go -- tapping it opens her own fix in whatever map
+ * app the phone already has, the same way LiveMap hands a family member's fix
+ * to Directions.
  */
-function AskForLocation() {
+function LocationChip({ state, fix }) {
   const [asking, setAsking] = useState(false);
 
-  const ask = async () => {
+  const openOwnLocation = async () => {
+    if (!fix) return;
+    const { lat, lon } = fix;
+    const label = encodeURIComponent('Your location');
+    const web = `https://www.google.com/maps/?q=${lat},${lon}`;
+    const native = Platform.OS === 'android'
+      ? `geo:${lat},${lon}?q=${lat},${lon}(${label})`
+      : `maps://?ll=${lat},${lon}&q=${label}`;
+    for (const u of [native, web]) {
+      try {
+        if (await Linking.canOpenURL(u)) { await Linking.openURL(u); return; }
+      } catch { /* try the next one */ }
+    }
+    try { await Linking.openURL(web); } catch { /* nothing can open it */ }
+  };
+
+  // The permission dialog can take a beat to appear, and on a phone that has
+  // already refused once it never appears at all -- so the pill has to admit
+  // it was pressed by itself rather than waiting for Android to say so.
+  const askPermission = async () => {
     if (asking) return;
     setAsking(true);
-    try { await Location.requestForegroundPermissionsAsync(); } catch { /* the card still says denied */ }
+    try { await Location.requestForegroundPermissionsAsync(); } catch { /* still off */ }
     setAsking(false);
   };
 
+  const press = state === 'ok' ? openOwnLocation
+    : state === 'denied' || state === 'error' ? askPermission
+      : null;
+
+  const tone = state === 'ok' ? U.mint : state === 'denied' || state === 'error' ? U.red : U.amber;
+  const label = asking ? 'ASKING…'
+    : state === 'ok' ? 'LIVE LOCATION'
+      : state === 'denied' ? 'LOCATION OFF'
+        : state === 'error' ? 'LOCATION UNAVAILABLE'
+          : 'LOCATING…';
+
   return (
     <Pressable
-      onPress={ask}
-      disabled={asking}
+      onPress={press || undefined}
+      disabled={!press || asking}
+      hitSlop={HIT}
       accessibilityRole="button"
-      accessibilityState={{ busy: asking, disabled: asking }}
-      style={({ pressed }) => [
-        s.primary, { backgroundColor: U.amber }, pressed && { opacity: 0.75 },
-      ]}
+      accessibilityLabel={
+        state === 'ok' ? 'Open your live location on the map'
+          : state === 'denied' || state === 'error' ? 'Location is off — tap to turn it on'
+            : 'Locating you'}
+      accessibilityState={{ busy: asking, disabled: !press || asking }}
+      style={({ pressed }) => [s.codePill, pressed && press && { opacity: 0.7 }]}
     >
-      {asking ? (
-        <ActivityIndicator size="small" color={U.bg} />
+      {asking || state === 'asking' ? (
+        <ActivityIndicator size="small" color={tone} />
       ) : (
-        <Icon name="map-pin" size={16} color={U.bg} />
+        <Icon name="map-pin" size={12} color={tone} />
       )}
-      <Text style={[T.button, { color: U.bg }]}>
-        {asking ? 'Asking Android…' : 'Turn location on'}
-      </Text>
+      <Text style={[T.label, { color: tone }]}>{label}</Text>
     </Pressable>
   );
 }
@@ -1033,6 +1020,18 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: S.md, paddingVertical: 7,
     borderRadius: RU.pill, backgroundColor: U.mintSoft,
+  },
+  // Quieter than ADD beside it: this one is somebody else's question, not an
+  // action, and mint in this shell means "the thing to press".
+  bell: {
+    width: 34, minHeight: 30, alignItems: 'center', justifyContent: 'center',
+    borderRadius: RU.pill, backgroundColor: U.raised,
+  },
+  // Red on `raised`, and never the only thing carrying the news: the banner
+  // above says who is waiting, and the button's label says how many.
+  bellDot: {
+    position: 'absolute', top: 5, right: 7,
+    width: 8, height: 8, borderRadius: RU.pill, backgroundColor: U.red,
   },
 
   card: {

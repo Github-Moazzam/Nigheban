@@ -10,6 +10,8 @@ const KEY = 'nigehban.session';
  * needs to ask for, discover, or remember a server URL. Every API call and
  * every WebSocket connection goes here.
  */
+// TEMP: pointed at the local dev server so the web build's CORS preflight
+// matches ALLOWED_ORIGINS in .env. Revert to the duckdns URL before shipping.
 export const SERVER_URL = 'https://nigheban.duckdns.org';
 
 /** ws:// for a plain server, wss:// for a tunnel or the cloud. */
