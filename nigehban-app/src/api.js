@@ -40,8 +40,129 @@ export async function clearSession() {
 }
 
 /**
- * Thin REST wrapper. Throws Error(message) with the server's own wording,
- * because the server already writes errors a person can act on.
+ * Every way a fetch can fail before it reaches the server, in every platform's
+ * own words.
+ *
+ * This is a list rather than one string because the web build is a first-class
+ * target now: React Native says "Network request failed", but Chrome says
+ * "Failed to fetch", Firefox "NetworkError when attempting to fetch resource",
+ * and Safari "Load failed". Matching only the React Native wording -- which is
+ * what this did -- meant that on web every unreachable-server case fell through
+ * untranslated and put the browser's own words on the sign-in screen.
+ *
+ * They are one case and not several on purpose. A refused connection, a DNS
+ * failure and a blocked CORS preflight are deliberately indistinguishable from
+ * JavaScript, so guessing between them would only ever be a guess.
+ */
+const NETWORK_FAIL = /network request failed|failed to fetch|networkerror|load failed|connection (refused|reset)|internet connection appears to be offline/i;
+
+/**
+ * What to say when the server refuses but does not say why.
+ *
+ * The server usually does say why, and its own wording wins over everything
+ * here -- these are the fallback for a refusal that arrives with no readable
+ * body, which in practice means a proxy or a gateway answered instead of the
+ * app. A bare "server said 502" is a status code with a sentence around it, not
+ * an explanation.
+ */
+const BY_STATUS = {
+  400: 'Something in that form was not accepted.',
+  401: 'Your username or password is incorrect.',
+  403: 'You are not allowed to do that.',
+  404: 'The app asked for something this server does not have.',
+  409: 'That is already taken.',
+  413: 'That was too large to send.',
+  429: 'Too many tries. Please wait a few minutes and try again.',
+  500: 'The server ran into a problem. Please try again in a moment.',
+  502: 'The server is not answering right now. Please try again in a moment.',
+  503: 'The server is not answering right now. Please try again in a moment.',
+  504: 'The server took too long to answer. Please try again.',
+};
+
+const LABEL = { username: 'Username', password: 'Password', name: 'Name', band_pin: 'Band PIN' };
+
+function labelFor(f) {
+  return LABEL[f] || f.charAt(0).toUpperCase() + f.slice(1).replace(/_/g, ' ');
+}
+
+/** Capital in front, full stop behind. The server writes lowercase fragments. */
+function sentence(s) {
+  const t = String(s).trim();
+  if (!t) return '';
+  const c = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(c) ? c : `${c}.`;
+}
+
+/**
+ * Which box a message is about, read out of the server's own wording.
+ *
+ * Cheap, and it holds because the server names the field it is complaining
+ * about in every message it writes ("that username is taken", "password must be
+ * at least 4 characters"). The both-words case is the important one: "wrong
+ * username or password" is deliberately ambiguous so that a wrong username and
+ * a wrong password are indistinguishable to someone guessing, and pointing at
+ * either box would undo that.
+ */
+function fieldOf(msg) {
+  const m = String(msg).toLowerCase();
+  const u = m.includes('username');
+  const p = m.includes('password');
+  if (u && p) return null;
+  if (u) return 'username';
+  if (p) return 'password';
+  if (m.includes('name')) return 'name';
+  return null;
+}
+
+/**
+ * FastAPI's 422 body is a list of {loc, msg}.
+ *
+ * `loc` is ["body", "<field>"] and is the only place the field name appears --
+ * the bare `msg` is "Field required" for every box alike, so joining the msgs
+ * (which is what this did) produced "Field required, Field required".
+ */
+function fromValidation(items) {
+  const parts = [];
+  let field = null;
+  for (const it of items) {
+    const loc = Array.isArray(it.loc) ? it.loc.filter((x) => x !== 'body') : [];
+    const name = loc.length ? String(loc[loc.length - 1]) : null;
+    if (name && !field) field = name;
+    const msg = String(it.msg || 'is not valid').replace(/^value error,\s*/i, '');
+    parts.push(name ? `${labelFor(name)}: ${msg.toLowerCase()}` : msg);
+  }
+  return { message: parts.join('. ') || 'Some of that was not accepted.', field };
+}
+
+/**
+ * One Error shape for the whole app: a sentence to show, plus enough structure
+ * for a screen to do more than show it.
+ *
+ * `field` lets a form point at the box instead of only describing it, `status`
+ * lets the sign-in screen recognise a 429, and `kind` picks the icon. Callers
+ * that only read `.message` keep working.
+ */
+function apiError(message, { status = 0, field = null, kind = 'error', cause } = {}) {
+  const e = new Error(sentence(message));
+  e.status = status;
+  e.field = field;
+  e.kind = kind;
+  if (cause) e.cause = cause;
+  return e;
+}
+
+function kindOf(status) {
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 429) return 'rate';
+  if (status >= 500) return 'server';
+  return 'error';
+}
+
+/**
+ * Thin REST wrapper. Throws an Error carrying the server's own wording where
+ * there is any, because the server already writes errors a person can act on --
+ * and a sentence of this module's own where there is not, because the
+ * alternative reaching a user is a status code or a browser's internals.
  *
  * `timeout` is per call, and 8 s is the wrong number for exactly one endpoint.
  *
@@ -67,22 +188,54 @@ export async function call(session, path, { method = 'GET', body, timeout = 8000
     });
     const text = await res.text();
     let data = null;
-    try { data = text ? JSON.parse(text) : null; } catch { /* non-json */ }
+    let parsed = false;
+    try { data = text ? JSON.parse(text) : null; parsed = true; } catch { /* non-json */ }
+
     if (!res.ok) {
-      let msg = data && data.detail;
-      if (Array.isArray(msg)) msg = msg.map((m) => m.msg || JSON.stringify(m)).join(', ');
-      else if (typeof msg === 'object' && msg !== null) msg = JSON.stringify(msg);
-      throw new Error(msg || `server said ${res.status}`);
+      const detail = data && data.detail;
+      let message = null;
+      let field = null;
+      if (Array.isArray(detail)) {
+        ({ message, field } = fromValidation(detail));
+      } else if (typeof detail === 'string' && detail.trim()) {
+        message = detail.trim();
+        field = fieldOf(message);
+      }
+      // An object detail used to be JSON.stringify'd onto the screen. There is
+      // nothing in a serialised object a user can act on, so it falls through
+      // to the status sentence like any other unreadable body.
+      throw apiError(message || BY_STATUS[res.status] || `The server refused that (error ${res.status})`,
+                     { status: res.status, field, kind: kindOf(res.status) });
+    }
+
+    // A 200 whose body is not JSON is the app talking to something that is not
+    // this API -- a dev server's index page, a captive portal, a proxy. It used
+    // to return null here and surface a screen or two later as an unexplained
+    // "something went wrong"; saying so at the point it is known is the whole
+    // difference between a five-minute diagnosis and an afternoon's.
+    if (text && !parsed) {
+      const html = /^\s*(<!doctype|<html)/i.test(text);
+      throw apiError(
+        html
+          ? 'The server sent a web page instead of data — the app may be pointed at the wrong address'
+          : 'The server sent something this app could not read',
+        { status: res.status, kind: 'protocol' });
     }
     return data;
   } catch (e) {
+    if (e.kind) throw e;                       // already one of ours
     if (e.name === 'AbortError') {
-      throw new Error('the server did not answer — please check your internet connection.');
+      throw apiError('The server did not answer in time. Please check your connection and try again',
+                     { kind: 'timeout' });
     }
-    if (e.message === 'Network request failed') {
-      throw new Error('cannot reach the server — please check your internet connection.');
+    if (NETWORK_FAIL.test(e.message || '')) {
+      throw apiError('Cannot reach the server. Please check your internet connection and try again',
+                     { kind: 'network' });
     }
-    throw e;
+    // A bug in this module or a caller, not a server problem. The user gets a
+    // sentence; the original is kept on `cause` so it is still debuggable.
+    if (typeof __DEV__ !== 'undefined' && __DEV__) console.warn('[api]', method, path, e);
+    throw apiError('Something went wrong. Please try again', { kind: 'unknown', cause: e });
   } finally {
     clearTimeout(timer);
   }
