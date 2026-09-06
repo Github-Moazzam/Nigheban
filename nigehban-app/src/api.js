@@ -17,7 +17,7 @@ const KEY = 'nigehban.session';
 
 // export const SERVER_URL = 'https://nigheban.duckdns.org';
 
-export const SERVER_URL = 'http://localhost:8000';
+export const SERVER_URL = 'https://nigheban.duckdns.org';
 
 /** ws:// for a plain server, wss:// for a tunnel or the cloud. */
 export function wsUrl(httpUrl) {
