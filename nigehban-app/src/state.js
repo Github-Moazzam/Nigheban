@@ -173,7 +173,20 @@ const APPLY = {
     return { ...c, activeSos: alert, fall: null,
              responders: mergeResponders(same ? c.responders : [], alert?.acks) };
   },
-  SOS_CLEARED:    (c)    => ({ ...c, activeSos: null, responders: [] }),
+  // `checkin` and `fall` go with it, and that is the point rather than tidiness.
+  //
+  // An SOS covers whatever question was on screen when it started -- the fall
+  // countdown that escalated into it, the five-minute ones it asked itself --
+  // and clearing only `activeSos` left those underneath it. The SOS screen came
+  // down and the question it had been covering appeared a frame later, counting
+  // down to a deadline that passed while the family were being paged. To the
+  // wearer that is Nigehban asking, one second after they said they were safe,
+  // whether they are safe.
+  //
+  // Safe to clear unconditionally: standing down IS the answer. The server does
+  // the same thing to the same rows (see resolve_alert), so this is not the app
+  // deciding on its own that a question is closed -- it is the app agreeing.
+  SOS_CLEARED:    (c)    => ({ ...c, activeSos: null, responders: [], checkin: null, fall: null }),
   // `checkinId` is the difference between a question the server is holding and
   // one only this process is. Null means the phone was offline when the
   // detector fired, and the countdown running out has to raise the alert here

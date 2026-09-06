@@ -243,6 +243,25 @@ function Main() {
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   /**
+   * The sheet cannot outlive the question.
+   *
+   * `askSheet` is a copy of `ctx.checkin` that the modal renders from, and the
+   * two are set together at every point a question arrives. They were only ever
+   * torn down together at the points that existed when the sheet was written --
+   * and the list of ways a question can close has been growing ever since:
+   * answering it, a stand-down, an SOS ending, the server closing it because
+   * "I am safe" answered it. Each new one is another chance to clear the state
+   * machine's copy and leave a modal on screen asking a question that no longer
+   * exists, which is how somebody who has just said they are safe gets asked,
+   * a second later, whether they are safe.
+   *
+   * One effect instead of a `setAskSheet(null)` at every route out. Close only,
+   * never open: "Not now" deliberately drops the sheet while leaving the
+   * question open, and reopening it a frame later would take that away.
+   */
+  useEffect(() => { if (!ctx.checkin) setAskSheet(null); }, [ctx.checkin]);
+
+  /**
    * Put one piece of news on the screen, big, and leave it there.
    *
    * Appends rather than replaces. Two of these can land within a second of
@@ -692,6 +711,15 @@ function Main() {
       }
       const r = await call(session, `/alert/${id}/resolve`, { method: 'POST' });
       dispatch('SOS_CLEARED');
+      // Both, because this phone is not always in `sos_live` when it stands one
+      // down. A fall that escalated on the SERVER never raised an alert here --
+      // the machine is sitting in `checkin_pending` holding the fall's own
+      // question, which `recoverOpenWork` put back on screen -- and SOS_CLEARED
+      // is illegal there, so it is dropped and the question survives the
+      // stand-down. In `sos_live` this one is the dropped event instead, and
+      // SOS_CLEARED has already cleared the same field. Whichever state we are
+      // in, exactly one of these lands and the question closes.
+      dispatch('CHECKIN_CLOSED');
       setDeliveredTo(null);
       setDeliveryStatus(null);
       // The emergency is over; the journey is not. "I'm safe" gets pressed at
@@ -1463,6 +1491,7 @@ function Main() {
     // posted -- which is un-dismissable by design, so nothing else ever will.
     sos_cleared: (m) => {
       dispatch('SOS_CLEARED');
+      dispatch('CHECKIN_CLOSED');   // same pair, same reason as in `resolve`
       setDeliveredTo(null);
       setDeliveryStatus(null);
       clearOwnSosNotification();

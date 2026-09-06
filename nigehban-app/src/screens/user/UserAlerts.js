@@ -1,47 +1,45 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Linking, Pressable, RefreshControl,
-  StyleSheet, Text, View,
+  Pressable, RefreshControl, SectionList, StyleSheet, Text, View,
 } from 'react-native';
 import { call, optinSamaritan } from '../../api';
 
 import { S, T, fmtAgo } from '../../theme';
 import { Icon, Skeleton, SkeletonGroup, Txt } from '../../ui';
 import { RU, U } from './kit';
-import LiveMap from '../LiveMap';
-
-/** Every kind the server can write, said the way a person would say it. */
-const KIND = {
-  sos:            { title: 'SOS',                 icon: 'alert-octagon' },
-  snatch:         { title: 'Band torn off',       icon: 'alert-octagon' },
-  fall:           { title: 'Fall detected',       icon: 'trending-down' },
-  checkin_missed: { title: 'Missed check-in',     icon: 'clock' },
-  watch_lost:     { title: 'Went quiet while armed', icon: 'wifi-off' },
-  going_dark:     { title: 'Phone about to die',  icon: 'battery' },
-  checkin_req:    { title: 'Check-in asked',      icon: 'help-circle' },
-  checkin_ack:    { title: 'Checked in — fine',   icon: 'check-circle' },
-  low_battery:    { title: 'Phone battery low',   icon: 'battery' },
-  band_battery:   { title: 'Band battery low',    icon: 'battery' },
-  near_miss:      { title: 'Near miss — private', icon: 'eye-off' },
-};
+import { Action, tone, watchable } from './alertKit';
+import AlertDay from './AlertDay';
+import {
+  RANGES, buildSections, fmtClock, initials, kindOf, rangeAt,
+} from '../alertGroups';
 
 const SCOPES = [['incoming', 'From family'], ['mine', 'Mine']];
 
-/** Severity in the user palette. Mint is the resting state everywhere else too. */
-function tone(sev) {
-  if (sev >= 4) return U.red;
-  if (sev >= 2) return U.amber;
-  return U.mint;
-}
-
 /**
- * ALERTS — the record, and the actions a record still carries.
+ * ALERTS — one card per person per day, and the way into the day itself.
  *
- * Newest first and never grouped into days: an emergency from four minutes ago
- * does not belong under a heading. Two scopes, because they answer two
- * different questions -- "is my family alright" and "what did my band actually
- * do" -- and each one carries only the buttons that make sense for it. From
- * family: I have seen this, and open where they are. Mine: stand it down.
+ * The list used to be flat: every trigger the system had ever written, newest
+ * first, one card each. That is the correct *record* and the wrong *screen*.
+ * Five low-battery notes and a check-in push the one thing that matters off
+ * the fold, and a week of ordinary days looks exactly like the day something
+ * happened.
+ *
+ * So it is folded twice. By day, because "Today" is the only timeframe anybody
+ * opens this screen for; and inside the day by person, because the question is
+ * never "what events occurred" — it is "is Amma alright". One card per person
+ * per day, their name set large enough to find without reading.
+ *
+ * The detail is a page (AlertDay), not a drop-down. A card that unfolds into a
+ * timeline pushes every other card down the screen and loses the name it is
+ * about at the first flick; opening a page keeps the list exactly where it was
+ * and gives the day the whole screen.
+ *
+ * Two guarantees the folding does not get to break:
+ *
+ *   1. A live emergency is never folded away. It survives the date filter and
+ *      sorts to the top of its day.
+ *   2. If there is something to answer, its button is on the card — not one
+ *      navigation away. Summarising is allowed to cost a tap; responding is not.
  */
 export default function UserAlerts({ session, refreshKey, onResolve }) {
   const [scope, setScope] = useState('incoming');
@@ -51,10 +49,12 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
   const [busy, setBusy] = useState(null);
   const [acked, setAcked] = useState(() => new Set());
   const [err, setErr] = useState(null);
-  // The alert whose live map is open. Held here rather than lifted to App.js
-  // because this screen already has the row and the session, and threading a
-  // callback through UserShell to open a modal would be three files for one.
-  const [liveMap, setLiveMap] = useState(null);
+  // How far back the list reaches. Index into RANGES: today, a week, the lot.
+  const [rangeI, setRangeI] = useState(0);
+  // The open day page, held as a key rather than as the group object: the
+  // socket reloads this list under the page, and a page rendering the snapshot
+  // it was opened with would keep saying "still live" after a stand-down.
+  const [dayKey, setDayKey] = useState(null);
   const [, force] = useState(0);
 
   const load = useCallback(async () => {
@@ -70,6 +70,10 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
   }, [session, scope]);
 
   useEffect(() => { setLoading(true); load(); }, [load, refreshKey]);
+
+  // Switching scope is switching question. Nothing about the last answer --
+  // how far back it reached, whose day was open -- applies to the new one.
+  useEffect(() => { setRangeI(0); setDayKey(null); }, [scope]);
 
   // Every row on this screen is a relative time. Without a tick they freeze at
   // whatever they said when the list was built, which on a live alert is the
@@ -116,14 +120,39 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
     }
   };
 
+  const range = rangeAt(rangeI);
+  const { sections, hidden, shown, liveCount, needsCount } = useMemo(
+    () => buildSections(rows, {
+      rangeDays: range.days, scope, myId: session?.user_id, localAcked: acked,
+    }),
+    // `acked` is in the deps on purpose: answering an alert is what moves a
+    // group out of "waiting for you", and that has to show without a reload.
+    [rows, range.days, scope, session?.user_id, acked],
+  );
+
+  // The open day, re-found in the freshly built sections on every render, so
+  // the page redraws from the same data the list does. Holding the group
+  // object instead would leave the page saying "still live" after a stand-down
+  // it was watching.
+  const day = useMemo(() => {
+    if (!dayKey) return null;
+    for (const sec of sections) for (const g of sec.data) if (g.key === dayKey) return g;
+    return null;
+  }, [sections, dayKey]);
+
+  // What the page keeps showing while it slides shut. Without it the content
+  // is gone a frame before the animation is, which reads as a flicker.
+  const lastDay = useRef(null);
+  if (day) lastDay.current = day;
 
   return (
     <>
-      <FlatList
+      <SectionList
         style={s.root}
         contentContainerStyle={s.content}
-        data={rows}
-        keyExtractor={(a) => String(a.id)}
+        sections={sections}
+        keyExtractor={(g) => g.key}
+        stickySectionHeadersEnabled
         ItemSeparatorComponent={() => <View style={{ height: S.md }} />}
         refreshControl={(
           <RefreshControl
@@ -134,9 +163,10 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
         )}
         ListHeaderComponent={(
           <View style={s.header}>
-            <View style={{ gap: 2 }}>
+            <View style={{ gap: 3 }}>
               <Txt variant="h1" color={U.text}>Alerts</Txt>
-              <Text style={[T.meta, { color: U.faint }]}>Newest first</Text>
+              <Summary loading={loading} range={range} shown={shown}
+                       live={liveCount} needs={needsCount} scope={scope} />
             </View>
 
             <View style={s.segment}>
@@ -166,209 +196,308 @@ export default function UserAlerts({ session, refreshKey, onResolve }) {
             ) : null}
           </View>
         )}
-        ListEmptyComponent={loading ? (
-          <SkeletonGroup label="Loading alerts">
-            <AlertCardSkeleton />
-            <AlertCardSkeleton />
-            <AlertCardSkeleton />
-          </SkeletonGroup>
-        ) : (
-          <View style={s.empty}>
-            <Icon name={scope === 'incoming' ? 'shield' : 'activity'} size={22} color={U.faint} />
-            <Txt variant="h2" color={U.text}>
-              {scope === 'incoming' ? 'Nothing from your family' : 'You have not raised anything'}
-            </Txt>
-            <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
-              {scope === 'incoming'
-                ? 'That is the good outcome. Anything they raise lands here.'
-                : 'Your own alerts, check-ins and near misses are kept here.'}
-            </Text>
+        renderSectionHeader={({ section }) => (
+          <View style={s.dayHeadWrap}>
+            <Text style={s.dayHead}>{section.title.toUpperCase()}</Text>
           </View>
         )}
-        renderItem={({ item }) => {
-          const meta = KIND[item.kind] || { title: item.kind.replace(/_/g, ' '), icon: 'circle' };
-          const t = tone(item.severity);
-          const live = item.severity >= 4 && !item.resolved_at;
-          const mine = scope === 'mine';
-
-          return (
-            <View style={[s.card, live && { backgroundColor: U.redSoft }]}>
-              {live ? <View style={[s.accent, { backgroundColor: t }]} /> : null}
-
-              <View style={s.head}>
-                <View style={[s.mark, { backgroundColor: live ? t : U.raised }]}>
-                  <Icon name={meta.icon} size={16} color={live ? U.bg : t} />
-                </View>
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Txt variant="h2" color={U.text}>{meta.title}</Txt>
-                  <Text style={[T.meta, { color: U.dim }]}>
-                    {mine ? 'You' : item.user?.name || 'Family'}
-                    {item.source === 'band' ? ' · from the band'
-                      : item.source === 'server' ? ' · noticed by Nigehban'
-                      : ' · from the phone'}
-                  </Text>
-                </View>
-                <Text style={[T.meta, { color: U.faint }]}>{fmtAgo(item.created_at)}</Text>
-              </View>
-
-              {item.note ? (
-                <Text style={[T.meta, { color: U.dim }]}>{item.note}</Text>
-              ) : null}
-
-              <View style={s.chips}>
-                {item.resolved_at ? (
-                  <Chip icon="check" text={`stood down ${fmtAgo(item.resolved_at)}`} tint={U.mint} />
-                ) : live ? (
-                  <Chip icon="radio" text="still live" tint={t} />
-                ) : null}
-                {item.maps ? null : <Chip icon="map-pin" text="no location" tint={U.faint} />}
-                {acked.has(item.id) ? (
-                  <Chip icon="user-check" text="you are on it" tint={U.mint} />
-                ) : null}
-                {item.samaritan_status === 'allowed' ? (
-                  <Chip icon="users" text="helpers notified" tint={U.mint} />
-                ) : item.samaritan_status === 'denied' ? (
-                  <Chip icon="shield" text="family only" tint={U.faint} />
-                ) : null}
-              </View>
-
-              {/* Live while the server is still tracking, a plain pin after.
-                  The window outlives the stand-down by half an hour -- see
-                  TRACK_AFTER_STANDDOWN_S -- so a stood-down alert can still be
-                  worth watching while she walks home, and one from last Tuesday
-                  cannot. Getting that wrong in the other direction is the worse
-                  mistake: "watch live" over a dead link is a promise this list
-                  should never make. */}
-              {item.share_path && (!item.resolved_at
-                || (item.track_until && item.track_until > Date.now() / 1000)) ? (
-                <Action
-                  icon="navigation" label="Watch their live location"
-                  sub="The map moves as they do"
-                  onPress={() => setLiveMap(item)}
-                />
-              ) : item.maps ? (
-                <Action
-                  icon="map-pin" label="Open in maps"
-                  sub={item.accuracy ? `accurate to about ${Math.round(item.accuracy)} m` : null}
-                  onPress={() => Linking.openURL(item.maps)}
-                />
-              ) : null}
-
-              {/* The two things a record can still be. Answering somebody else's
-                  emergency, or ending your own -- never both on one card. */}
-              {!mine && item.severity >= 3 && !item.resolved_at && !acked.has(item.id) ? (
-                <Action
-                  filled tint={t} icon="user-check" label="I've seen this — I'm on it"
-                  busyLabel="Telling them…"
-                  busy={busy === item.id} onPress={() => ack(item)}
-                />
-              ) : null}
-
-              {/* If emergency is pending Good Samaritan consent, family can alert nearby helpers */}
-              {!mine && item.severity >= 4 && !item.resolved_at && item.samaritan_status === 'pending' ? (
-                <Action
-                  tint={U.mint} icon="users" label="📢 Alert Nearby Helpers"
-                  busyLabel="Alerting…"
-                  busy={busy === `samaritan-${item.id}`} onPress={() => handleOptin(item, 'allow')}
-                />
-              ) : null}
-
-              {mine && live ? (
-                <Action
-                  filled tint={U.mint} icon="shield" label="I am safe — stand down"
-                  busyLabel="Standing down…"
-                  busy={busy === item.id} onPress={() => standDown(item)}
-                />
-              ) : null}
-
-            </View>
-          );
-        }}
+        renderItem={({ item }) => (
+          <GroupCard
+            group={item}
+            scope={scope}
+            busy={busy}
+            onOpen={() => setDayKey(item.key)}
+            onAck={ack}
+            onStandDown={standDown}
+          />
+        )}
+        ListEmptyComponent={loading ? (
+          <SkeletonGroup label="Loading alerts">
+            <GroupCardSkeleton />
+            <GroupCardSkeleton />
+          </SkeletonGroup>
+        ) : (
+          <Empty scope={scope} hidden={hidden} />
+        )}
+        ListFooterComponent={loading ? null : (
+          <Footer
+            hidden={hidden}
+            next={range.next}
+            canReset={rangeI > 0}
+            onMore={() => setRangeI((i) => Math.min(i + 1, RANGES.length - 1))}
+            onReset={() => setRangeI(0)}
+          />
+        )}
       />
 
-      {/* The live map, over the list. Reached from a row rather than only
-          from the takeover, because the takeover is dismissed the moment
-          somebody taps 'I'm on it' -- and that is exactly when they start
-          driving and want to see where they are driving TO. */}
-      <LiveMap visible={!!liveMap} alert={liveMap} session={session}
-               onClose={() => setLiveMap(null)} />
+      {/* One person, one day, in full. It carries the live map itself. */}
+      <AlertDay
+        visible={!!day}
+        group={day || lastDay.current}
+        scope={scope}
+        session={session}
+        busy={busy}
+        onClose={() => setDayKey(null)}
+        onAck={ack}
+        onStandDown={standDown}
+        onSamaritan={handleOptin}
+      />
     </>
   );
 }
 
+// ------------------------------------------------------------ header ---
 /**
- * An alert card before its alert arrives.
+ * One line under the title saying what is on screen and what is wrong.
  *
- * Three of these rather than a spinner, because the question this screen
- * answers is "how many, and how bad" -- and a spinner in the middle of an
- * empty screen is indistinguishable from the answer being none.
+ * It exists because the fold hides counts: "Today · 6 events" is the thing the
+ * flat list used to say by simply being long. When something is live it stops
+ * being a count and becomes a sentence, in red, because that is the only fact
+ * on this screen that cannot wait for somebody to scroll.
  */
-function AlertCardSkeleton() {
+function Summary({ loading, range, shown, live, needs, scope }) {
+  if (loading) return <Text style={[T.meta, { color: U.faint }]}>Loading…</Text>;
+
+  if (live > 0) {
+    return (
+      <Text style={[T.bodyMed, { color: U.red }]}>
+        {live === 1 ? '1 emergency still live' : `${live} emergencies still live`}
+      </Text>
+    );
+  }
+  if (needs > 0) {
+    return (
+      <Text style={[T.bodyMed, { color: U.amber }]}>
+        {needs === 1 ? '1 alert waiting for you' : `${needs} alerts waiting for you`}
+      </Text>
+    );
+  }
   return (
-    <View style={s.card}>
-      <View style={s.head}>
-        <Skeleton width={34} height={34} radius={RU.inner} color={U.raised} />
-        <View style={{ flex: 1, gap: 6 }}>
-          <Skeleton width={140} height={17} color={U.raised} />
-          <Skeleton width={104} height={11} color={U.raised} />
+    <Text style={[T.meta, { color: U.faint }]}>
+      {range.label}
+      {shown > 0 ? ` · ${shown} event${shown === 1 ? '' : 's'}` : ''}
+      {shown > 0 ? (scope === 'mine' ? ' · all clear' : ' · nothing outstanding') : ''}
+    </Text>
+  );
+}
+
+// -------------------------------------------------------- group card ---
+/**
+ * A person, a day, and the state of it.
+ *
+ * Four facts and at most one button. The facts are who, how bad, what kinds,
+ * and how long ago; the button is whatever is still outstanding, and it is
+ * here rather than on the day page because a tap is an acceptable price for
+ * *reading* an emergency and not for *answering* one.
+ *
+ * Everything else — the timeline, the map, the note somebody typed — is one
+ * press away on the page. The whole card is that press.
+ */
+function GroupCard({ group, scope, busy, onOpen, onAck, onStandDown }) {
+  const live = group.live.length > 0;
+  const needs = group.needs.length > 0;
+  const mine = scope === 'mine';
+  const n = group.items.length;
+
+  // Status rides on the avatar, not on a rule down the edge of the card. A
+  // 3pt bar is the admin console's vocabulary, where corners are 8px and it
+  // reads as an instrument marking; against this shell's 24px radius it is a
+  // clipped sliver, and it breaks the one thing kit.js asks of this palette --
+  // that nothing on screen is coloured unless it is saying something. The
+  // avatar is already the thing the card is about, so it carries the state.
+  const mark = live
+    ? { backgroundColor: U.red, color: U.bg }
+    : needs
+      ? { backgroundColor: U.amberSoft, color: U.amber }
+      : { backgroundColor: U.raised, color: U.dim };
+
+  const clock = fmtClock(group.latest.created_at);
+  const when = group.dayLabel === 'Today'
+    ? fmtAgo(group.latest.created_at)
+    : `${clock.time} ${clock.meridiem}`;
+
+  const headline = live
+    ? (group.live.length === 1
+        ? `${kindOf(group.live[0]).title} · still live`
+        : `${group.live.length} emergencies still live`)
+    : needs
+      ? (group.needs.length === 1
+          ? `${kindOf(group.needs[0]).title} · needs your answer`
+          : `${group.needs.length} waiting for your answer`)
+      : n === 1
+        ? kindOf(group.items[0]).title
+        : `${n} events`;
+
+  // The one button, and the one row it belongs to. Ending your own emergency
+  // outranks answering somebody else's; both outrank looking at a map, which
+  // is not an answer and stays on the page.
+  const standTarget = mine && live ? group.live[0] : null;
+  const ackTarget = !mine && needs ? group.needs[0] : null;
+
+  return (
+    <View style={[s.card, live && { backgroundColor: U.redSoft }]}>
+      <Pressable
+        onPress={onOpen}
+        accessibilityRole="button"
+        accessibilityLabel={`${group.name}, ${headline}, ${group.dayLabel}`}
+        accessibilityHint={`Opens all ${n} event${n === 1 ? '' : 's'}`}
+        style={({ pressed }) => [s.groupHead, pressed && { opacity: 0.7 }]}
+      >
+        <View style={[s.avatar, { backgroundColor: mark.backgroundColor }]}>
+          <Text style={[s.avatarTxt, { color: mark.color }]}>{initials(group.name)}</Text>
         </View>
-        <Skeleton width={52} height={11} color={U.raised} />
-      </View>
-      <View style={s.chips}>
-        <Skeleton width={96} height={26} radius={RU.pill} color={U.raised} />
-        <Skeleton width={78} height={26} radius={RU.pill} color={U.raised} />
-      </View>
-    </View>
-  );
-}
 
-function Chip({ icon, text, tint }) {
-  return (
-    <View style={s.chip}>
-      <Icon name={icon} size={11} color={tint} />
-      <Text style={[T.label, { color: tint }]}>{text.toUpperCase()}</Text>
-    </View>
-  );
-}
+        <View style={{ flex: 1, gap: 3 }}>
+          <Text style={s.name} numberOfLines={1}>{group.name}</Text>
+          <Text
+            style={[live || needs ? T.bodyMed : T.meta,
+                    { color: live ? U.red : needs ? U.amber : U.dim }]}
+            numberOfLines={1}
+          >
+            {headline}
+          </Text>
+        </View>
 
-/**
- * Filled is the one thing to do next; outlined is everything else.
- *
- * `busy` keeps the words and swaps the icon for a spinner. It used to replace
- * the entire button with a bare spinner, which on a card that can carry either
- * "I'm on it" or "stand down" meant the one moment you most want to know which
- * one you pressed is the one moment the button will not say.
- */
-function Action({ icon, label, busyLabel, sub, onPress, filled, tint = U.mint, busy }) {
-  const fg = filled ? U.bg : U.dim;
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={busy}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ busy: !!busy, disabled: !!busy }}
-      style={({ pressed }) => [
-        s.action,
-        { backgroundColor: filled ? tint : U.raised },
-        busy && { opacity: 0.7 },
-        pressed && !busy && { opacity: 0.75 },
-      ]}
-    >
-      {busy ? (
-        <ActivityIndicator size="small" color={fg} />
-      ) : (
-        <Icon name={icon} size={16} color={fg} />
-      )}
-      <View>
-        <Text style={[T.button, { color: fg }]}>
-          {busy ? (busyLabel || label) : label}
-        </Text>
-        {sub && !busy ? (
-          <Text style={[T.meta, { color: fg, opacity: 0.8 }]}>{sub}</Text>
+        <View style={s.headRight}>
+          <Text style={s.when}>{when}</Text>
+          <Icon name="chevron-right" size={18} color={U.faint} />
+        </View>
+      </Pressable>
+
+      <View style={s.kindRow}>
+        {group.kinds.slice(0, 4).map((k) => (
+          <View key={k.kind} style={s.kindChip}>
+            <Icon name={k.icon} size={11} color={tone(k.severity)} />
+            <Text style={[T.label, { color: tone(k.severity) }]}>
+              {k.short.toUpperCase()}{k.n > 1 ? ` ×${k.n}` : ''}
+            </Text>
+          </View>
+        ))}
+        {group.kinds.length > 4 ? (
+          <View style={s.kindChip}>
+            <Text style={[T.label, { color: U.faint }]}>+{group.kinds.length - 4}</Text>
+          </View>
         ) : null}
       </View>
-    </Pressable>
+
+      {standTarget || ackTarget ? (
+        <View style={s.cardAction}>
+          {standTarget ? (
+            <Action
+              filled tint={U.mint} icon="shield" label="I am safe — stand down"
+              busyLabel="Standing down…"
+              busy={busy === standTarget.id}
+              onPress={() => onStandDown(standTarget)}
+            />
+          ) : (
+            <Action
+              filled tint={tone(ackTarget.severity)} icon="user-check"
+              label="I've seen this — I'm on it" busyLabel="Telling them…"
+              sub={watchable(ackTarget) ? 'Their live map is inside' : null}
+              busy={busy === ackTarget.id}
+              onPress={() => onAck(ackTarget)}
+            />
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ------------------------------------------------------------ footer ---
+/**
+ * History, on request.
+ *
+ * The default view is today, so this is how last week is reached. It says how
+ * much is behind it rather than just "more", because "12 earlier events" is
+ * the answer to the question somebody is actually asking when they look at the
+ * bottom of a safety log.
+ */
+function Footer({ hidden, next, canReset, onMore, onReset }) {
+  if (!hidden && !canReset) return null;
+  return (
+    <View style={{ gap: S.sm, marginTop: S.lg }}>
+      {hidden > 0 && next ? (
+        <Pressable onPress={onMore} accessibilityRole="button"
+                   accessibilityLabel={`${next}, ${hidden} earlier events`}
+                   style={({ pressed }) => [s.more, pressed && { opacity: 0.7 }]}>
+          <Icon name="chevron-down" size={16} color={U.dim} />
+          <View>
+            <Text style={[T.button, { color: U.dim }]}>{next}</Text>
+            <Text style={[T.meta, { color: U.faint }]}>
+              {hidden} earlier {hidden === 1 ? 'event' : 'events'}
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
+      {canReset ? (
+        <Pressable onPress={onReset} accessibilityRole="button"
+                   style={({ pressed }) => [s.reset, pressed && { opacity: 0.6 }]}>
+          <Text style={[T.meta, { color: U.faint }]}>Back to today</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * What the screen says when the fold, not the world, is why it is empty.
+ *
+ * "Nothing from your family" is a good answer and a dangerous one to give
+ * wrongly. If there are older events sitting behind the date filter this says
+ * so, because a person who reads "nothing" and stops looking has been misled
+ * by a default they never chose.
+ */
+function Empty({ scope, hidden }) {
+  if (hidden > 0) {
+    return (
+      <View style={s.empty}>
+        <Icon name="calendar" size={22} color={U.faint} />
+        <Txt variant="h2" color={U.text}>Nothing today</Txt>
+        <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
+          {hidden} earlier {hidden === 1 ? 'event is' : 'events are'} kept below.
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={s.empty}>
+      <Icon name={scope === 'incoming' ? 'shield' : 'activity'} size={22} color={U.faint} />
+      <Txt variant="h2" color={U.text}>
+        {scope === 'incoming' ? 'Nothing from your family' : 'You have not raised anything'}
+      </Txt>
+      <Text style={[T.meta, { color: U.dim, textAlign: 'center' }]}>
+        {scope === 'incoming'
+          ? 'That is the good outcome. Anything they raise lands here.'
+          : 'Your own alerts, check-ins and near misses are kept here.'}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * A group card before its group arrives.
+ *
+ * Two of these rather than a spinner, because the question this screen answers
+ * is "how many, and how bad" -- and a spinner in the middle of an empty screen
+ * is indistinguishable from the answer being none.
+ */
+function GroupCardSkeleton() {
+  return (
+    <View style={s.card}>
+      <View style={s.groupHead}>
+        <Skeleton width={44} height={44} radius={RU.pill} color={U.raised} />
+        <View style={{ flex: 1, gap: 7 }}>
+          <Skeleton width={150} height={22} color={U.raised} />
+          <Skeleton width={96} height={12} color={U.raised} />
+        </View>
+        <Skeleton width={44} height={12} color={U.raised} />
+      </View>
+      <View style={s.kindRow}>
+        <Skeleton width={84} height={24} radius={RU.pill} color={U.raised} />
+        <Skeleton width={66} height={24} radius={RU.pill} color={U.raised} />
+      </View>
+    </View>
   );
 }
 
@@ -376,7 +505,7 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: U.bg },
   content: { padding: S.lg, paddingBottom: S.xxl },
 
-  header: { gap: S.md, marginBottom: S.md },
+  header: { gap: S.md, marginBottom: S.sm },
   segment: {
     flexDirection: 'row', backgroundColor: U.card,
     borderRadius: RU.pill, padding: 4,
@@ -390,28 +519,46 @@ const s = StyleSheet.create({
     backgroundColor: U.redSoft, borderRadius: RU.card, padding: S.md,
   },
 
-  card: {
-    backgroundColor: U.card, borderRadius: RU.card,
-    padding: S.lg, gap: S.md, overflow: 'hidden',
+  // The day heading. Sticky, on the ground colour rather than on a card, so it
+  // reads as a divider in the scroll rather than as another thing to press.
+  dayHeadWrap: { backgroundColor: U.bg, paddingTop: S.md, paddingBottom: S.sm },
+  dayHead: { ...T.label, color: U.faint, letterSpacing: 1.4 },
+
+  card: { backgroundColor: U.card, borderRadius: RU.card, overflow: 'hidden' },
+
+  groupHead: {
+    flexDirection: 'row', alignItems: 'center', gap: S.md,
+    padding: S.lg, paddingBottom: S.md, minHeight: 80,
   },
-  accent: { position: 'absolute', left: 0, top: S.lg, bottom: S.lg, width: 3 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: S.md },
-  mark: {
-    width: 34, height: 34, borderRadius: RU.inner,
+  avatar: {
+    width: 44, height: 44, borderRadius: RU.pill, backgroundColor: U.raised,
     alignItems: 'center', justifyContent: 'center',
   },
+  avatarTxt: { ...T.title, color: U.dim, letterSpacing: 0.3 },
 
-  chips: { flexDirection: 'row', gap: S.sm, flexWrap: 'wrap' },
-  chip: {
+  // The one piece of type on this screen that is meant to be read across a
+  // room: the name of the person the card is about.
+  name: { ...T.h1, color: U.text },
+  headRight: { alignItems: 'flex-end', gap: 8 },
+  when: { ...T.meta, color: U.faint, fontSize: 12, fontVariant: ['tabular-nums'] },
+
+  kindRow: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: S.sm,
+    paddingHorizontal: S.lg, paddingBottom: S.lg,
+  },
+  kindChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     backgroundColor: U.raised, borderRadius: RU.pill,
     paddingHorizontal: S.md, paddingVertical: 6,
   },
+  cardAction: { paddingHorizontal: S.lg, paddingBottom: S.lg },
 
-  action: {
+  more: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: S.sm,
-    minHeight: 48, borderRadius: RU.inner, paddingHorizontal: S.md,
+    minHeight: 52, borderRadius: RU.inner, backgroundColor: U.card,
+    paddingHorizontal: S.lg,
   },
+  reset: { minHeight: 40, alignItems: 'center', justifyContent: 'center' },
 
   empty: {
     alignItems: 'center', gap: S.sm,
