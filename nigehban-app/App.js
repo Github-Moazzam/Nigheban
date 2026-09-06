@@ -53,7 +53,6 @@ import {
   stopBandWake,
 } from './src/bandWake';
 import { runFirstRunAsks } from './src/permissions';
-import { clearPin } from './src/security';
 import {
   DEFAULT_CHANNEL_ID, clearOwnSosNotification, registerPushToken,
   sendEmergencyAlarmIfNothingShown, setupNotificationChannels,
@@ -1825,7 +1824,20 @@ function Main() {
     await stopBackgroundWatch();
     await clearSession();
     await clearQueue();
-    await clearPin();
+    // The four-digit security PIN is deliberately NOT touched here.
+    //
+    // It used to be, by way of a clearPin() that read like the general one and
+    // was in fact the disarm PIN specifically -- so signing out and back in on
+    // your own phone silently threw away the gate in front of High Alert and
+    // family removal, and the next arm disarmed on one tap with nothing to ask
+    // for. The band's six digits, which is what this step was ever meant to
+    // forget, are already gone: band.disconnect() above clears them, and says
+    // so at the top of disconnect() in band.js.
+    //
+    // What made the wipe look necessary was a single handset-wide key, which
+    // would have handed the next account a PIN it could not open. The key
+    // carries an account now, so there is nothing left to inherit and nothing
+    // left to destroy -- see security.js.
     dispatch('RESET');
     setSession(null);
     setIncoming(null);
